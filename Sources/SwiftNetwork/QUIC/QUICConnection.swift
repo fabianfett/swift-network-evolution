@@ -512,7 +512,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             ) { firedAt, timerState in
                 self.fireDelayedAckTimer(at: firedAt, in: &timerState)
             }
-            self.ack = Ack(connection: self, timerID: ackTimerID, logPrefixer: logPrefixer)
+            self.ack = Ack(isRunning: true, timerID: ackTimerID, logPrefixer: logPrefixer)
 
             let recoveryTimerID = timer.insert(
                 description: "Recovery",
@@ -2591,13 +2591,17 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         // Send pending acks
         if !state.isTerminal {
-            _ = ack.processPending(
+            let outcome = ack.processPending(
+                on: currentPath,
                 connectionWindow: Int(self.flowControlState.remainingOutboundBytesAllowed),
                 isAckSet: isAckSet,
                 setAckFrame: scheduleAckFrame,
                 ecn: ecn,
-                in: &eventContext
+                now: self.now
             )
+            if case .delay(let timerID, let delay) = outcome {
+                timer.reschedule(identifier: timerID, fromNow: delay, timerNow: self.now, in: &eventContext)
+            }
         }
 
         // Try to send more data on all streams due to a received MAX_DATA or ACK
@@ -3092,7 +3096,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
     func cleanupAndLogFinalData(in eventContext: inout NetworkContext.EventContext) {
         timer.stop(in: &eventContext)
-        ack.reset(in: &eventContext)
+        if ack.reset() {
+            timer.stop(in: &eventContext)
+        }
         recovery.resetAll(in: &eventContext)
         currentPath = nil
         logSummary()
@@ -3325,7 +3331,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     ) {
         let wasBorrowing = isBorrowingRecoveryAckState
         isBorrowingRecoveryAckState = true
-        ack.timerFired(at: firedAt, in: &eventContext)
+        delayedAckTimerFired(at: firedAt, in: &eventContext)
         isBorrowingRecoveryAckState = wasBorrowing
         if !wasBorrowing, deferredSendFramesRequested {
             deferredSendFramesRequested = false
@@ -3335,6 +3341,47 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             // frame was still scheduled but not yet sent, so it couldn't observe idleness.
             // Check again now that the flush has actually cleared the pending ACK.
             checkConnectionIdle(unackedPacketCount: ack.unackedPacketCount, in: &eventContext)
+        }
+    }
+
+    private func delayedAckTimerFired(
+        at timeNow: NetworkClock.Instant,
+        in eventContext: inout NetworkContext.EventContext
+    ) {
+        log.datapath("Delayed ACK timer fired")
+        guard ack.isRunning else {
+            return
+        }
+        if sendPendingAck(now: timeNow, in: &eventContext) {
+            sendFrames(delayedACK: true, in: &eventContext)
+
+            // An ACK-only packet is not ack-eliciting, so once it is sent
+            // there is nothing left in pending items or in recovery to
+            // observe. This is the only place that can return the
+            // connection to idle after a delayed ACK.
+            checkConnectionIdle(unackedPacketCount: ack.unackedPacketCount, in: &eventContext)
+        }
+    }
+
+    /// Schedules the pending ACK frames and cancels the delayed ACK. Returns whether there is an ACK
+    /// to send.
+    func sendPendingAck(now: NetworkClock.Instant, in eventContext: inout NetworkContext.EventContext) -> Bool {
+        guard ack.isRunning else {
+            return false
+        }
+        let shouldSend = withCurrentPath { path in
+            ack.sendPending(on: path, isAckSet: isAckSet, setAckFrame: scheduleAckFrame, ecn: ecn, now: now)
+        }
+        if let timerID = ack.cancelDelayedAck() {
+            timer.reschedule(identifier: timerID, fromNow: .zero, timerNow: now, in: &eventContext)
+        }
+        return shouldSend
+    }
+
+    /// Arms the delayed ACK timer unless it is already armed.
+    func scheduleDelayedAck(in eventContext: inout NetworkContext.EventContext) {
+        if let (timerID, delay) = ack.scheduleDelayedAck() {
+            timer.reschedule(identifier: timerID, fromNow: delay, timerNow: self.now, in: &eventContext)
         }
     }
 
@@ -3386,7 +3433,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         // unless an immediate ACK needs to be processed.
         guard !applicationPendingItems.isAckOnly || delayedACK || ack.immediateAcks > 0 else {
             // Make sure the ack-delay timer is armed if returning early
-            ack.scheduleDelayedAck(in: &eventContext)
+            scheduleDelayedAck(in: &eventContext)
             return false
         }
         guard let path = currentPath else {

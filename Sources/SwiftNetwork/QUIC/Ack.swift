@@ -426,7 +426,7 @@ struct AckBlockSequence: Sequence {
 }
 
 @available(Network 0.1.0, *)
-struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
+struct Ack: ~Copyable, PrefixedLoggable {
     package var log: LogPrefixer
 
     // When an outgoing ACK reports more than this many blocks (i.e. this many gaps
@@ -470,7 +470,8 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
     var unackedPacketCount = 0
     var lastSentTime: NetworkClock.Instant = .zero
     var timerID: Timer.TimerID? = nil
-    var connection: QUICConnection?
+    // Whether a connection drives this instance: from `setup` until `reset`.
+    private(set) var isRunning = false
     var disableAckCompression: Bool = false
 
     struct Flags: OptionSet {
@@ -502,8 +503,8 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
     // Sequence number of the last received ACK_FREQUENCY frame.
     var receivedFrequencySequence = 0
 
-    init(connection: QUICConnection? = nil, timerID: Timer.TimerID? = 0, logPrefixer: LogPrefixer) {
-        self.connection = connection
+    init(isRunning: Bool = false, timerID: Timer.TimerID? = 0, logPrefixer: LogPrefixer) {
+        self.isRunning = isRunning
         self.timerID = timerID
         self.log = logPrefixer
         self.initialAckSpace = AckSpace(logPrefixer: logPrefixer)
@@ -511,36 +512,10 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
         self.applicationAckSpace = AckSpace(logPrefixer: logPrefixer)
     }
 
-    mutating func reset(in eventContext: inout NetworkContext.EventContext) {
-        connection?.timer.stop(in: &eventContext)
-        connection = nil
-    }
-
-    deinit {
-        if let timerID = timerID {
-            connection?.timer.remove(timerID)
-        }
-    }
-
-    mutating func timerFired(at timeNow: NetworkClock.Instant, in eventContext: inout NetworkContext.EventContext) {
-        log.datapath("Delayed ACK timer fired")
-        if let connection = connection {
-            if sendPending(
-                isAckSet: connection.isAckSet,
-                setAckFrame: connection.scheduleAckFrame,
-                ecn: connection.ecn,
-                now: timeNow,
-                in: &eventContext
-            ) {
-                connection.sendFrames(delayedACK: true, in: &eventContext)
-
-                // An ACK-only packet is not ack-eliciting, so once it is sent
-                // there is nothing left in pending items or in recovery to
-                // observe. This is the only place that can return the
-                // connection to idle after a delayed ACK.
-                connection.checkConnectionIdle(unackedPacketCount: unackedPacketCount, in: &eventContext)
-            }
-        }
+    /// Stops driving this instance. Returns whether it was running.
+    mutating func reset() -> Bool {
+        defer { isRunning = false }
+        return isRunning
     }
 
     @discardableResult
@@ -703,35 +678,30 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
         return shouldSend
     }
 
+    /// Schedules the pending ACKs on `path`. Returns whether there is an ACK to send.
     mutating func sendPending(
+        on path: QUICPath,
         isAckSet: (PacketNumberSpace) -> Bool,
         setAckFrame: (PacketNumberSpace, consuming QUICFrame, Bool) -> Void,
         ecn: borrowing ECN,
-        now: NetworkClock.Instant,
-        in eventContext: inout NetworkContext.EventContext
+        now: NetworkClock.Instant
     ) -> Bool {
-        guard let connection else {
-            return false
+        schedulePending(
+            on: path,
+            isAckSet: isAckSet,
+            setAckFrame: setAckFrame,
+            ecn: ecn,
+            now: now
+        )
+    }
+
+    /// Cancels the delayed ACK. Returns the timer to disable, if it was scheduled.
+    mutating func cancelDelayedAck() -> Timer.TimerID? {
+        guard timerScheduled, let timerID else {
+            return nil
         }
-        let shouldSend = connection.withCurrentPath { path in
-            schedulePending(
-                on: path,
-                isAckSet: isAckSet,
-                setAckFrame: setAckFrame,
-                ecn: ecn,
-                now: now
-            )
-        }
-        if timerScheduled, let timerID = timerID {
-            connection.timer.reschedule(
-                identifier: timerID,
-                fromNow: .zero,
-                timerNow: now,
-                in: &eventContext
-            )
-            timerScheduled = false
-        }
-        return shouldSend
+        timerScheduled = false
+        return timerID
     }
 
     static func blockSequence(
@@ -767,23 +737,31 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
         )
     }
 
-    mutating func scheduleDelayedAck(in eventContext: inout NetworkContext.EventContext) {
+    /// Schedules the delayed ACK. Returns the timer to arm and its delay, unless the delayed ACK is
+    /// already scheduled or there is no timer to arm.
+    mutating func scheduleDelayedAck() -> (timerID: Timer.TimerID, delay: NetworkDuration)? {
         // ACK timer is already scheduled
         if timerScheduled {
-            return
+            return nil
         }
         timerScheduled = true
         log.datapath("Scheduling delayed ACK in \(maxDelay)")
-        if let timerID = timerID {
-            if let connection {
-                connection.timer.reschedule(
-                    identifier: timerID,
-                    fromNow: maxDelay,
-                    timerNow: connection.now,
-                    in: &eventContext
-                )
-            }
+        guard isRunning, let timerID else {
+            return nil
         }
+        return (timerID, maxDelay)
+    }
+
+    /// The outcome of processing the pending ACKs after a batch of inbound packets.
+    enum PendingOutcome: Equatable {
+        /// There is no ACK to send.
+        case none
+        /// The ACK is delayed; the owner arms the delayed ACK timer.
+        case delay(timerID: Timer.TimerID, delay: NetworkDuration)
+        /// The ACK is delayed and its timer is already armed.
+        case delayed
+        /// The ACK frames are scheduled.
+        case scheduled
     }
 
     private mutating func processPending(
@@ -792,8 +770,8 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
         isAckSet: (PacketNumberSpace) -> Bool,
         setAckFrame: (PacketNumberSpace, consuming QUICFrame, Bool) -> Void,
         ecn: borrowing ECN,
-        in eventContext: inout NetworkContext.EventContext
-    ) -> Bool {
+        now: NetworkClock.Instant
+    ) -> PendingOutcome {
         // If the peer asked us to, delay the ACK.
         // Otherwise, delay the ACK if we are not forcing ACKs immediately
         // and either a or b is true. a. Only one unacked packet (if only a.
@@ -805,7 +783,6 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
         // 3. We have less than N (packet tolerance) unacked packets
         // 4. We haven't waited for 1/2 RTT (time tolerance)
         let delayedTime = min(maxDelay, path.rtt.smoothedRTT / 2)
-        let now = path.parentProtocol.now
         if immediateAcks == 0
             && (unackedPacketCount == 1
                 || connectionWindow > 2 * FlowControlGlobals.shared.initialConnectionReceiveSpace
@@ -814,42 +791,44 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
                     && unackedPacketCount < packetThreshold
                     && now < lastSentTime.advanced(by: delayedTime))
         {
-            scheduleDelayedAck(in: &eventContext)
-            return false
+            guard let (timerID, delay) = scheduleDelayedAck() else {
+                return .delayed
+            }
+            return .delay(timerID: timerID, delay: delay)
         } else {
             log.datapath("Sending ACKs immediately")
-            return schedulePending(
+            let shouldSend = schedulePending(
                 on: path,
                 isAckSet: isAckSet,
                 setAckFrame: setAckFrame,
                 ecn: ecn,
                 now: now
             )
+            return shouldSend ? .scheduled : .none
         }
     }
 
     mutating func processPending(
+        on path: QUICPath?,
         connectionWindow: Int,
         isAckSet: (PacketNumberSpace) -> Bool,
         setAckFrame: (PacketNumberSpace, consuming QUICFrame, Bool) -> Void,
         ecn: borrowing ECN,
-        in eventContext: inout NetworkContext.EventContext
-    ) -> Bool {
+        now: NetworkClock.Instant
+    ) -> PendingOutcome {
         if unackedPacketCount < 1 {
             // If there are no unacked packets, do nothing
-            return false
+            return .none
         }
-        guard let connection else { return false }
-        return connection.withCurrentPath { path in
-            processPending(
-                on: path,
-                connectionWindow: connectionWindow,
-                isAckSet: isAckSet,
-                setAckFrame: setAckFrame,
-                ecn: ecn,
-                in: &eventContext
-            )
-        }
+        guard isRunning, let path else { return .none }
+        return processPending(
+            on: path,
+            connectionWindow: connectionWindow,
+            isAckSet: isAckSet,
+            setAckFrame: setAckFrame,
+            ecn: ecn,
+            now: now
+        )
     }
 
     mutating func acknowledged(
