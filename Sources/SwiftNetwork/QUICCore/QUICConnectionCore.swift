@@ -27,7 +27,7 @@ internal import DequeModule
 /// acts on the events from ``nextEvent()``.
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
-public struct QUICConnectionStateMachine: ~Copyable {
+public struct QUICConnectionCore: ~Copyable {
     public struct Configuration {
         public var tlsOptions: SwiftTLSProtocol.Options
         public var initialMaxData: UInt64 = 1 << 20
@@ -655,7 +655,7 @@ extension Array where Element == CoreAckTracker {
 // MARK: - Handshake state for drivers
 
 @available(Network 0.1.0, *)
-extension QUICConnectionStateMachine {
+extension QUICConnectionCore {
     /// Whether the TLS handshake completed.
     public var isHandshakeComplete: Bool {
         self.handshake.isComplete

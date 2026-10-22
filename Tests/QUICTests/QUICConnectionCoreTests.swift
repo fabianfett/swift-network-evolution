@@ -27,19 +27,19 @@ import Crypto
 /// Two state machines connected back to back, driven in lockstep with a manual clock.
 @available(Network 0.1.0, *)
 private struct LockstepPair: ~Copyable {
-    var client: QUICConnectionStateMachine
-    var server: QUICConnectionStateMachine?
+    var client: QUICConnectionCore
+    var server: QUICConnectionCore?
     var now = NetworkClock.Instant(milliseconds: 1_000)
-    let serverConfiguration: QUICConnectionStateMachine.Configuration
+    let serverConfiguration: QUICConnectionCore.Configuration
     /// Datagrams in flight, per direction.
     var toServer: [[UInt8]] = []
     var toClient: [[UInt8]] = []
-    var clientEvents: [QUICConnectionStateMachine.Event] = []
-    var serverEvents: [QUICConnectionStateMachine.Event] = []
+    var clientEvents: [QUICConnectionCore.Event] = []
+    var serverEvents: [QUICConnectionCore.Event] = []
 
     init(
-        clientConfiguration: QUICConnectionStateMachine.Configuration? = nil,
-        serverConfiguration: QUICConnectionStateMachine.Configuration? = nil
+        clientConfiguration: QUICConnectionCore.Configuration? = nil,
+        serverConfiguration: QUICConnectionCore.Configuration? = nil
     ) {
         let serverKey = P256.Signing.PrivateKey()
         var clientTLS = SwiftTLSProtocol.Options()
@@ -50,12 +50,12 @@ private struct LockstepPair: ~Copyable {
         serverTLS.applicationProtocols = ["qsm-test"]
         serverTLS.rawPrivateKey = [UInt8](serverKey.rawRepresentation)
 
-        var clientConfiguration = clientConfiguration ?? QUICConnectionStateMachine.Configuration(tlsOptions: clientTLS)
+        var clientConfiguration = clientConfiguration ?? QUICConnectionCore.Configuration(tlsOptions: clientTLS)
         clientConfiguration.tlsOptions = clientTLS
-        var serverConfiguration = serverConfiguration ?? QUICConnectionStateMachine.Configuration(tlsOptions: serverTLS)
+        var serverConfiguration = serverConfiguration ?? QUICConnectionCore.Configuration(tlsOptions: serverTLS)
         serverConfiguration.tlsOptions = serverTLS
         self.serverConfiguration = serverConfiguration
-        self.client = QUICConnectionStateMachine(
+        self.client = QUICConnectionCore(
             clientWith: clientConfiguration,
             localConnectionID: QUICConnectionID(8),
             destinationConnectionID: QUICConnectionID(8),
@@ -63,7 +63,7 @@ private struct LockstepPair: ~Copyable {
         )
     }
 
-    static func drain(_ machine: inout QUICConnectionStateMachine, now: NetworkClock.Instant) -> [[UInt8]] {
+    static func drain(_ machine: inout QUICConnectionCore, now: NetworkClock.Instant) -> [[UInt8]] {
         var datagrams: [[UInt8]] = []
         var buffer = [UInt8](repeating: 0, count: 1500)
         while true {
@@ -75,8 +75,8 @@ private struct LockstepPair: ~Copyable {
         return datagrams
     }
 
-    static func events(_ machine: inout QUICConnectionStateMachine) -> [QUICConnectionStateMachine.Event] {
-        var events: [QUICConnectionStateMachine.Event] = []
+    static func events(_ machine: inout QUICConnectionCore) -> [QUICConnectionCore.Event] {
+        var events: [QUICConnectionCore.Event] = []
         while let event = machine.nextEvent() {
             events.append(event)
         }
@@ -101,7 +101,7 @@ private struct LockstepPair: ~Copyable {
             self.toServer += Self.drain(&self.client, now: self.now)
             if self.server == nil, let first = self.toServer.first {
                 let ids = Self.connectionIDs(ofInitial: first)
-                self.server = QUICConnectionStateMachine(
+                self.server = QUICConnectionCore(
                     serverWith: self.serverConfiguration,
                     localConnectionID: QUICConnectionID(8),
                     originalDestinationConnectionID: ids.destination,
@@ -137,7 +137,7 @@ private struct LockstepPair: ~Copyable {
     }
 
     private static func drainCount(
-        _ machine: inout QUICConnectionStateMachine,
+        _ machine: inout QUICConnectionCore,
         now: NetworkClock.Instant,
         into queue: inout [[UInt8]]
     ) -> Int {
@@ -165,7 +165,7 @@ private struct LockstepPair: ~Copyable {
 }
 
 @available(Network 0.1.0, *)
-final class QUICConnectionStateMachineTests: XCTestCase {
+final class QUICConnectionCoreTests: XCTestCase {
     func testHandshakeCompletes() {
         var pair = LockstepPair()
         pair.exchange()

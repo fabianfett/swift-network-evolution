@@ -17,7 +17,7 @@
 #if !NETWORK_NO_SWIFT_QUIC
 
 @available(Network 0.1.0, *)
-extension QUICConnectionStateMachine {
+extension QUICConnectionCore {
     static let tagLength = 16
     static let minimumInitialDatagramSize = 1200
 

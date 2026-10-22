@@ -49,7 +49,7 @@ enum CoreTransportError {
 }
 
 @available(Network 0.1.0, *)
-extension QUICConnectionStateMachine {
+extension QUICConnectionCore {
     /// Processes one received UDP datagram. Decrypts in place.
     public mutating func receive(_ datagram: inout MutableSpan<UInt8>, now: NetworkClock.Instant) {
         switch self.state {
