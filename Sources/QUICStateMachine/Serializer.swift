@@ -18,7 +18,7 @@ import Foundation
 
 #if canImport(BasicContainers)
 import BasicContainers
-package import DequeModule
+internal import DequeModule
 #endif
 
 @_spi(ProtocolProvider)

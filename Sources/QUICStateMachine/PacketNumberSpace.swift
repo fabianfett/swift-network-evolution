@@ -16,20 +16,20 @@
 
 #if canImport(BasicContainers)
 import BasicContainers
-package import DequeModule
+internal import DequeModule
 #endif
 
 #if canImport(Glibc)
 import Glibc
-package import Logging
+internal import Logging
 #elseif canImport(Android)
 import Android
-package import Logging
+internal import Logging
 #elseif canImport(Musl)
 import Musl
-package import Logging
+internal import Logging
 #elseif canImport(os)
-package import os
+internal import os
 #endif
 
 @available(Network 0.1.0, *)

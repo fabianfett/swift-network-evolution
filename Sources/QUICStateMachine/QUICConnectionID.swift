@@ -21,15 +21,15 @@ package import DequeModule
 
 #if canImport(Glibc)
 import Glibc
-package import Logging
+internal import Logging
 #elseif canImport(Android)
 import Android
-package import Logging
+internal import Logging
 #elseif canImport(Musl)
 import Musl
-package import Logging
+internal import Logging
 #elseif canImport(os)
-package import os
+internal import os
 #endif
 
 package enum QUICConnectionIDError: Int {

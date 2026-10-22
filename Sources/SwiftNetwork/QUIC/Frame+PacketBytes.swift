@@ -29,7 +29,7 @@ extension Frame {
         var newEnd = originalEnd
         let result: Result
         do {
-            guard var storage = self.fullMutableSpan else {
+            guard let storage = self.fullMutableSpan else {
                 return nil
             }
             var packetBytes = PacketBytes(storage, startOffset: originalStart, endOffset: originalEnd)

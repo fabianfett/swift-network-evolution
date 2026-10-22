@@ -45,7 +45,7 @@ package struct PacketBytes: ~Copyable, ~Escapable {
         @_lifetime(&self)
         mutating get {
             let range = self.startOffset..<(self.storage.count - self.endOffset)
-            return self.storage.extracting(range)
+            return self.storage._mutatingExtracting(range)
         }
     }
 

@@ -114,10 +114,10 @@ extension Logger {
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogError(_ message: StaticString) {
+package func outlinedProtoLogError(_ message: StaticString) {
     #if !DisableErrorLogging
     Logger.proto.error("\(message)")
     #endif
@@ -126,10 +126,10 @@ extension Logger {
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogError<Value: FixedWidthInteger>(
+package func outlinedProtoLogError<Value: FixedWidthInteger>(
     _ message: StaticString,
     _ value: Value
 ) {
@@ -141,10 +141,10 @@ extension Logger {
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger>(
+package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
     _ second: Second
@@ -157,10 +157,9 @@ extension Logger {
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline
 package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger, Third: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
@@ -175,10 +174,10 @@ package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthI
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogFault(_ message: StaticString) {
+package func outlinedProtoLogFault(_ message: StaticString) {
     #if !DisableErrorLogging
     Logger.proto.fault("\(message)")
     #endif
@@ -187,10 +186,10 @@ package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthI
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogFault<Value: FixedWidthInteger>(
+package func outlinedProtoLogFault<Value: FixedWidthInteger>(
     _ message: StaticString,
     _ value: Value
 ) {
@@ -202,10 +201,10 @@ package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthI
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger>(
+package func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
     _ second: Second
@@ -218,10 +217,9 @@ package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthI
 #if DisableErrorLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline
 package func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger, Third: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
@@ -236,10 +234,10 @@ package func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthI
 #if DisableDebugLogging
 @inline(always)
 #else
-@inline(never)
+@inline(never) @usableFromInline
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-@usableFromInline package func outlinedProtoLogInfo(_ message: StaticString) {
+package func outlinedProtoLogInfo(_ message: StaticString) {
     #if !DisableDebugLogging
     Logger.proto.info("\(message)")
     #endif
