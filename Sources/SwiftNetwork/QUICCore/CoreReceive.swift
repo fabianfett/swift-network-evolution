@@ -428,7 +428,7 @@ extension QUICConnectionCore {
             case .crypto(let offset, let length):
                 self.handshake.send[space].onAcked(offset: offset, length: length, fin: false)
             case .stream(let id, let offset, let length, let fin):
-                guard var stream = self.streams.streams[id] else { continue }
+                guard var stream = self.streams.streams.removeValue(forKey: id) else { continue }
                 let wasFullyAcknowledged = stream.send.isFullyAcknowledged
                 stream.send.onAcked(offset: offset, length: length, fin: fin)
                 if !wasFullyAcknowledged && stream.send.isFullyAcknowledged {
@@ -436,7 +436,7 @@ extension QUICConnectionCore {
                 }
                 self.storeOrRemove(stream)
             case .resetStream(let id):
-                guard var stream = self.streams.streams[id] else { continue }
+                guard var stream = self.streams.streams.removeValue(forKey: id) else { continue }
                 stream.resetAcknowledged = true
                 self.storeOrRemove(stream)
             case .handshakeDone, .maxData, .maxStreamData, .maxStreamsBidirectional, .maxStreamsUnidirectional,
@@ -455,26 +455,25 @@ extension QUICConnectionCore {
             case .crypto(let offset, let length):
                 self.handshake.send[space].onLost(offset: offset, length: length, fin: false)
             case .stream(let id, let offset, let length, let fin):
-                guard var stream = self.streams.streams[id], stream.resetCode == nil else { continue }
-                stream.send.onLost(offset: offset, length: length, fin: fin)
-                self.streams.streams[id] = stream
+                // Mutated in place: a copy would duplicate the stream's buffers.
+                guard self.streams.streams[id]?.resetCode == nil, self.streams.streams[id] != nil else { continue }
+                self.streams.streams[id]!.send.onLost(offset: offset, length: length, fin: fin)
                 self.streams.enqueueForSending(id)
             case .resetStream(let id):
-                guard var stream = self.streams.streams[id] else { continue }
-                stream.resetPending = true
-                self.streams.streams[id] = stream
+                guard self.streams.streams[id] != nil else { continue }
+                self.streams.streams[id]!.resetPending = true
                 self.streams.enqueueForSending(id)
             case .stopSending(let id):
-                guard var stream = self.streams.streams[id], stream.peerResetCode == nil else { continue }
-                stream.stopSendingPending = true
-                self.streams.streams[id] = stream
+                guard self.streams.streams[id] != nil, self.streams.streams[id]!.peerResetCode == nil else { continue }
+                self.streams.streams[id]!.stopSendingPending = true
                 self.streams.enqueueForSending(id)
             case .maxData:
                 self.maxDataPending = true
             case .maxStreamData(let id):
-                guard var stream = self.streams.streams[id], stream.receive.finalSize == nil else { continue }
-                stream.maxStreamDataPending = true
-                self.streams.streams[id] = stream
+                guard self.streams.streams[id] != nil, self.streams.streams[id]!.receive.finalSize == nil else {
+                    continue
+                }
+                self.streams.streams[id]!.maxStreamDataPending = true
                 self.streams.enqueueForSending(id)
             case .maxStreamsBidirectional:
                 self.streams.maxStreamsBidirectionalPending = true

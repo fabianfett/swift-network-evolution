@@ -483,9 +483,10 @@ public struct QUICConnectionCore: ~Copyable {
 
     /// Finishes the send side of a stream.
     public mutating func finish(_ streamID: UInt64) {
-        guard var stream = self.streams.streams[streamID], stream.canSend, stream.resetCode == nil else { return }
-        stream.send.finish()
-        self.streams.streams[streamID] = stream
+        guard self.streams.streams[streamID]?.canSend == true, self.streams.streams[streamID]?.resetCode == nil else {
+            return
+        }
+        self.streams.streams[streamID]!.send.finish()
         self.streams.enqueueForSending(streamID)
     }
 
