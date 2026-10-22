@@ -147,6 +147,11 @@ public struct QUICConnectionCore: ~Copyable {
         return false
     }
 
+    // Keeps the destruction of the internal state inside this module: a client module that
+    // specialized it would reference this module's internal types.
+    @inline(never)
+    deinit {}
+
     var isClosingOrDraining: Bool {
         switch self.state {
         case .closing, .draining, .closed: return true
@@ -540,11 +545,18 @@ public struct QUICConnectionCore: ~Copyable {
     }
 
     mutating func storeOrRemove(_ stream: consuming CoreStream) {
+        var stream = stream
         let id = stream.id
+        if !stream.creditReturned && !self.streams.isLocal(id) && stream.isDoneForStreamCredit {
+            stream.creditReturned = true
+            self.streams.returnStreamCredit(id)
+        }
         if stream.isClosed {
             self.events.append(.streamClosed(id))
-            self.streams.remove(id)
-            // `remove` only forgets streams in the map, so make sure the ID is gone too.
+            if !stream.creditReturned {
+                self.streams.returnStreamCredit(id)
+            }
+            // The caller may or may not have taken the stream out of the map.
             self.streams.streams[id] = nil
         } else {
             self.streams.streams[id] = stream

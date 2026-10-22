@@ -284,6 +284,33 @@ final class QUICConnectionCoreTests: XCTestCase {
         XCTAssertTrue(pair.clientEvents.contains(.streamWritable(streamID)), "client events: \(pair.clientEvents)")
     }
 
+    func testSequentialRequestsBeyondTheStreamLimit() throws {
+        var serverConfiguration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
+        serverConfiguration.initialMaxStreamsBidirectional = 4
+        var pair = LockstepPair(serverConfiguration: serverConfiguration)
+        pair.exchange()
+        for request in 0..<40 {
+            let streamID = try XCTUnwrap(pair.client.openStream(bidirectional: true), "request \(request)")
+            pair.client.write([UInt8]("GET".utf8).span.bytes, to: streamID, fin: true)
+            pair.exchange()
+            guard var server = pair.server.take() else {
+                XCTFail("No server")
+                return
+            }
+            _ = server.read(from: streamID) { bytes, _ in (bytes.byteCount, ()) }
+            server.write([UInt8]("OK".utf8).span.bytes, to: streamID, fin: true)
+            pair.server = consume server
+            pair.exchange()
+            var finished = false
+            _ = pair.client.read(from: streamID) { bytes, isFinished in
+                finished = isFinished
+                return (bytes.byteCount, ())
+            }
+            XCTAssertTrue(finished, "request \(request)")
+            pair.exchange()
+        }
+    }
+
     func testCloseReachesPeer() {
         var pair = LockstepPair()
         pair.exchange()

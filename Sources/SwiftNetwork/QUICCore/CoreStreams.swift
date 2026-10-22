@@ -55,6 +55,18 @@ struct CoreStream {
     /// The error code of the peer's STOP_SENDING.
     var peerStopSendingCode: UInt64?
 
+    /// Whether the stream's slot in the peer's stream limit was handed back.
+    var creditReturned = false
+
+    /// Whether a peer-initiated stream no longer needs its slot in the stream limit: everything was
+    /// read (or reset) and our side sent its FIN (or reset). Retransmissions keep the stream around,
+    /// but the peer may already open the next one.
+    var isDoneForStreamCredit: Bool {
+        let receiveDone = self.receive.isFinishedReading || self.peerResetCode != nil
+        let sendDone = !self.canSend || self.send.finSent || self.resetCode != nil
+        return receiveDone && sendDone
+    }
+
     /// Whether the readable event was reported since data last arrived.
     var readableReported = false
     /// Whether the application has to be told it can write again.
@@ -262,9 +274,16 @@ struct CoreStreamMap {
         }
     }
 
-    /// Forgets a closed stream, and raises the peer's stream limit when a peer stream goes away.
+    /// Forgets a closed stream, and hands back its slot in the stream limit if that didn't happen yet.
     mutating func remove(_ id: UInt64) {
-        guard self.streams.removeValue(forKey: id) != nil else { return }
+        guard let stream = self.streams.removeValue(forKey: id) else { return }
+        if !stream.creditReturned {
+            self.returnStreamCredit(id)
+        }
+    }
+
+    /// Raises our limit on the streams the peer opens once one of its streams is done.
+    mutating func returnStreamCredit(_ id: UInt64) {
         if !self.isLocal(id) {
             if Self.isBidirectional(id) {
                 self.remoteClosedBidirectional &+= 1
