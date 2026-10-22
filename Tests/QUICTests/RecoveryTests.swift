@@ -46,8 +46,7 @@ final class RecoveryTests: XCTestCase {
         let expectation = XCTestExpectation()
         self.connection.context.async {
             try? self.connection.setup(remote: nil, local: nil, parameters: nil, path: nil)
-            self.connection.recovery = Recovery(logPrefixer: recoveryTestsLogPrefixer)
-            self.connection.recovery.connection = self.connection
+            self.connection.recovery = Recovery(isRunning: true, logPrefixer: recoveryTestsLogPrefixer)
             let (lowerHarness, lowerHarnessLinkage) = self.storage.createDatagramLowerHarness(
                 identifier: "Client",
                 context: .implicitContext
@@ -108,15 +107,15 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(path.recoveryState.PTOPeriod, .zero)
         }
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: .initial),
+            connection.largestAckedPacketNumber(space: .initial),
             PacketNumber.none
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: .handshake),
+            connection.largestAckedPacketNumber(space: .handshake),
             PacketNumber.none
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: .applicationData),
+            connection.largestAckedPacketNumber(space: .applicationData),
             PacketNumber.none
         )
         XCTAssertEqual(
@@ -185,8 +184,8 @@ final class RecoveryTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -204,8 +203,8 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(innerState.ackElicitingPacketsInFlight, 0)
         }
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -235,8 +234,8 @@ final class RecoveryTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -254,8 +253,8 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(innerState.ackElicitingPacketsInFlight, 0)
         }
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -285,8 +284,8 @@ final class RecoveryTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -304,8 +303,8 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(innerState.ackElicitingPacketsInFlight, 0)
         }
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -335,8 +334,8 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(innerState.ackElicitingPacketsInFlight, 0)
         }
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -350,8 +349,8 @@ final class RecoveryTests: XCTestCase {
             PacketNumber.none
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -390,8 +389,8 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(innerState.ackElicitingPacketsInFlight, 1)
         }
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(
-                packetNumberSpace: space
+            connection.largestAckedPacketNumber(
+                space: space
             ),
             PacketNumber.none
         )
@@ -420,7 +419,7 @@ final class RecoveryTests: XCTestCase {
             innerState in
             XCTAssertEqual(innerState.ackElicitingPacketsInFlight, 0)
         }
-        XCTAssertEqual(connection.recovery.getLargestAckedPN(packetNumberSpace: space), 3)
+        XCTAssertEqual(connection.largestAckedPacketNumber(space: space), 3)
     }
 
     func testPacketAckedNonAckEliciting() throws {
@@ -449,7 +448,7 @@ final class RecoveryTests: XCTestCase {
             PacketNumber(3)
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: space),
+            connection.largestAckedPacketNumber(space: space),
             PacketNumber.none
         )
         connection.recovery.withMutableInnerState(packetNumberSpace: space) {
@@ -469,7 +468,7 @@ final class RecoveryTests: XCTestCase {
             PacketNumber(3)
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: space),
+            connection.largestAckedPacketNumber(space: space),
             PacketNumber(3)
         )
         connection.recovery.withMutableInnerState(packetNumberSpace: space) {
@@ -552,7 +551,7 @@ final class RecoveryTests: XCTestCase {
             PacketNumber(3)
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: space),
+            connection.largestAckedPacketNumber(space: space),
             PacketNumber.none
         )
         connection.recovery.withMutableInnerState(packetNumberSpace: space) {
@@ -572,7 +571,7 @@ final class RecoveryTests: XCTestCase {
         let expectation = XCTestExpectation()
         self.connection.context.async {
             self.connection.fromExternal { eventContext in
-                self.connection.recovery.resetAll(in: &eventContext)
+                self.connection.recovery.resetAll(connection: self.connection, in: &eventContext)
             }
             expectation.fulfill()
         }
@@ -583,7 +582,7 @@ final class RecoveryTests: XCTestCase {
             PacketNumber.none
         )
         XCTAssertEqual(
-            connection.recovery.getLargestAckedPN(packetNumberSpace: space),
+            connection.largestAckedPacketNumber(space: space),
             PacketNumber.none
         )
         connection.recovery.withMutableInnerState(packetNumberSpace: space) {
@@ -689,7 +688,7 @@ final class RecoveryTests: XCTestCase {
         self.connection.context.async {
             timeNow = timeNow.advanced(by: .seconds(1))
             self.connection.fromExternal { eventContext in
-                self.connection.recovery.timerFired(at: timeNow, in: &eventContext)
+                self.connection.recovery.timerFired(at: timeNow, connection: self.connection, in: &eventContext)
             }
             expectation.fulfill()
         }
@@ -712,7 +711,7 @@ final class RecoveryTests: XCTestCase {
         self.connection.context.async {
             timeNow = timeNow.advanced(by: .seconds(2))
             self.connection.fromExternal { eventContext in
-                self.connection.recovery.timerFired(at: timeNow, in: &eventContext)
+                self.connection.recovery.timerFired(at: timeNow, connection: self.connection, in: &eventContext)
             }
             expectation.fulfill()
         }
@@ -735,7 +734,7 @@ final class RecoveryTests: XCTestCase {
         self.connection.context.async {
             timeNow = timeNow.advanced(by: .seconds(4))
             self.connection.fromExternal { eventContext in
-                self.connection.recovery.timerFired(at: timeNow, in: &eventContext)
+                self.connection.recovery.timerFired(at: timeNow, connection: self.connection, in: &eventContext)
             }
             expectation.fulfill()
         }

@@ -33,8 +33,7 @@ final class ConnectionIDRotationTests: XCTestCase {
         let expectation = XCTestExpectation()
         connection.context.async {
             try? self.connection.setup(remote: nil, local: nil, parameters: nil, path: nil)
-            self.connection.recovery = Recovery(logPrefixer: connectionIDRotationTestsLogPrefixer)
-            self.connection.recovery.connection = self.connection
+            self.connection.recovery = Recovery(isRunning: true, logPrefixer: connectionIDRotationTestsLogPrefixer)
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 5.0)

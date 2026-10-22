@@ -40,12 +40,6 @@ protocol TimerUser {
     func timerFired(at timeNow: NetworkClock.Instant, in eventContext: inout NetworkContext.EventContext)
 }
 
-@available(Network 0.1.0, *)
-protocol NonCopyableTimerUser: ~Copyable {
-    var timerID: Timer.TimerID? { get set }
-    mutating func timerFired(at timeNow: NetworkClock.Instant, in eventContext: inout NetworkContext.EventContext)
-}
-
 // TODO: convert timer to ~Copyable
 @available(Network 0.1.0, *)
 final class Timer: PrefixedLoggable {

@@ -47,8 +47,7 @@ final class MigrationTests: XCTestCase {
         let expectation = XCTestExpectation()
         connection.context.async {
             try? self.connection.setup(remote: nil, local: nil, parameters: nil, path: nil)
-            self.connection.recovery = Recovery(logPrefixer: migrationTestsLogPrefixer)
-            self.connection.recovery.connection = self.connection
+            self.connection.recovery = Recovery(isRunning: true, logPrefixer: migrationTestsLogPrefixer)
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 5.0)

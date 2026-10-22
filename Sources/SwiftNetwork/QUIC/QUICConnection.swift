@@ -519,10 +519,10 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
                 timerNow: self.now,
                 in: &eventContext
             ) { firedAt, timerState in
-                self.recovery.timerFired(at: firedAt, in: &timerState)
+                self.recovery.timerFired(at: firedAt, connection: self, in: &timerState)
             }
             self.recovery = Recovery(
-                connection: self,
+                isRunning: true,
                 timerID: recoveryTimerID,
                 logPrefixer: logPrefixer
             )
@@ -3099,7 +3099,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         if ack.reset() {
             timer.stop(in: &eventContext)
         }
-        recovery.resetAll(in: &eventContext)
+        recovery.resetAll(connection: self, in: &eventContext)
         currentPath = nil
         logSummary()
 
