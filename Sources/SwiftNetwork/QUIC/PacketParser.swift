@@ -95,11 +95,11 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
     }
 
     private func parsePacketNumber(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         pnSize: UInt8
     ) throws(QUICError) -> PacketNumber? {
         var packetNumber: PacketNumber = .none
-        let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+        let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
             try read.packetNumber(&packetNumber, pnSize: pnSize)
         }
         do {
@@ -161,20 +161,19 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
 
     @inline(never)
     private func decodePacketNumber(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         packet: inout Packet,
-        receivedLargestPacketNumber: PacketNumber,
-        connection: QUICConnection
+        receivedLargestPacketNumber: PacketNumber
     ) throws(QUICError) -> Int {
 
         var firstOctet: UInt8 = 0
-        let result = Deserializer.deserialize(&frame, claim: false) { read throws(DeserializationError) in
+        let result = Deserializer.deserialize(&bytes, claim: false) { read throws(DeserializationError) in
             try read.uint8(&firstOctet)
         }
         try validateDeserializationResult(result)
 
         // reclaim deserialized header after protector decryption.
-        guard frame.claim(fromStart: Int(packet.headerLength)) else {
+        guard bytes.claim(fromStart: Int(packet.headerLength)) else {
             throw QUICError.packet(QUICPacketError.invalidHeaderType)
         }
 
@@ -192,7 +191,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                 try packet.updateKeyState(to: .phase0)
             }
         }
-        let number = try parsePacketNumber(frame: &frame, pnSize: pnSize)
+        let number = try parsePacketNumber(bytes: &bytes, pnSize: pnSize)
         guard let number else {
             throw QUICError.packet(QUICPacketError.invalidPacketNumber)
         }
@@ -215,59 +214,71 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         {
             packet.number = packet.number - Int64(packetNumberLength)
         }
-        connection.log.datapath("Received \(packet.number)")
+        log.datapath("Received \(packet.number)")
         return reservedBits
     }
 
-    mutating func parse(
-        frame: inout Frame,
-        connection: QUICConnection,
-        ecn: IPProtocol.ECN,
-        ack: inout Ack,
-        protector: inout Protector,
-        stats: inout Statistics,
-        in eventContext: inout NetworkContext.EventContext
-    ) -> Packet? {
-        let originalLength = frame.unclaimedLength
+    /// What `decodeAndOpen` made of a packet.
+    enum DecodeOutcome: ~Copyable {
+        /// Drop the packet.
+        case drop
+        /// The packet carries no frames to parse (version negotiation, retry, failed decryption,
+        /// or an empty payload).
+        case packet(Packet)
+        /// The payload was decrypted and is left unclaimed; `extraLength` bytes of further
+        /// coalesced packets follow the tag.
+        case payload(Packet, extraLength: Int, reservedBits: Int)
+    }
+
+    /// The parts of the connection state that decoding and opening a packet depends on.
+    struct DecodeContext {
+        var localCIDLength: Int
+        var isVersionSent: Bool
+        var isConnected: Bool
+        var connectionKeyState: PacketKeyState
+    }
+
+    /// Parses the header of the packet at the start of `bytes`, removes header protection and
+    /// decrypts the payload in place.
+    mutating func decodeAndOpen(
+        _ bytes: inout PacketBytes,
+        context: DecodeContext,
+        largestPacketNumberReceived: (PacketNumberSpace) -> PacketNumber,
+        protector: inout Protector
+    ) -> DecodeOutcome {
+        let originalLength = bytes.unclaimedLength
         if _slowPath(originalLength < Constants.minimumPacketSize) {
-            connection.log.error("Dropping short packet, len=\(frame.unclaimedLength)")
-            return nil
+            log.error("Dropping short packet, len=\(bytes.unclaimedLength)")
+            return .drop
         }
 
-        let localCIDLength = connection.localCIDLength
         do throws(QUICError) {
-            var packet = try parseHeader(frame: &frame, dcidLength: localCIDLength)
+            var packet = try parseHeader(bytes: &bytes, dcidLength: context.localCIDLength)
             if packet.versionNegotiation {
-                if frame.unclaimedLength != 0 {
-                    connection.log.error("Extra data after VERSION_NEGOTIATION")
-                    return nil
+                if bytes.unclaimedLength != 0 {
+                    log.error("Extra data after VERSION_NEGOTIATION")
+                    return .drop
                 }
-                return packet
+                return .packet(packet)
             }
             if packet.retry {
-                if frame.unclaimedLength != 0 {
-                    connection.log.error("Extra data after RETRY integrity tag")
-                    return nil
+                if bytes.unclaimedLength != 0 {
+                    log.error("Extra data after RETRY integrity tag")
+                    return .drop
                 }
-                return packet
+                return .packet(packet)
             }
 
-            var receivedLargestPacketNumber = PacketNumber.none
-            _ = ack.withAckSpace(
-                packetNumberSpace: packet.numberSpace
-            ) { ackSpace in
-                receivedLargestPacketNumber = ackSpace.largestPNReceived
-                return true
-            }
+            let receivedLargestPacketNumber = largestPacketNumberReceived(packet.numberSpace)
 
             // unclaim deserialized header for protector decryption
-            guard frame.unclaim(fromStart: Int(packet.headerLength), fromEnd: 0) else {
-                return nil
+            guard bytes.unclaim(fromStart: Int(packet.headerLength), fromEnd: 0) else {
+                return .drop
             }
             let tagSize = protector.getTagSize(for: packet.keyState)
             let payloadAndTagSize = originalLength - Int(packet.headerLength)
             guard payloadAndTagSize >= Int(tagSize) else {
-                return nil
+                return .drop
             }
             // Header protection removal reads/writes up to 4 bytes (the
             // maximum possible packet number length) starting at the packet
@@ -280,69 +291,116 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             // .minimumPacketSize`, which doesn't scale with the connection's
             // configured local CID length.
             guard payloadAndTagSize >= 4 + Int(tagSize) else {
-                connection.log.error(
+                log.error(
                     "Dropping packet: not enough bytes for packet number + sample (have \(payloadAndTagSize), need \(4 + Int(tagSize)))"
                 )
-                return nil
+                return .drop
             }
             packet.tagLength = tagSize
-            guard openHeader(connection: connection, packet: &packet, frame: &frame, protector: &protector) else {
-                return nil
+            guard openHeader(context: context, packet: &packet, bytes: &bytes, protector: &protector) else {
+                return .drop
             }
 
             let reservedBits = try decodePacketNumber(
-                frame: &frame,
+                bytes: &bytes,
                 packet: &packet,
-                receivedLargestPacketNumber: receivedLargestPacketNumber,
-                connection: connection
+                receivedLargestPacketNumber: receivedLargestPacketNumber
             )
 
             let extraLength: Int
             if packet.longHeader {
                 // At this point, the packet number is already claimed, so subtract it from the remaining payload length
                 let remainingPayloadLength = Int(packet.payloadLength) - Int(packet.packetNumberLength)
-                guard frame.unclaimedLength >= remainingPayloadLength else {
-                    connection.log.error(
-                        "Short LH packet: \(frame.unclaimedLength) < \(remainingPayloadLength)"
+                guard bytes.unclaimedLength >= remainingPayloadLength else {
+                    log.error(
+                        "Short LH packet: \(bytes.unclaimedLength) < \(remainingPayloadLength)"
                     )
-                    return nil
+                    return .drop
                 }
 
-                extraLength = frame.unclaimedLength - remainingPayloadLength
+                extraLength = bytes.unclaimedLength - remainingPayloadLength
             } else {
                 // Short header packets don't parse out any payload length from the header,
                 // and always extend to the end of the outer datagram
                 extraLength = 0
 
                 // Payload length includes the packet number length
-                packet.payloadLength = UInt16(frame.unclaimedLength + Int(packet.packetNumberLength))
+                packet.payloadLength = UInt16(bytes.unclaimedLength + Int(packet.packetNumberLength))
             }
 
             // unclaim deserialized header for protector decryption
-            guard frame.unclaim(fromStart: Int(packet.headerLength) + Int(packet.packetNumberLength))
+            guard bytes.unclaim(fromStart: Int(packet.headerLength) + Int(packet.packetNumberLength))
             else {
-                return nil
+                return .drop
             }
             do {
-                try openPacket(packet: &packet, frame: &frame, connection: connection, protector: &protector)
+                try openPacket(packet: &packet, bytes: &bytes, context: context, protector: &protector)
             } catch {
                 // Only parse the tag if we have failed decryption, for performance reasons
                 // The tag should contain the stateless reset token and we don't want to parse it unnecessarily
-                packet.tag = parseTag(frame: &frame)
+                packet.tag = parseTag(bytes: &bytes)
                 packet.failedDecryption = true
-                return packet
+                return .packet(packet)
             }
 
             // Claim off any extra length from the end to ignore it
             let tagLength = Int(packet.tagLength)
             guard
-                frame.claim(
+                bytes.claim(
                     fromStart: Int(packet.headerLength) + Int(packet.packetNumberLength),
                     fromEnd: tagLength + extraLength
                 )
             else {
-                return nil
+                return .drop
             }
+            return .payload(packet, extraLength: extraLength, reservedBits: reservedBits)
+        } catch {
+            return .drop
+        }
+    }
+
+    mutating func parse(
+        frame: inout Frame,
+        connection: QUICConnection,
+        ecn: IPProtocol.ECN,
+        ack: inout Ack,
+        protector: inout Protector,
+        stats: inout Statistics,
+        in eventContext: inout NetworkContext.EventContext
+    ) -> Packet? {
+        let context = DecodeContext(
+            localCIDLength: connection.localCIDLength,
+            isVersionSent: connection.state == .versionSent,
+            isConnected: connection.state.isConnected,
+            connectionKeyState: connection.keyState
+        )
+        let decoded = frame.withPacketBytes { bytes in
+            self.decodeAndOpen(
+                &bytes,
+                context: context,
+                largestPacketNumberReceived: { space in
+                    var largest = PacketNumber.none
+                    _ = ack.withAckSpace(packetNumberSpace: space) { ackSpace in
+                        largest = ackSpace.largestPNReceived
+                        return true
+                    }
+                    return largest
+                },
+                protector: &protector
+            )
+        }
+        guard let decoded else {
+            connection.log.error("Dropping short packet, len=\(frame.unclaimedLength)")
+            return nil
+        }
+
+        switch consume decoded {
+        case .drop:
+            return nil
+        case .packet(let packet):
+            return packet
+        case .payload(var packet, let extraLength, let reservedBits):
+            let tagLength = Int(packet.tagLength)
             defer {
                 // At this point, the entire packet payload has been read. If there is another packet at the end,
                 // unclaim to expose it, and re-mark the tag length.
@@ -380,18 +438,16 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             } catch {
                 // Explicitly release finalize frames in case of error
                 self.cleanupReceivedFrames()
-                throw error
+                return nil
             }
             return packet
-        } catch {
-            return nil
         }
     }
 
-    private func parseHeader(frame: inout Frame, dcidLength: Int) throws(QUICError) -> Packet {
+    private func parseHeader(bytes: inout PacketBytes, dcidLength: Int) throws(QUICError) -> Packet {
         var firstOctet: UInt8 = 0
-        let originalLength = frame.unclaimedLength
-        let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+        let originalLength = bytes.unclaimedLength
+        let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
             try read.uint8(&firstOctet)
         }
         try validateDeserializationResult(result)
@@ -402,13 +458,13 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         var packet: Packet
         if longHeader {
             packet = try parseLongHeader(
-                frame: &frame,
+                bytes: &bytes,
                 firstOctet: firstOctet,
                 originalLength: originalLength
             )
         } else {
             packet = try parseShortHeader(
-                frame: &frame,
+                bytes: &bytes,
                 firstOctet: firstOctet,
                 dcidLength: dcidLength,
                 originalLength: originalLength
@@ -418,7 +474,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
     }
 
     private func parseLongHeader(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         firstOctet: UInt8,
         originalLength: Int,
         isServer: Bool = false
@@ -428,7 +484,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         var dcidStorage = QUICConnectionIDStorage.empty
         var scidLength: UInt8 = 0
         var scidStorage = QUICConnectionIDStorage.empty
-        let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+        let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
             try read.uint32NetworkByteOrder(&rawVersion)
             try read.uint8(&dcidLength)
             try read.connectionID(&dcidStorage, length: Int(dcidLength))
@@ -453,19 +509,19 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
 
         // VN and LH have the same header up to this point.
         if version == .negotiation {
-            guard frame.unclaimedLength % 4 == 0 else {
-                log.error("Odd number of versions: \(frame.unclaimedLength % 4)")
+            guard bytes.unclaimedLength % 4 == 0 else {
+                log.error("Odd number of versions: \(bytes.unclaimedLength % 4)")
                 throw QUICError.packet(QUICPacketError.deserializationError)
             }
 
-            let numberOfVersions = frame.unclaimedLength / 4
+            let numberOfVersions = bytes.unclaimedLength / 4
             guard numberOfVersions <= 16 else {
                 log.error("Too many versions: \(numberOfVersions)")
                 throw QUICError.packet(QUICPacketError.deserializationError)
             }
 
             var versionsBuffer = [UInt32](repeating: 0, count: numberOfVersions)
-            let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+            let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
                 for i in 0..<numberOfVersions {
                     try read.uint32NetworkByteOrder(&versionsBuffer[i])
                 }
@@ -507,7 +563,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                 // Initial Packet
                 var rawTokenLength: Int = 0
                 var tokenBuffer: [UInt8] = []
-                let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+                let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
                     try read.vle(&rawTokenLength)
                     try read.buffer(&tokenBuffer, length: Int(rawTokenLength))
                     try read.vle(&payloadLength)
@@ -522,19 +578,19 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                     version: version,
                     token: tokenBuffer,
                     payloadLength: payloadLength,
-                    headerLength: UInt16(originalLength - frame.unclaimedLength)
+                    headerLength: UInt16(originalLength - bytes.unclaimedLength)
                 )
             case .zeroRTT:
                 // 0-RTT Packet
                 keyState = .earlyData
-                let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+                let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
                     try read.vle(&payloadLength)
                 }
                 try validateDeserializationResult(result)
             case .handshake:
                 // Handshake Packet
                 keyState = .handshake
-                let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+                let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
                     try read.vle(&payloadLength)
                 }
                 try validateDeserializationResult(result)
@@ -543,8 +599,8 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                 var retryToken: [UInt8] = []
                 var retryIntegrityTag: [UInt8] = []
                 let tokenLength =
-                    frame.unclaimedLength - Int(Constants.retryTokenIntegrityTagLength)
-                let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+                    bytes.unclaimedLength - Int(Constants.retryTokenIntegrityTagLength)
+                let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
                     try read.buffer(&retryToken, length: tokenLength)
                     try read.buffer(
                         &retryIntegrityTag,
@@ -563,7 +619,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                     token: retryToken,
                     tag: retryIntegrityTag,
                     payloadLength: payloadLength,
-                    headerLength: UInt16(originalLength - frame.unclaimedLength)
+                    headerLength: UInt16(originalLength - bytes.unclaimedLength)
                 )
             }
             let space = PacketNumberSpace.fromKeyState(keyState: keyState)
@@ -575,14 +631,14 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                 keyState: keyState,
                 space: space,
                 payloadLength: payloadLength,
-                headerLength: UInt16(originalLength - frame.unclaimedLength),
+                headerLength: UInt16(originalLength - bytes.unclaimedLength),
                 version: version
             )
         }
     }
 
     private func parseShortHeader(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         firstOctet: UInt8,
         dcidLength: Int,
         originalLength: Int
@@ -596,7 +652,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         }
 
         var dcidStorage = QUICConnectionIDStorage.empty
-        let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
+        let result = Deserializer.deserialize(&bytes, claim: true) { read throws(DeserializationError) in
             try read.connectionID(&dcidStorage, length: dcidLength)
         }
         try validateDeserializationResult(result)
@@ -604,39 +660,40 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         let destinationConnectionID = QUICConnectionID(storage: dcidStorage, size: Int(dcidLength))
         return Packet(
             destinationConnectionID: destinationConnectionID,
-            headerLength: UInt16(originalLength - frame.unclaimedLength),
+            headerLength: UInt16(originalLength - bytes.unclaimedLength),
             spin: spinValue
         )
     }
 
     private func openHeader(
-        connection: QUICConnection,
+        context: DecodeContext,
         packet: inout Packet,
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         protector: inout Protector
     ) -> Bool {
-        if connection.state == .versionSent, let dcid = packet.destinationConnectionID {
+        if context.isVersionSent, let dcid = packet.destinationConnectionID {
             protector.deriveInitialSecrets(destinationCID: dcid)
         }
 
         if let keystate = packet.keyState,
             !protector.openKeyReady(for: keystate)
-                || (!connection.state.isConnected && (keystate == .phase0 || keystate == .phase1))
+                || (!context.isConnected && (keystate == .phase0 || keystate == .phase1))
         {
             if keystate == .initial || keystate == .earlyData {
-                connection.log.debug("Not queueing INITIAL/0-RTT packets")
+                log.debug("Not queueing INITIAL/0-RTT packets")
                 return false
             }
-            connection.log.debug(
-                "Either encryption level \(keystate) not ready or not yet connected. Currently \(connection.state.isConnected ? "connected" : "not connected"); queueing packet"
+            log.debug(
+                "Either encryption level \(keystate) not ready or not yet connected. Currently \(context.isConnected ? "connected" : "not connected"); queueing packet"
             )
             return false
         }
 
         do {
-            try protector.openHeader(&packet, frame: &frame)
+            var buffer = bytes.mutableSpan
+            try protector.openHeader(&packet, buffer: &buffer)
         } catch {
-            connection.log.error("Packet number undecryptable")
+            log.error("Packet number undecryptable")
             return false
         }
 
@@ -645,19 +702,20 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
 
     private func openPacket(
         packet: inout Packet,
-        frame: inout Frame,
-        connection: QUICConnection,
+        bytes: inout PacketBytes,
+        context: DecodeContext,
         protector: inout Protector
     ) throws(QUICError) {
         if _slowPath(
-            (connection.keyState == .phase0 || connection.keyState == .phase1)
+            (context.connectionKeyState == .phase0 || context.connectionKeyState == .phase1)
                 && (packet.keyState == .phase0 || packet.keyState == .phase1)
-                && connection.keyState != packet.keyState
+                && context.connectionKeyState != packet.keyState
         ) {
-            protector.trafficUpdate(previousKeyState: connection.keyState)
+            protector.trafficUpdate(previousKeyState: context.connectionKeyState)
         }
 
-        try protector.open(&packet, frame: &frame)
+        var buffer = bytes.mutableSpan
+        try protector.open(&packet, buffer: &buffer)
     }
 
     private func validateDeserializationResult(
@@ -669,11 +727,24 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
     }
 
     func retryTokenPresent(_ frame: inout Frame, token: [UInt8]?) -> Bool {
+        frame.withPacketBytes { self.retryTokenPresent(&$0, token: token) } ?? false
+    }
+
+    func parsePrelude(frame: inout Frame) -> Packet? {
+        // Without bytes, the first octet can't be parsed.
+        guard let packet = frame.withPacketBytes({ self.parsePrelude(bytes: &$0) }) else {
+            log.datapath("Unable to parse frame")
+            return nil
+        }
+        return packet
+    }
+
+    func retryTokenPresent(_ bytes: inout PacketBytes, token: [UInt8]?) -> Bool {
         guard let token else {
             log.error("Token is nil, discarding")
             return false
         }
-        guard let firstOctet = try? self.parseFirstOctet(&frame, claim: false) else {
+        guard let firstOctet = try? self.parseFirstOctet(&bytes, claim: false) else {
             log.error("Could not parse first octet from packet")
             return false
         }
@@ -691,7 +762,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         var dcidLength: UInt8 = 0
         var scidLength: UInt8 = 0
         // Do not actually move the cursor
-        let result = Deserializer.deserialize(&frame, claim: false) { read throws(DeserializationError) in
+        let result = Deserializer.deserialize(&bytes, claim: false) { read throws(DeserializationError) in
             // Skip through to the token length and token, do not claim these values
             try read.skip(1)
             try read.skip(4)
@@ -709,9 +780,9 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         return true
     }
 
-    func parseFirstOctet(_ frame: inout Frame, claim: Bool = true) throws(QUICError) -> UInt8 {
+    func parseFirstOctet(_ bytes: inout PacketBytes, claim: Bool = true) throws(QUICError) -> UInt8 {
         var firstOctet: UInt8 = 0
-        let result = Deserializer.deserialize(&frame, claim: claim) { read throws(DeserializationError) in
+        let result = Deserializer.deserialize(&bytes, claim: claim) { read throws(DeserializationError) in
             try read.uint8(&firstOctet)
         }
         try validateDeserializationResult(result)
@@ -719,20 +790,20 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
     }
 
     // This mirrors parseHeader() except that Short Header is purposefully not handled here.
-    func parsePrelude(frame: inout Frame) -> Packet? {
+    func parsePrelude(bytes: inout PacketBytes) -> Packet? {
         // This differs from parseHeader as it may NOT return a packet
         // parsePrelude is also not designed to parse short header packets
         // parsePrelude will only be called from a server context.
         do {
-            let originalLength = frame.unclaimedLength
-            let firstOctet = try parseFirstOctet(&frame)
+            let originalLength = bytes.unclaimedLength
+            let firstOctet = try parseFirstOctet(&bytes)
             // Common short/long header bits
             let longHeader = (firstOctet & 0x80) != 0
 
             var packet: Packet
             if longHeader {
                 packet = try parseLongHeader(
-                    frame: &frame,
+                    bytes: &bytes,
                     firstOctet: firstOctet,
                     originalLength: originalLength,
                     isServer: true
@@ -748,16 +819,16 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         }
     }
 
-    func parseTag(frame: inout Frame) -> [UInt8]? {
+    func parseTag(bytes: inout PacketBytes) -> [UInt8]? {
         // The endpoint identifies a received datagram as a stateless reset by comparing the last 16 bytes
         // of the datagram with all Stateless Reset Tokens associated with the remote address on which the datagram was received.
         //
         // Parse the entire payload and only extract the last 16 bytes to set as the tag
-        let length = frame.unclaimedLength
+        let length = bytes.unclaimedLength
         if length >= Constants.statelessResetTokenSize {
             var tag: [UInt8] = []
             let cursor = length - Constants.statelessResetTokenSize
-            let result = Deserializer.deserialize(&frame, claim: false) { read throws(DeserializationError) in
+            let result = Deserializer.deserialize(&bytes, claim: false) { read throws(DeserializationError) in
                 try read.skip(cursor)  // Move the cursor in the frame to where the SRT starts
                 try read.buffer(&tag, length: Constants.statelessResetTokenSize)
             }

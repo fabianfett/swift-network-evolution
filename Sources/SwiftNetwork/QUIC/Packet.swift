@@ -388,7 +388,7 @@ struct Packet: ~Copyable {
     }
 
     private mutating func buildLongHeader(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         lastAcked: PacketNumber,
         token: [UInt8]? = nil,
         payloadLengthOffset: inout Int?,
@@ -448,8 +448,8 @@ struct Packet: ~Copyable {
             version = headerVersion
         }
         // common long header elements
-        let lengthBeforeWritingHeader = frame.unclaimedLength
-        let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
+        let lengthBeforeWritingHeader = bytes.unclaimedLength
+        let result = Serializer.serialize(&bytes, claim: true) { write throws(SerializationError) in
             try write.uint8(preamble | (headerType << 4) | (rr << 2) | numberLength)
             try write.uint32NetworkByteOrder(version)
             try write.uint8(UInt8(dcid.length))
@@ -462,13 +462,13 @@ struct Packet: ~Copyable {
         if keyState == .initial {
             // this is an initial packet, write the token
             if let token {
-                let result2 = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
+                let result2 = Serializer.serialize(&bytes, claim: true) { write throws(SerializationError) in
                     try write.vle(UInt16(token.count))
                     try write.buffer(token)
                 }
                 try validateSerializationResult(result2)
             } else {
-                let result2 = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
+                let result2 = Serializer.serialize(&bytes, claim: true) { write throws(SerializationError) in
                     try write.vle(0)
                 }
                 try validateSerializationResult(result2)
@@ -477,15 +477,15 @@ struct Packet: ~Copyable {
         // payload length is packet number + payload + tag
         let payloadLength = truncatedPacketNumber.size.rawValue + Int(payloadLength) + Int(tagLength)
         // Make it possible to update to this field after write()ing
-        payloadLengthOffset = (lengthBeforeWritingHeader - frame.unclaimedLength)
-        let result3 = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
+        payloadLengthOffset = (lengthBeforeWritingHeader - bytes.unclaimedLength)
+        let result3 = Serializer.serialize(&bytes, claim: true) { write throws(SerializationError) in
             // This should be VLE encoded
             try write.uint16NetworkByteOrder(UInt16(1 << 14 | payloadLength))
             try write.encodedPacketNumber(truncatedPacketNumber)
         }
         try validateSerializationResult(result3)
 
-        let lengthAfterWritingHeader = frame.unclaimedLength
+        let lengthAfterWritingHeader = bytes.unclaimedLength
         guard let packetNumberLength = UInt8(exactly: truncatedPacketNumber.size.rawValue) else {
             throw QUICError.packet(QUICPacketError.truncatedPacketNumberTooLarge)
         }
@@ -496,10 +496,10 @@ struct Packet: ~Copyable {
 
     // To be called after header is unclaimed
     func updateLongHeaderPayloadLength(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         payloadLengthOffset: Int
     ) throws(QUICError) {
-        let result = Serializer.serialize(&frame, claim: false) {
+        let result = Serializer.serialize(&bytes, claim: false) {
             write throws(SerializationError) in
             try write.skip(payloadLengthOffset)
             try write.uint16NetworkByteOrder(UInt16(1 << 14 | self.payloadLength))
@@ -508,7 +508,7 @@ struct Packet: ~Copyable {
     }
 
     private mutating func buildShortHeader(
-        frame: inout Frame,
+        bytes: inout PacketBytes,
         lastAcked: PacketNumber,
         spin: Bool
     ) throws(QUICError) {
@@ -540,9 +540,9 @@ struct Packet: ~Copyable {
             throw QUICError.packet(QUICPacketError.invalidDestinationConnectionID)
         }
 
-        let lengthBeforeWritingHeader = frame.unclaimedLength
+        let lengthBeforeWritingHeader = bytes.unclaimedLength
         let numberLength = truncatedPacketNumber.headerFieldSize
-        let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
+        let result = Serializer.serialize(&bytes, claim: true) { write throws(SerializationError) in
             try write.uint8(preamble | spinBit | keyPhase | numberLength)
             try write.span(dcid.connectionIDStorage.span.bytes.extracting(unchecked: 0..<dcid.length))
             try write.encodedPacketNumber(truncatedPacketNumber)
@@ -550,7 +550,7 @@ struct Packet: ~Copyable {
 
         try validateSerializationResult(result)
 
-        let lengthAfterWritingHeader = frame.unclaimedLength
+        let lengthAfterWritingHeader = bytes.unclaimedLength
         guard let packetNumberLength = UInt8(exactly: truncatedPacketNumber.size.rawValue) else {
             throw QUICError.packet(QUICPacketError.truncatedPacketNumberTooLarge)
         }
@@ -560,7 +560,7 @@ struct Packet: ~Copyable {
 
     // MARK: Serialize to wire format
     mutating func writeHeader(
-        into frame: inout Frame,
+        into bytes: inout PacketBytes,
         lastAcked: PacketNumber,
         token: [UInt8]? = nil,
         payloadLengthOffset: inout Int?,
@@ -570,7 +570,7 @@ struct Packet: ~Copyable {
     ) throws(QUICError) {
         if Packet.requiresLongHeader(keyState: keyState) {
             try buildLongHeader(
-                frame: &frame,
+                bytes: &bytes,
                 lastAcked: lastAcked,
                 token: token,
                 payloadLengthOffset: &payloadLengthOffset,
@@ -578,7 +578,44 @@ struct Packet: ~Copyable {
                 headerVersion: headerVersion
             )
         } else {
-            try buildShortHeader(frame: &frame, lastAcked: lastAcked, spin: spin)
+            try buildShortHeader(bytes: &bytes, lastAcked: lastAcked, spin: spin)
+        }
+    }
+
+    mutating func writeHeader(
+        into frame: inout Frame,
+        lastAcked: PacketNumber,
+        token: [UInt8]? = nil,
+        payloadLengthOffset: inout Int?,
+        truncatedPacketNumberLength: inout Int,
+        spin: Bool = false,
+        headerVersion: UInt32? = nil,
+    ) throws(QUICError) {
+        let written: Void? = try frame.withPacketBytes { bytes throws(QUICError) in
+            try self.writeHeader(
+                into: &bytes,
+                lastAcked: lastAcked,
+                token: token,
+                payloadLengthOffset: &payloadLengthOffset,
+                truncatedPacketNumberLength: &truncatedPacketNumberLength,
+                spin: spin,
+                headerVersion: headerVersion
+            )
+        }
+        guard written != nil else {
+            throw QUICError.packet(QUICPacketError.serializationBufferTooSmall)
+        }
+    }
+
+    func updateLongHeaderPayloadLength(
+        frame: inout Frame,
+        payloadLengthOffset: Int
+    ) throws(QUICError) {
+        let written: Void? = try frame.withPacketBytes { bytes throws(QUICError) in
+            try self.updateLongHeaderPayloadLength(bytes: &bytes, payloadLengthOffset: payloadLengthOffset)
+        }
+        guard written != nil else {
+            throw QUICError.packet(QUICPacketError.serializationBufferTooSmall)
         }
     }
 
