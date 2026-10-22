@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -36,13 +38,6 @@ private struct PacketFormatConstants {
 extension QUICConnectionID {
     // number of bytes required to represent a Connection ID length on the wire
     static let headerCIDLength = 1
-}
-
-@available(Network 0.1.0, *)
-enum QUICPacketFormatsError: Int, Error {
-    case serializationBufferTooSmall
-    case unexpectedLength
-    case sealingFailure
 }
 
 @available(Network 0.1.0, *)

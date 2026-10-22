@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -75,7 +77,7 @@ extension CubicLikeProtocol {
 
 @available(Network 0.1.0, *)
 struct Cubic: CongestionControlProtocol, CubicLikeProtocol {
-    var log: LogPrefixer
+    package var log: LogPrefixer
 
     var undoState: CubicUndoState? = nil
     var K: Double = 0

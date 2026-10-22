@@ -14,15 +14,15 @@
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
 #if os(Linux) || os(Android) || (NETWORK_EMBEDDED && !NETWORK_DRIVERKIT)
@@ -30,29 +30,29 @@ extension Logger {
 
     #if DisableDebugLogging
     // Specify the `DisableDebugLogging` trait to compile out info, debug, and datapath logging.
-    static let swiftNetworkProtocolLoggingEnabled: Bool = false
-    static let swiftNetworkDatapathLoggingEnabled: Bool = false
+    package static let swiftNetworkProtocolLoggingEnabled: Bool = false
+    package static let swiftNetworkDatapathLoggingEnabled: Bool = false
     #else
-    static let swiftNetworkProtocolLoggingEnabled: Bool = true
+    package static let swiftNetworkProtocolLoggingEnabled: Bool = true
     #if DatapathLogging
-    static let swiftNetworkDatapathLoggingEnabled: Bool = true
+    package static let swiftNetworkDatapathLoggingEnabled: Bool = true
     #else
-    static let swiftNetworkDatapathLoggingEnabled: Bool = false
+    package static let swiftNetworkDatapathLoggingEnabled: Bool = false
     #endif
     #endif
 
-    static let interface = Logger(label: "com.apple.network.interface")
-    static let system = Logger(label: "com.apple.network.system")
-    static let proto = Logger(label: "com.apple.network.protocol")
-    static let path = Logger(label: "com.apple.network.path")
-    static let endpoint = Logger(label: "com.apple.network.endpoint")
-    static let parameters = Logger(label: "com.apple.network.parameters")
-    static let connection = Logger(label: "com.apple.network.connection")
-    static let listener = Logger(label: "com.apple.network.listener")
-    static let tls = Logger(label: "com.apple.security.swifttls")
-    static let migration = Logger(label: "com.apple.network.migration")
+    package static let interface = Logger(label: "com.apple.network.interface")
+    package static let system = Logger(label: "com.apple.network.system")
+    package static let proto = Logger(label: "com.apple.network.protocol")
+    package static let path = Logger(label: "com.apple.network.path")
+    package static let endpoint = Logger(label: "com.apple.network.endpoint")
+    package static let parameters = Logger(label: "com.apple.network.parameters")
+    package static let connection = Logger(label: "com.apple.network.connection")
+    package static let listener = Logger(label: "com.apple.network.listener")
+    package static let tls = Logger(label: "com.apple.security.swifttls")
+    package static let migration = Logger(label: "com.apple.network.migration")
     #if !NETWORK_EMBEDDED
-    func fault(_ message: String) {
+    package func fault(_ message: String) {
         Logger.system.critical("\(message)")
     }
     #endif
@@ -66,27 +66,27 @@ extension Logger {
 
     #if DisableDebugLogging
     // Specify the `DisableDebugLogging` trait to compile out info, debug, and datapath logging.
-    static let swiftNetworkProtocolLoggingEnabled: Bool = false
-    static let swiftNetworkDatapathLoggingEnabled: Bool = false
+    package static let swiftNetworkProtocolLoggingEnabled: Bool = false
+    package static let swiftNetworkDatapathLoggingEnabled: Bool = false
     #else
-    static let swiftNetworkProtocolLoggingEnabled: Bool = true
+    package static let swiftNetworkProtocolLoggingEnabled: Bool = true
     #if DatapathLogging
-    static let swiftNetworkDatapathLoggingEnabled: Bool = true
+    package static let swiftNetworkDatapathLoggingEnabled: Bool = true
     #else
-    static let swiftNetworkDatapathLoggingEnabled: Bool = false
+    package static let swiftNetworkDatapathLoggingEnabled: Bool = false
     #endif
     #endif
 
-    static let system = Logger(subsystem: "com.apple.network", category: "system")
-    static let interface = Logger(subsystem: "com.apple.network", category: "interface")
-    static let proto = Logger(subsystem: "com.apple.network", category: "protocol")
-    static let path = Logger(subsystem: "com.apple.network", category: "path")
-    static let endpoint = Logger(subsystem: "com.apple.network", category: "endpoint")
-    static let parameters = Logger(subsystem: "com.apple.network", category: "parameters")
-    static let connection = Logger(subsystem: "com.apple.network", category: "connection")
-    static let listener = Logger(subsystem: "com.apple.network", category: "listener")
-    static let tls = Logger(subsystem: "com.apple.security.swifttls", category: "SwiftTLSProtocol")
-    static let migration = Logger(subsystem: "com.apple.network", category: "migration")
+    package static let system = Logger(subsystem: "com.apple.network", category: "system")
+    package static let interface = Logger(subsystem: "com.apple.network", category: "interface")
+    package static let proto = Logger(subsystem: "com.apple.network", category: "protocol")
+    package static let path = Logger(subsystem: "com.apple.network", category: "path")
+    package static let endpoint = Logger(subsystem: "com.apple.network", category: "endpoint")
+    package static let parameters = Logger(subsystem: "com.apple.network", category: "parameters")
+    package static let connection = Logger(subsystem: "com.apple.network", category: "connection")
+    package static let listener = Logger(subsystem: "com.apple.network", category: "listener")
+    package static let tls = Logger(subsystem: "com.apple.security.swifttls", category: "SwiftTLSProtocol")
+    package static let migration = Logger(subsystem: "com.apple.network", category: "migration")
 }
 #endif
 
@@ -117,7 +117,7 @@ extension Logger {
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogError(_ message: StaticString) {
+@usableFromInline package func outlinedProtoLogError(_ message: StaticString) {
     #if !DisableErrorLogging
     Logger.proto.error("\(message)")
     #endif
@@ -129,7 +129,7 @@ func outlinedProtoLogError(_ message: StaticString) {
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogError<Value: FixedWidthInteger>(
+@usableFromInline package func outlinedProtoLogError<Value: FixedWidthInteger>(
     _ message: StaticString,
     _ value: Value
 ) {
@@ -144,7 +144,7 @@ func outlinedProtoLogError<Value: FixedWidthInteger>(
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger>(
+@usableFromInline package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
     _ second: Second
@@ -160,7 +160,8 @@ func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger>(
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger, Third: FixedWidthInteger>(
+@usableFromInline
+package func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger, Third: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
     _ second: Second,
@@ -177,7 +178,7 @@ func outlinedProtoLogError<First: FixedWidthInteger, Second: FixedWidthInteger, 
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogFault(_ message: StaticString) {
+@usableFromInline package func outlinedProtoLogFault(_ message: StaticString) {
     #if !DisableErrorLogging
     Logger.proto.fault("\(message)")
     #endif
@@ -189,7 +190,7 @@ func outlinedProtoLogFault(_ message: StaticString) {
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogFault<Value: FixedWidthInteger>(
+@usableFromInline package func outlinedProtoLogFault<Value: FixedWidthInteger>(
     _ message: StaticString,
     _ value: Value
 ) {
@@ -204,7 +205,7 @@ func outlinedProtoLogFault<Value: FixedWidthInteger>(
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger>(
+@usableFromInline package func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
     _ second: Second
@@ -220,7 +221,8 @@ func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger>(
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger, Third: FixedWidthInteger>(
+@usableFromInline
+package func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger, Third: FixedWidthInteger>(
     _ message: StaticString,
     _ first: First,
     _ second: Second,
@@ -237,7 +239,7 @@ func outlinedProtoLogFault<First: FixedWidthInteger, Second: FixedWidthInteger, 
 @inline(never)
 #endif
 @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-func outlinedProtoLogInfo(_ message: StaticString) {
+@usableFromInline package func outlinedProtoLogInfo(_ message: StaticString) {
     #if !DisableDebugLogging
     Logger.proto.info("\(message)")
     #endif

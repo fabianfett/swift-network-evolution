@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(BasicContainers)
@@ -55,7 +57,7 @@ struct PacketContainerEntry: ~Copyable, NetworkComparable {
 @available(Network 0.1.0, *)
 struct Recovery: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
     struct InnerState: ~Copyable, PrefixedLoggable {
-        var log: LogPrefixer
+        package var log: LogPrefixer
         var ackElicitingPacketsInFlight = 0
         var timeOfLastSentAckElicitingPacket = NetworkClock.Instant.zero
         var largestSentPacketNumber = PacketNumber.none
@@ -756,7 +758,7 @@ struct Recovery: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
         }
     }
 
-    var log: LogPrefixer
+    package var log: LogPrefixer
     var connection: QUICConnection?
     private var initialInnerState: InnerState
     private var handshakeInnerState: InnerState

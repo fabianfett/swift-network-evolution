@@ -14,22 +14,22 @@
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
-enum QUICStreamType: CustomStringConvertible {
+package enum QUICStreamType: CustomStringConvertible {
     case bidirectional
     case unidirectional
 
-    var description: String {
+    package var description: String {
         switch self {
         case .bidirectional: return "bidirectional"
         case .unidirectional: return "unidirectional"
@@ -41,9 +41,9 @@ enum QUICStreamType: CustomStringConvertible {
 // RFC9000 2.1 Stream Types and Identifiers. We use specific type to ensure type
 // safe operations, instead of extending UInt64 for example.
 @available(Network 0.1.0, *)
-struct QUICStreamID: Comparable, Hashable {
+package struct QUICStreamID: Comparable, Hashable {
     // UInt64: A stream ID is a 62-bit integer that is unique for all streams on a connection.
-    private(set) var value: UInt64
+    package private(set) var value: UInt64
     // The least significant bit (0x01) of the stream ID identifies the initiator of the stream.
     private static let initiatorMask: UInt64 = 0x1
     // The second least significant bit (0x02) of the stream ID distinguishes between bidirectional streams
@@ -53,22 +53,22 @@ struct QUICStreamID: Comparable, Hashable {
 
     // Note: In Swift we deal with "datagram" and "TLS" as entirely different things, so they are not applicable here.
 
-    static let maxLocalStreams: UInt64 = QUICStreamID.maxLocal + 1
-    static let maxLocal: UInt64 = 0x0fff_ffff_ffff_ffff  // Only 60 bits used locally
-    static let maxValid: UInt64 = 0x3fff_ffff_ffff_ffff  // Up to 62 bits can be used by remote
+    package static let maxLocalStreams: UInt64 = QUICStreamID.maxLocal + 1
+    package static let maxLocal: UInt64 = 0x0fff_ffff_ffff_ffff  // Only 60 bits used locally
+    package static let maxValid: UInt64 = 0x3fff_ffff_ffff_ffff  // Up to 62 bits can be used by remote
 
-    init(_ value: UInt32) {
+    package init(_ value: UInt32) {
         self.value = UInt64(value)
     }
 
-    init?(_ value: UInt64) {
+    package init?(_ value: UInt64) {
         guard value <= QUICStreamID.maxValid else {
             return nil
         }
         self.value = value
     }
 
-    init?(_ value: UInt64, serverInitiated: Bool, isUnidirectional: Bool) {
+    package init?(_ value: UInt64, serverInitiated: Bool, isUnidirectional: Bool) {
         var streamID = value
         if serverInitiated {
             streamID |= QUICStreamID.initiatorMask
@@ -81,14 +81,14 @@ struct QUICStreamID: Comparable, Hashable {
         self.init(streamID)
     }
 
-    static func setInitiator(value: inout UInt64, isLocal: Bool) {
+    package static func setInitiator(value: inout UInt64, isLocal: Bool) {
         if isLocal {
             value &= ~QUICStreamID.initiatorMask
         }
         value |= QUICStreamID.initiatorMask
         return
     }
-    static func setStreamType(value: inout UInt64, isBidir: Bool) {
+    package static func setStreamType(value: inout UInt64, isBidir: Bool) {
         if isBidir {
             value &= ~QUICStreamID.typeMask
             return
@@ -96,40 +96,40 @@ struct QUICStreamID: Comparable, Hashable {
         value |= QUICStreamID.typeMask
         return
     }
-    static func < (lhs: QUICStreamID, rhs: QUICStreamID) -> Bool {
+    package static func < (lhs: QUICStreamID, rhs: QUICStreamID) -> Bool {
         lhs.value < rhs.value
     }
 
-    static func == (lhs: QUICStreamID, rhs: QUICStreamID) -> Bool {
+    package static func == (lhs: QUICStreamID, rhs: QUICStreamID) -> Bool {
         lhs.value == rhs.value
     }
 
     // Client-initiated streams have even-numbered stream IDs (with the bit set to 0)
-    var isClientInitiated: Bool { (self.value & QUICStreamID.initiatorMask) == 0 }
+    package var isClientInitiated: Bool { (self.value & QUICStreamID.initiatorMask) == 0 }
 
     // Server-initiated streams have odd-numbered stream IDs (with the bit set to 1).
-    var isServerInitiated: Bool { (self.value & QUICStreamID.initiatorMask) != 0 }
+    package var isServerInitiated: Bool { (self.value & QUICStreamID.initiatorMask) != 0 }
 
-    var isBidirectional: Bool { (self.value & QUICStreamID.typeMask) == 0 }
+    package var isBidirectional: Bool { (self.value & QUICStreamID.typeMask) == 0 }
 
-    var isUnidirectional: Bool { (self.value & QUICStreamID.typeMask) != 0 }
+    package var isUnidirectional: Bool { (self.value & QUICStreamID.typeMask) != 0 }
 
-    func isLocalBidirectional(server: Bool) -> Bool {
+    package func isLocalBidirectional(server: Bool) -> Bool {
         self.isBidirectional
             && ((!server && self.isServerInitiated) || (server && self.isClientInitiated))
     }
 
-    func isSendOnly(server: Bool) -> Bool {
+    package func isSendOnly(server: Bool) -> Bool {
         self.isUnidirectional
             && ((!server && self.isClientInitiated) || (server && self.isServerInitiated))
     }
 
-    func isReceiveOnly(server: Bool) -> Bool {
+    package func isReceiveOnly(server: Bool) -> Bool {
         self.isUnidirectional
             && ((!server && self.isServerInitiated) || (server && self.isClientInitiated))
     }
 
-    func isInitiatedBy(server: Bool) -> Bool {
+    package func isInitiatedBy(server: Bool) -> Bool {
         if !server && self.isClientInitiated {
             return true
         } else if server && self.isServerInitiated {
@@ -138,9 +138,9 @@ struct QUICStreamID: Comparable, Hashable {
         return false
     }
 
-    var quicStreamType: QUICStreamType { self.isBidirectional ? .bidirectional : .unidirectional }
+    package var quicStreamType: QUICStreamType { self.isBidirectional ? .bidirectional : .unidirectional }
 
-    func _rawHashValue(seed: Int) -> Int {
+    package func _rawHashValue(seed: Int) -> Int {
         // This is a 'Hashable' fast path which elides the creation of Hasher
         self.value._rawHashValue(seed: seed)
     }
@@ -150,7 +150,7 @@ struct QUICStreamID: Comparable, Hashable {
 
 @available(Network 0.1.0, *)
 extension QUICStreamID {
-    static func computeRemoteMaxStreamIDBidirectional(
+    package static func computeRemoteMaxStreamIDBidirectional(
         server: Bool,
         streams: UInt64
     ) -> QUICStreamID? {
@@ -164,7 +164,7 @@ extension QUICStreamID {
         }
     }
 
-    static func computeRemoteMaxStreamIDUnidirectional(
+    package static func computeRemoteMaxStreamIDUnidirectional(
         server: Bool,
         streams: UInt64
     ) -> QUICStreamID? {
@@ -176,7 +176,7 @@ extension QUICStreamID {
         }
     }
 
-    static func computeLocalMaxStreamIDBidirectional(server: Bool, streams: UInt64) -> QUICStreamID? {
+    package static func computeLocalMaxStreamIDBidirectional(server: Bool, streams: UInt64) -> QUICStreamID? {
         guard streams != 0 else { return nil }
         if !server {
             return QUICStreamID(((streams - 1) << 2) + 1)  // 4(n-1) + 1
@@ -185,7 +185,7 @@ extension QUICStreamID {
         }
     }
 
-    static func computeLocalMaxStreamIDUnidirectional(
+    package static func computeLocalMaxStreamIDUnidirectional(
         server: Bool,
         streams: UInt64
     ) -> QUICStreamID? {
@@ -199,7 +199,7 @@ extension QUICStreamID {
 
     // Compute Max Stream Data for the remote end based on our connection role (server or client)
     // and the Stream ID we received from the remote end.
-    static func computeRemoteMaxStreamData(
+    package static func computeRemoteMaxStreamData(
         isServer: Bool,
         remoteTransportParameters: TransportParameters?,
         streamID: QUICStreamID
@@ -230,7 +230,7 @@ extension QUICStreamID {
         return maxStreamData
     }
 
-    static func computeLocalMaxStreamData(
+    package static func computeLocalMaxStreamData(
         isServer: Bool,
         localTransportParameters: TransportParameters,
         streamID: QUICStreamID
@@ -261,7 +261,7 @@ extension QUICStreamID {
 
 @available(Network 0.1.0, *)
 extension QUICStreamID {
-    var variableLengthSize: Int {
+    package var variableLengthSize: Int {
         self.value.variableLengthSize
     }
 }
@@ -269,7 +269,7 @@ extension QUICStreamID {
 @available(Network 0.1.0, *)
 extension QUICStreamID {
     // Returns the next available Stream ID
-    static func nextAvailableStreamID(
+    package static func nextAvailableStreamID(
         allocatedStreamCount: Int,
         remoteMaxStreams: Int,
         remoteMaxStreamID: QUICStreamID?,
@@ -307,21 +307,21 @@ extension QUICStreamID {
 
 @available(Network 0.1.0, *)
 extension QUICStreamID: Strideable {
-    func advanced(by n: Int) -> QUICStreamID {
+    package func advanced(by n: Int) -> QUICStreamID {
         QUICStreamID(self.value + UInt64(n))!
     }
 
-    func distance(to other: QUICStreamID) -> Int {
+    package func distance(to other: QUICStreamID) -> Int {
         Int(other.value - self.value)
     }
 }
 
 @available(Network 0.1.0, *)
 extension QUICStreamID {
-    static let strideLengthToNextOfSameTypeAndInitiator = 4
+    package static let strideLengthToNextOfSameTypeAndInitiator = 4
     // Advance to next stream ID of same type and initiator.
     // The operation can overflow the valid range of value, so must validate value again.
-    func nextOfSameTypeAndInitiator() -> QUICStreamID? {
+    package func nextOfSameTypeAndInitiator() -> QUICStreamID? {
         QUICStreamID(
             self.value + UInt64(QUICStreamID.strideLengthToNextOfSameTypeAndInitiator)
         )
@@ -330,7 +330,7 @@ extension QUICStreamID {
 
 @available(Network 0.1.0, *)
 extension QUICStreamID: CustomStringConvertible {
-    var description: String {
+    package var description: String {
         String(value)
     }
 }

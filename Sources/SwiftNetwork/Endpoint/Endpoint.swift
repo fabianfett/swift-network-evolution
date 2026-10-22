@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if canImport(Foundation) && !NETWORK_EMBEDDED
 import Foundation
 #endif

@@ -12,17 +12,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if canImport(BasicContainers)
-
-import BasicContainers
-internal import DequeModule
-
-@available(Network 0.1.0, *)
-typealias NetworkUniqueArray = BasicContainers.UniqueArray
-@available(Network 0.1.0, *)
-typealias NetworkRigidArray = BasicContainers.RigidArray
-
-@available(Network 0.1.0, *)
-typealias NetworkUniqueDeque = DequeModule.UniqueDeque
-
-#endif
+// Availability due to Swift's `Span` type
+@available(anyAppleOS 26, *)
+extension Array {
+    package init(copying span: Span<Element>, maxCount: Int) {
+        let copyCount = Swift.min(span.count, maxCount)
+        self.init(unsafeUninitializedCapacity: copyCount) { (buffer, count) in
+            for i in 0..<copyCount {
+                buffer.initializeElement(at: i, to: span[i])
+            }
+            count = copyCount
+        }
+    }
+}

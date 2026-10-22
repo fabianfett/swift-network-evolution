@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !hasFeature(Embedded)
 
 enum SafeAccess {

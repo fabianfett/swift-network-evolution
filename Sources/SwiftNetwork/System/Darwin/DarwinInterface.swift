@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if (!os(Linux) && canImport(Darwin) && !NETWORK_STANDALONE) || NETWORK_DRIVERKIT
 internal import os
 

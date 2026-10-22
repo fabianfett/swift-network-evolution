@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -599,30 +601,6 @@ extension FrameType {
             return hasLength ? "DATAGRAM_LEN" : "DATAGRAM"
         }
     }
-}
-
-@available(Network 0.1.0, *)
-enum FrameParseError: Error {
-    case parsingError
-    case invalidType(UInt64)
-    case invalidValue(String)
-
-    func description() -> String {
-        switch self {
-        case .parsingError:
-            return "Frame Parse: parsing error"
-        case .invalidType(let type):
-            return "Frame Parse: invalid type: \(type)"
-        case .invalidValue(let value):
-            return "Frame Parse: invalid value: \(value)"
-        }
-    }
-}
-
-@available(Network 0.1.0, *)
-enum FrameWriteError: Int, Error {
-    case smallBuffer
-    case invalidTypeForSend
 }
 
 // MARK: - QUIC Frame Protocols

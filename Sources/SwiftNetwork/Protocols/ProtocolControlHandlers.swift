@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 /// A protocol closer to the app, with a linkage to a lower protocol toward the network.
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)

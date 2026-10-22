@@ -11,3 +11,5 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
+
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine

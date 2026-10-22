@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 // MARK: Automatic Datagram Processing
 
 /// A protocol for automatically sending and receiving datagrams with lower protocols.

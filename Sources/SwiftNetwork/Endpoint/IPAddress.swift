@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 /// A stub protocol that represents an IP address.
 protocol IPAddress: Sendable {
 

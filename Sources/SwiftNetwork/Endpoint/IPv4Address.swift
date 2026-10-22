@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 public struct IPv4Address: IPAddress, Hashable, CustomDebugStringConvertible {
 
     /// The IPv4 "any" address used for listening.

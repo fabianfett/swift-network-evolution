@@ -16,23 +16,23 @@
 
 #if canImport(BasicContainers)
 import BasicContainers
-internal import DequeModule
+package import DequeModule
 #endif
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
-enum QUICConnectionIDError: Int {
+package enum QUICConnectionIDError: Int {
     case initialConnectionSetError
     case duplicateConnectionIDSet
 }
@@ -43,18 +43,18 @@ public typealias QUICConnectionIDStorage = [20 of UInt8]
 
 @available(Network 0.1.0, *)
 extension QUICConnectionIDStorage {
-    static var empty: QUICConnectionIDStorage {
+    package static var empty: QUICConnectionIDStorage {
         QUICConnectionIDStorage(repeating: 0)
     }
 
-    init(_ span: Span<UInt8>) {
+    package init(_ span: Span<UInt8>) {
         self = QUICConnectionIDStorage.empty
         for i in 0..<span.count {
             self[i] = span[i]
         }
     }
 
-    static func random(length: Int) -> Self {
+    package static func random(length: Int) -> Self {
         var storage = QUICConnectionIDStorage.empty
         var randomNumberGenerator = SystemRandomNumberGenerator()
         for i in 0..<length {
@@ -67,10 +67,10 @@ extension QUICConnectionIDStorage {
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
 public struct QUICConnectionID: Sendable, Equatable, CustomStringConvertible {
-    static let maximumSize = 20
+    package static let maximumSize = 20
 
-    static let defaultClientSCIDLength = 0
-    static let defaultServerSCIDLength = 8
+    package static let defaultClientSCIDLength = 0
+    package static let defaultServerSCIDLength = 8
 
     private let _connectionID: QUICConnectionIDStorage
     // The actual length represents the number of bytes for the CID stored in the tuple
@@ -142,7 +142,7 @@ public struct QUICConnectionID: Sendable, Equatable, CustomStringConvertible {
     }
 
     // Creates a QUICConnectionID from a buffer with a specific size.
-    init?(_ buffer: [UInt8], size: Int) {
+    package init?(_ buffer: [UInt8], size: Int) {
         guard size <= QUICConnectionID.maximumSize, buffer.count >= size else {
             #if !DisableErrorLogging
             Logger.proto.error("Invalid QUICConnectionID length \(size)")
@@ -154,7 +154,7 @@ public struct QUICConnectionID: Sendable, Equatable, CustomStringConvertible {
         _connectionID = QUICConnectionIDStorage(cidBytes.span)
     }
 
-    var isUninitialized: Bool {
+    package var isUninitialized: Bool {
         for i in 0..<actualLength {
             if _connectionID[i] != 0 { return false }
         }
@@ -212,30 +212,30 @@ extension QUICConnectionID: Hashable {
 }
 
 @available(Network 0.1.0, *)
-struct ManagedConnectionID {
-    let sequenceNumber: UInt64
-    let connectionID: QUICConnectionID
-    let token: QUICStatelessResetToken
-    struct Flags: OptionSet {
-        init(rawValue: Self.RawValue) {
+package struct ManagedConnectionID {
+    package let sequenceNumber: UInt64
+    package let connectionID: QUICConnectionID
+    package let token: QUICStatelessResetToken
+    package struct Flags: OptionSet {
+        package init(rawValue: Self.RawValue) {
             self.rawValue = rawValue
         }
-        var rawValue: UInt8
-        static let used = Flags(rawValue: 1 << 0)
-        static let preferredAddress = Flags(rawValue: 1 << 1)
+        package var rawValue: UInt8
+        package static let used = Flags(rawValue: 1 << 0)
+        package static let preferredAddress = Flags(rawValue: 1 << 1)
     }
-    var flags: Flags = Flags()
-    var used: Bool {
+    package var flags: Flags = Flags()
+    package var used: Bool {
         get { flags.contains(.used) }
         set { if newValue { flags.insert(.used) } else { flags.remove(.used) } }
     }
-    var preferredAddress: Bool {
+    package var preferredAddress: Bool {
         get { flags.contains(.preferredAddress) }
         set {
             if newValue { flags.insert(.preferredAddress) } else { flags.remove(.preferredAddress) }
         }
     }
-    init(
+    package init(
         sequenceNumber: UInt64,
         connectionID: QUICConnectionID,
         token: QUICStatelessResetToken,
@@ -249,17 +249,19 @@ struct ManagedConnectionID {
 }
 
 @available(Network 0.1.0, *)
-struct QUICConnectionIDList: Sequence, IteratorProtocol {
-    private(set) var managedConnectionIDs = Deque<ManagedConnectionID>()
+package struct QUICConnectionIDList: Sequence, IteratorProtocol {
+    package private(set) var managedConnectionIDs = Deque<ManagedConnectionID>()
 
-    var activeConnectionIDLimit = TransportParameter.defaultValue(
+    package var activeConnectionIDLimit = TransportParameter.defaultValue(
         forType: .activeConnectionIDLimit
     )!
+
+    package init() {}
 
     // The initial connection ID is valid without a Stateless Reset Token (see RFC9000, Section 18.2).
     // If peer's transport parameters include a stateless reset token, use the normal `insert()` call.
     // NOTE: This API may only be called once for this instance of QUICConnectionIDList
-    mutating func insertInitialConnectionID(
+    package mutating func insertInitialConnectionID(
         _ connectionID: QUICConnectionID,
         token: QUICStatelessResetToken = .init()
     ) throws(QUICError) {
@@ -275,9 +277,9 @@ struct QUICConnectionIDList: Sequence, IteratorProtocol {
         managedConnectionIDs.append(newCID)
     }
 
-    static let preferredAddressSequenceNumber: UInt64 = 1
+    package static let preferredAddressSequenceNumber: UInt64 = 1
 
-    mutating func insert(
+    package mutating func insert(
         sequenceNumber: UInt64,
         connectionID: QUICConnectionID,
         token: QUICStatelessResetToken,
@@ -323,7 +325,7 @@ struct QUICConnectionIDList: Sequence, IteratorProtocol {
     }
 
     @discardableResult
-    mutating func retire(connectionID: QUICConnectionID) -> ManagedConnectionID? {
+    package mutating func retire(connectionID: QUICConnectionID) -> ManagedConnectionID? {
         var cid: ManagedConnectionID?
         managedConnectionIDs.removeAll {
             if $0.connectionID == connectionID {
@@ -335,7 +337,7 @@ struct QUICConnectionIDList: Sequence, IteratorProtocol {
         return cid
     }
 
-    mutating func retire(priorTo: UInt64) -> [ManagedConnectionID] {
+    package mutating func retire(priorTo: UInt64) -> [ManagedConnectionID] {
         var retiredSequenceNumbers = [ManagedConnectionID]()
         managedConnectionIDs.removeAll {
             if $0.sequenceNumber < priorTo {
@@ -347,7 +349,7 @@ struct QUICConnectionIDList: Sequence, IteratorProtocol {
         return retiredSequenceNumbers
     }
 
-    mutating func retire(sequenceNumber: UInt64) -> QUICConnectionID? {
+    package mutating func retire(sequenceNumber: UInt64) -> QUICConnectionID? {
         var connectionID: QUICConnectionID?
         managedConnectionIDs.removeAll {
             if $0.sequenceNumber == sequenceNumber {
@@ -359,30 +361,30 @@ struct QUICConnectionIDList: Sequence, IteratorProtocol {
         return connectionID
     }
 
-    func find(connectionID: QUICConnectionID) -> ManagedConnectionID? {
+    package func find(connectionID: QUICConnectionID) -> ManagedConnectionID? {
         managedConnectionIDs.first { $0.connectionID == connectionID }
     }
 
-    func find(sequenceNumber: UInt64) -> ManagedConnectionID? {
+    package func find(sequenceNumber: UInt64) -> ManagedConnectionID? {
         managedConnectionIDs.first { $0.sequenceNumber == sequenceNumber }
     }
 
-    func find(statelessResetToken: QUICStatelessResetToken) -> ManagedConnectionID? {
+    package func find(statelessResetToken: QUICStatelessResetToken) -> ManagedConnectionID? {
         managedConnectionIDs.first { $0.token == statelessResetToken }
     }
 
-    mutating func markUsed(_ entry: ManagedConnectionID) {
+    package mutating func markUsed(_ entry: ManagedConnectionID) {
         var entry = entry
         entry.used = true
         managedConnectionIDs.removeAll { $0.sequenceNumber == entry.sequenceNumber }
         managedConnectionIDs.prepend(entry)
     }
 
-    var isEmpty: Bool { managedConnectionIDs.isEmpty }
-    var count: Int { managedConnectionIDs.count }
+    package var isEmpty: Bool { managedConnectionIDs.isEmpty }
+    package var count: Int { managedConnectionIDs.count }
 
     private var currentIterator = 0
-    mutating func next() -> ManagedConnectionID? {
+    package mutating func next() -> ManagedConnectionID? {
         if managedConnectionIDs.isEmpty {
             return nil
         }
@@ -403,7 +405,7 @@ struct QUICConnectionIDList: Sequence, IteratorProtocol {
 // In QUIC, connection IDs are always serialized with a prefixed 8 bit length.
 @available(Network 0.1.0, *)
 extension Serializer {
-    func connectionID(_ value: QUICConnectionID) -> Serializable {
+    package func connectionID(_ value: QUICConnectionID) -> Serializable {
         .buffer([UInt8(value.length)] + value.connectionID)
     }
 }

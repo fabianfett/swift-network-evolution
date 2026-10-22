@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 #if IMPORT_CRYPTO || IMPORT_SWIFTTLS
 
@@ -82,14 +84,6 @@ extension ProtectorIV {
             buf.loadUnaligned(as: ProtectorIV.self)
         }
     }
-}
-
-enum SecFramerError: Int, Error {
-    case unsupportedAlgorithm
-    case sealingFailed
-    case noFramerFound
-    case headerProtectionFailed
-    case openFailed
 }
 
 @available(Network 0.1.0, *)

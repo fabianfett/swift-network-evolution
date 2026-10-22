@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 @_spi(Essentials)
 @available(Network 0.1.0, *)
 public struct SRVEndpoint: EndpointProtocol, EndpointCommonProtocol, Sendable {

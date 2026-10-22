@@ -16,15 +16,15 @@
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
 @_spi(ProtocolProvider)
@@ -55,7 +55,7 @@ public enum TransportParameterTypes: UInt64, CaseIterable {
     case migrationVersion = 0xff08_0808
 
     /// The index used by `TransportParameters` underlying storage.
-    var index: Int {
+    package var index: Int {
         switch self.rawValue {
         case 0...16:
             return Int(self.rawValue)
@@ -71,19 +71,19 @@ public enum TransportParameterTypes: UInt64, CaseIterable {
     }
 }
 
-enum TransportParameterDecodeErrors: Int, Error {
+package enum TransportParameterDecodeErrors: Int, Error {
     case invalidSize
     case outOfBounds
     case unknownType
     case duplicateParameter
 }
 
-enum TransportParameterEncodeErrors: Int, Error {
+package enum TransportParameterEncodeErrors: Int, Error {
     case invalidValue
 }
 
 @available(Network 0.1.0, *)
-enum TransportParameter: Equatable {
+package enum TransportParameter: Equatable {
     case originalDCID(
         _ type: TransportParameterTypes = .originalDCID,
         connectionID: QUICConnectionID
@@ -135,7 +135,7 @@ enum TransportParameter: Equatable {
     case minAckDelay(_ type: TransportParameterTypes = .minAckDelay, duration: NetworkDuration)
     case migrationVersion(_ type: TransportParameterTypes = .migrationVersion, value: UInt64)
 
-    var serializeForEarlyData: Bool {
+    package var serializeForEarlyData: Bool {
         switch self {
         case .ackDelayExponent, .maxAckDelay, .initialSCID, .originalDCID, .preferredAddress,
             .retrySCID, .statelessResetToken, .minAckDelay:
@@ -145,14 +145,14 @@ enum TransportParameter: Equatable {
         }
     }
 
-    static func defaultValue(forType: TransportParameterTypes) -> Int? {
+    package static func defaultValue(forType: TransportParameterTypes) -> Int? {
         switch forType {
         case .maxUDPPayloadSize:
             return TransportParameters.maxUDPPayloadSize
         case .ackDelayExponent:
-            return Ack.defaultDelayExponent
+            return AckDefaults.defaultDelayExponent
         case .maxAckDelay:
-            return Int(Ack.defaultMaxDelay.milliseconds)
+            return Int(AckDefaults.defaultMaxDelay.milliseconds)
         case .maxIdleTimeout,
             .initialMaxData,
             .initialMaxStreamDataBidirectionalLocal,
@@ -172,7 +172,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var usingDefaultValue: Bool {
+    package var usingDefaultValue: Bool {
         guard let defaultValue = TransportParameter.defaultValue(forType: self.type) else {
             return false
         }
@@ -187,7 +187,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var type: TransportParameterTypes {
+    package var type: TransportParameterTypes {
         switch self {
         case .disableActiveMigration:
             return .disableActiveMigration
@@ -214,7 +214,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var value: Int {
+    package var value: Int {
         switch self {
         case .originalDCID, .statelessResetToken, .preferredAddress, .disableActiveMigration,
             .initialSCID, .retrySCID, .maxAckDelay, .minAckDelay:
@@ -235,7 +235,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var duration: NetworkDuration {
+    package var duration: NetworkDuration {
         switch self {
         case .maxAckDelay(_, let duration),
             .minAckDelay(_, let duration):
@@ -245,7 +245,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var connectionID: QUICConnectionID {
+    package var connectionID: QUICConnectionID {
         switch self {
         case .originalDCID(_, let connectionID), .initialSCID(_, let connectionID),
             .retrySCID(_, let connectionID):
@@ -255,7 +255,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var statelessResetToken: QUICStatelessResetToken {
+    package var statelessResetToken: QUICStatelessResetToken {
         switch self {
         case .statelessResetToken(_, let statelessResetToken):
             return statelessResetToken
@@ -264,7 +264,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    var preferredAddress: PreferredAddress {
+    package var preferredAddress: PreferredAddress {
         switch self {
         case .preferredAddress(_, let preferredAddress):
             return preferredAddress
@@ -273,7 +273,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    func logParameter(_ logPrefixer: borrowing LogPrefixer) {
+    package func logParameter(_ logPrefixer: borrowing LogPrefixer) {
         switch self {
         case .originalDCID(let type, let connectionID), .initialSCID(let type, let connectionID),
             .retrySCID(let type, let connectionID):
@@ -303,7 +303,7 @@ enum TransportParameter: Equatable {
         }
     }
 
-    func serialize(_ buffer: inout [UInt8], logPrefixer: borrowing LogPrefixer) throws(QUICError) {
+    package func serialize(_ buffer: inout [UInt8], logPrefixer: borrowing LogPrefixer) throws(QUICError) {
         if self.usingDefaultValue {
             return
         }
@@ -444,9 +444,9 @@ enum TransportParameter: Equatable {
     // range-checked before conversion: a large value would overflow NetworkDuration.
     private static func deserializeMaxAckDelay(_ buffer: Span<UInt8>) throws(QUICError) -> NetworkDuration {
         let milliseconds = try deserializeUInt64(buffer)
-        guard milliseconds <= UInt64(Ack.maxDelay.milliseconds) else {
+        guard milliseconds <= UInt64(AckDefaults.maxDelay.milliseconds) else {
             #if !DisableErrorLogging
-            Logger.proto.error("max_ack_delay \(milliseconds) ms is greater than \(Ack.maxDelay)")
+            Logger.proto.error("max_ack_delay \(milliseconds) ms is greater than \(AckDefaults.maxDelay)")
             #endif
             throw QUICError.transportParametersDecode(TransportParameterDecodeErrors.outOfBounds)
         }
@@ -457,9 +457,9 @@ enum TransportParameter: Equatable {
     // above the largest valid max_ack_delay is rejected before conversion.
     private static func deserializeMinAckDelay(_ buffer: Span<UInt8>) throws(QUICError) -> NetworkDuration {
         let microseconds = try deserializeUInt64(buffer)
-        guard microseconds <= UInt64(Ack.maxDelay.microseconds) else {
+        guard microseconds <= UInt64(AckDefaults.maxDelay.microseconds) else {
             #if !DisableErrorLogging
-            Logger.proto.error("min_ack_delay \(microseconds) us is greater than \(Ack.maxDelay)")
+            Logger.proto.error("min_ack_delay \(microseconds) us is greater than \(AckDefaults.maxDelay)")
             #endif
             throw QUICError.transportParametersDecode(TransportParameterDecodeErrors.outOfBounds)
         }
@@ -614,7 +614,7 @@ enum TransportParameter: Equatable {
         )
     }
 
-    static func deserialize(
+    package static func deserialize(
         rawType: UInt64,
         buffer: [UInt8],
         logPrefixer: borrowing LogPrefixer
@@ -679,7 +679,7 @@ enum TransportParameter: Equatable {
         return parameter
     }
 
-    static func deserialize(
+    package static func deserialize(
         rawType: UInt64,
         buffer: Span<UInt8>,
         logPrefixer: borrowing LogPrefixer
@@ -776,19 +776,19 @@ enum TransportParameter: Equatable {
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
 public struct TransportParameters: PrefixedLoggable {
-    var log: LogPrefixer
+    package var log: LogPrefixer
     public static let minUDPPayloadSize = 1200
     // N.B.: this isn't a realistic packet size but it's the maximum value
     // the transport parameter can have.
     public static let maxUDPPayloadSize = 65527
     public static let maxDatagramFrameSize: UInt64 = 65535
     // RFC 9000, Section 18.2: active_connection_id_limit MUST be at least 2.
-    static let minActiveConnectionIDLimit: UInt64 = 2
+    package static let minActiveConnectionIDLimit: UInt64 = 2
     // RFC 9000, Section 4.6: stream limits cannot exceed 2^60.
-    static let maxStreamsLimit: UInt64 = 1 << 60
+    package static let maxStreamsLimit: UInt64 = 1 << 60
     private var parameters: [TransportParameter?]
 
-    init(logPrefixer: LogPrefixer = .init()) {
+    package init(logPrefixer: LogPrefixer = .init()) {
         self.log = logPrefixer
         self.parameters = Array(
             repeating: nil,
@@ -796,29 +796,29 @@ public struct TransportParameters: PrefixedLoggable {
         )
     }
 
-    subscript(_ type: TransportParameterTypes) -> TransportParameter? {
+    package subscript(_ type: TransportParameterTypes) -> TransportParameter? {
         self.parameters[type.index]
     }
 
-    mutating func append(_ parameter: TransportParameter) {
+    package mutating func append(_ parameter: TransportParameter) {
         self.parameters[parameter.type.index] = parameter
     }
 
-    mutating func remove(_ parameter: TransportParameter) {
+    package mutating func remove(_ parameter: TransportParameter) {
         self.remove(parameter.type)
     }
 
-    mutating func remove(_ type: TransportParameterTypes) {
+    package mutating func remove(_ type: TransportParameterTypes) {
         self.parameters[type.index] = nil
     }
 
-    mutating func removeAll() {
+    package mutating func removeAll() {
         for index in self.parameters.indices {
             self.parameters[index] = nil
         }
     }
 
-    func serialize(
+    package func serialize(
         forEarlyData: Bool = false
     ) throws(QUICError) -> [UInt8] {
         var buffer = [UInt8]()
@@ -833,7 +833,7 @@ public struct TransportParameters: PrefixedLoggable {
         return buffer
     }
 
-    static func deserialize(
+    package static func deserialize(
         _ buffer: Span<UInt8>,
         logPrefixer: LogPrefixer
     ) throws(QUICError) -> TransportParameters {
@@ -906,8 +906,8 @@ public struct TransportParameters: PrefixedLoggable {
                 )
             }
 
-            if case .ackDelayExponent(_, let value) = parameter, value > Ack.maxDelayExponent {
-                parameters.log.error("ack_delay_exponent is greater than \(Ack.maxDelayExponent)")
+            if case .ackDelayExponent(_, let value) = parameter, value > AckDefaults.maxDelayExponent {
+                parameters.log.error("ack_delay_exponent is greater than \(AckDefaults.maxDelayExponent)")
                 throw
                     QUICError
                     .transportParametersDecode(TransportParameterDecodeErrors.outOfBounds)
@@ -953,7 +953,7 @@ public struct TransportParameters: PrefixedLoggable {
         // minAckDelay must not be greater than maxAckDelay.
         // If maxAckDelay wasn't sent, we use the default.
         if let minAckDelay = minAckDelay {
-            let maxAckDelay = maxAckDelay ?? Ack.defaultMaxDelay
+            let maxAckDelay = maxAckDelay ?? AckDefaults.defaultMaxDelay
             if minAckDelay > maxAckDelay {
                 parameters.log.error(
                     "min_ack_delay \(minAckDelay) is GREATER than max_ack_delay \(maxAckDelay)"
@@ -966,7 +966,7 @@ public struct TransportParameters: PrefixedLoggable {
 
     // Return the integer value for the specified TransportParameter type
     // If the specified type does not have an integer value, the function will fail and error out
-    func intValue(_ forType: TransportParameterTypes) -> Int {
+    package func intValue(_ forType: TransportParameterTypes) -> Int {
         guard let transportParameter = self[forType] else {
             guard let defaultValue = TransportParameter.defaultValue(forType: forType) else {
                 fatalError("Parameter not set and no default value provided")

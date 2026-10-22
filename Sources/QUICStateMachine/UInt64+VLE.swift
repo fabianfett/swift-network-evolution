@@ -14,25 +14,25 @@
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
 @usableFromInline
-enum VariableLengthEncodingError: Int, Error {
+package enum VariableLengthEncodingError: Int, Error {
     case invalidValue
     case bufferTooShort
 }
 
 extension FixedWidthInteger {
-    var safeVariableLengthSize: Int? {
+    package var safeVariableLengthSize: Int? {
         // RFC 9000 Section 16
         if self <= 63 { return 1 }
         if self <= 16383 { return 2 }
@@ -42,7 +42,7 @@ extension FixedWidthInteger {
     }
 
     @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-    var variableLengthSize: Int {
+    package var variableLengthSize: Int {
         guard let size = self.safeVariableLengthSize else {
             outlinedProtoLogError("Integer value too large to encode into a 8-byte VLE")
             return 8
@@ -54,7 +54,7 @@ extension FixedWidthInteger {
 extension UInt64 {
     @inline(always)
     @inlinable
-    var safeVariableLengthSize: Int? {
+    package var safeVariableLengthSize: Int? {
         // RFC 9000 Section 16
         if self <= 63 { return 1 }
         if self <= 16383 { return 2 }
@@ -64,7 +64,7 @@ extension UInt64 {
     }
     @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
     @inline(always)
-    var variableLengthSize: Int {
+    package var variableLengthSize: Int {
         guard let size = self.safeVariableLengthSize else {
             outlinedProtoLogError("Integer value too large to encode into a 8-byte VLE")
             return 8
@@ -75,7 +75,7 @@ extension UInt64 {
 
 extension UInt64 {
     @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-    func variableLengthEncodeInto(_ buffer: inout [UInt8]) {
+    package func variableLengthEncodeInto(_ buffer: inout [UInt8]) {
         guard let length = self.safeVariableLengthSize else {
             // Too big, encode the max UInt62 value instead
             outlinedProtoLogError("Integer value too large to encode into a 8-byte VLE, setting to UInt62 max")
@@ -104,7 +104,7 @@ extension UInt64 {
     @discardableResult
     @inlinable
     @inline(always)
-    func variableLengthEncodeInto(
+    package func variableLengthEncodeInto(
         _ bytes: inout MutableRawSpan,
         offset: Int = 0
     ) throws(VariableLengthEncodingError) -> Int {
@@ -141,7 +141,10 @@ extension UInt64 {
     }
 
     @available(macOS 11, iOS 14, tvOS 14, watchOS 7, *)
-    func variableLengthValidateInBuffer(_ buffer: RawSpan, offset: Int = 0) throws(VariableLengthEncodingError) -> Int {
+    package func variableLengthValidateInBuffer(
+        _ buffer: RawSpan,
+        offset: Int = 0
+    ) throws(VariableLengthEncodingError) -> Int {
         let length = self.variableLengthSize
         guard offset + length <= buffer.byteCount else {
             throw VariableLengthEncodingError.bufferTooShort

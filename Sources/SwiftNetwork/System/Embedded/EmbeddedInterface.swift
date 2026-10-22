@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if (NETWORK_EMBEDDED || NETWORK_STANDALONE) && !NETWORK_DRIVERKIT
 
 /// A set of embedded system APIs for interacting with the system interface.

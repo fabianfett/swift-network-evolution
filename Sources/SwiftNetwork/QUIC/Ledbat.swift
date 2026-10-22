@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -29,7 +31,7 @@ internal import os
 
 @available(Network 0.1.0, *)
 struct Ledbat: CongestionControlProtocol, CubicLikeProtocol {
-    let log: LogPrefixer
+    package let log: LogPrefixer
 
     private var prevRecoveryStartTime = NetworkClock.Instant.zero
     private var prevCongestionWindow = UInt64(0)

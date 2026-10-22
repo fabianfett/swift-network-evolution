@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(BasicContainers)
@@ -56,7 +58,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             }
         }
     }
-    var log: LogPrefixer
+    package var log: LogPrefixer
 
     // Temporary storage for the frames parsed out of the packet currently being
     // processed.
@@ -773,50 +775,4 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
     }
 }
 
-@available(Network 0.1.0, *)
-extension Deserializer where Factory: ~Escapable {
-    mutating func packetNumber(_ value: inout PacketNumber, pnSize: UInt8) throws(DeserializationError) {
-        switch pnSize {
-        case 1:
-            // 1 byte
-            var pn: UInt8 = 0
-            try self.uint8(&pn)
-            value = PacketNumber(Int64(pn))
-        case 2:
-            // 2 bytes
-            var pn: UInt16 = 0
-            try self.uint16NetworkByteOrder(&pn)
-            value = PacketNumber(Int64(pn))
-        case 3:
-            // 3 bytes
-            var high: UInt8 = 0
-            var middle: UInt8 = 0
-            var low: UInt8 = 0
-            try self.uint8(&high)
-            try self.uint8(&middle)
-            try self.uint8(&low)
-            let pn = UInt32(high) << 16 | UInt32(middle) << 8 | UInt32(low)
-            value = PacketNumber(Int64(pn))
-        case 4:
-            // 4 bytes
-            var pn: UInt32 = 0
-            try self.uint32NetworkByteOrder(&pn)
-            value = PacketNumber(Int64(pn))
-        default:
-            value = PacketNumber(-1)
-            try invalidate(.validationFailed)
-        }
-    }
-
-    public mutating func connectionID(
-        _ value: inout QUICConnectionIDStorage,
-        length: Int
-    ) throws(DeserializationError) {
-        guard length <= QUICConnectionID.maximumSize else {
-            try invalidate(.parsingFailed)
-        }
-        var mutableBytes = value.mutableSpan
-        try self.span(&mutableBytes, length: length)
-    }
-}
 #endif

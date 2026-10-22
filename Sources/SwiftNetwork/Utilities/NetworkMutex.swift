@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if canImport(Synchronization) && !NETWORK_DRIVERKIT && !NETWORK_EMBEDDED
 
 internal import Synchronization

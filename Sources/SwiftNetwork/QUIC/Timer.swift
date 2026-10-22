@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(BasicContainers)
@@ -79,7 +81,7 @@ private struct TimerEntry: ~Copyable {
 final class Timer: PrefixedLoggable {
     typealias TimerID = UInt16
 
-    var log: LogPrefixer
+    package var log: LogPrefixer
     private var identifier: InstanceIdentifier? = nil
     private var context: NetworkContext? = nil
     private var timerReference: TimerReference

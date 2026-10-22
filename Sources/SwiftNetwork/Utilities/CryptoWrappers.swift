@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 // Wrappers over older Crypto functions when span-based APIs are not available.
 // This path exists for compatibility, but is significantly less efficient.
 

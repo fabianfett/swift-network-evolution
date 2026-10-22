@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -34,7 +36,7 @@ struct RTT: ~Copyable, PrefixedLoggable {
     static let nbaseHistory = 10  // 10 minutes
     static let invalidRTT: NetworkDuration = .seconds(UInt32.max)
 
-    var log: LogPrefixer
+    package var log: LogPrefixer
     private(set) var latestRTT = RTT.initialRTT
     var adjustedRTT: NetworkDuration = .microseconds(0)  // RTT adjusted by ackDelay
     var smoothedRTT = RTT.initialRTT

@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 // The linkages the framework's stack is built from.
 //
 // These are concrete: each one names the framework's protocols in an enum and switches on it, so a

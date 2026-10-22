@@ -29,7 +29,7 @@ public struct NetworkDuration: DurationProtocol, Hashable, Equatable, CustomStri
     // `static let`s. A `static let` becomes a lazily initialised global, so every
     // read carries a one-time-init guard, whereas a computed property returning a
     // literal constant-folds at each use site. Deriving them from
-    // `System.Time.NSEC_PER_USEC` and friends would not fold either, because those
+    // `SystemTime.NSEC_PER_USEC` and friends would not fold either, because those
     // are themselves `static let`s.
     private static var nanosecondsPerMicrosecond: Int64 { 1_000 }
     private static var nanosecondsPerMillisecond: Int64 { 1_000_000 }
@@ -38,7 +38,7 @@ public struct NetworkDuration: DurationProtocol, Hashable, Equatable, CustomStri
     private static var nanosecondsPerHour: Int64 { 60 * nanosecondsPerMinute }
     private static var nanosecondsPerDay: Int64 { 24 * nanosecondsPerHour }
 
-    init(nanoseconds: Int64) {
+    package init(nanoseconds: Int64) {
         self.nanoseconds = nanoseconds
     }
 
@@ -70,19 +70,19 @@ public struct NetworkDuration: DurationProtocol, Hashable, Equatable, CustomStri
         NetworkDuration(nanoseconds: lhs.nanoseconds * Int64(rhs))
     }
 
-    static func * (lhs: Double, rhs: NetworkDuration) -> NetworkDuration {
+    package static func * (lhs: Double, rhs: NetworkDuration) -> NetworkDuration {
         NetworkDuration(nanoseconds: Int64(Double(rhs.nanoseconds) * lhs))
     }
 
-    static func * (lhs: NetworkDuration, rhs: Double) -> NetworkDuration {
+    package static func * (lhs: NetworkDuration, rhs: Double) -> NetworkDuration {
         NetworkDuration(nanoseconds: Int64(Double(lhs.nanoseconds) * rhs))
     }
 
-    static func >> (lhs: NetworkDuration, rhs: Int) -> NetworkDuration {
+    package static func >> (lhs: NetworkDuration, rhs: Int) -> NetworkDuration {
         NetworkDuration(nanoseconds: lhs.nanoseconds >> rhs)
     }
 
-    static func << (lhs: NetworkDuration, rhs: Int) -> NetworkDuration {
+    package static func << (lhs: NetworkDuration, rhs: Int) -> NetworkDuration {
         NetworkDuration(nanoseconds: lhs.nanoseconds << rhs)
     }
 
@@ -253,7 +253,7 @@ public struct NetworkDuration: DurationProtocol, Hashable, Equatable, CustomStri
 #endif
 public struct NetworkClock: Clock {
     public struct Instant: InstantProtocol, CustomStringConvertible {
-        var time: NetworkDuration
+        package var time: NetworkDuration
 
         public func advanced(by duration: NetworkDuration) -> Self {
             NetworkClock.Instant(self.time + duration)
@@ -279,19 +279,19 @@ public struct NetworkClock: Clock {
             lhs.time - rhs.time
         }
 
-        init(milliseconds: Int64) {
+        package init(milliseconds: Int64) {
             time = .milliseconds(milliseconds)
         }
 
-        init(microseconds: Int64) {
+        package init(microseconds: Int64) {
             time = .microseconds(microseconds)
         }
 
-        init(nanoseconds: Int64) {
+        package init(nanoseconds: Int64) {
             time = .nanoseconds(nanoseconds)
         }
 
-        init(_ time: NetworkDuration) {
+        package init(_ time: NetworkDuration) {
             self.time = time
         }
 
@@ -301,12 +301,12 @@ public struct NetworkClock: Clock {
         /// `NetworkContext.DefaultScheduler` is the one reader of this property in the library, so a
         /// test that supplies an external scheduler reports a time of its own.
         package static var systemNow: Instant {
-            Instant(microseconds: Int64(System.Time.now()))
+            Instant(microseconds: Int64(SystemTime.now()))
         }
 
         /// The system absolute clock. See `systemNow`.
         package static var systemNowAbsolute: Instant {
-            Instant(nanoseconds: Int64(System.Time.nowAbsoluteNanoseconds()))
+            Instant(nanoseconds: Int64(SystemTime.nowAbsoluteNanoseconds()))
         }
 
         public static var zero: Instant {
@@ -325,6 +325,8 @@ public struct NetworkClock: Clock {
         }
     }
 
+    package init() {}
+
     public var now: Instant {
         Instant.systemNow
     }
@@ -340,7 +342,7 @@ public struct NetworkClock: Clock {
 }
 
 #if NETWORK_DRIVERKIT || NETWORK_EMBEDDED  // need Clock protocol from Swift _Concurrency
-protocol Clock<Duration>: Sendable {
+package protocol Clock<Duration>: Sendable {
     associatedtype Duration where Self.Duration == Self.Instant.Duration
     associatedtype Instant: InstantProtocol
 }

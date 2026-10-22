@@ -16,25 +16,25 @@
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
 public struct QUICStatelessResetToken: Equatable, Sendable, CustomStringConvertible {
-    typealias TokenStorage = [16 of UInt8]
+    package typealias TokenStorage = [16 of UInt8]
     private let _token: TokenStorage
-    static let size = Constants.statelessResetTokenSize
+    package static let size = Constants.statelessResetTokenSize
 
-    var token: [UInt8] {
+    package var token: [UInt8] {
         [UInt8](copying: _token.span, maxCount: QUICStatelessResetToken.size)
     }
 
@@ -78,7 +78,7 @@ public struct QUICStatelessResetToken: Equatable, Sendable, CustomStringConverti
         #endif
     }
 
-    var isValid: Bool {
+    package var isValid: Bool {
         if _token.count != QUICStatelessResetToken.size {
             return false
         }

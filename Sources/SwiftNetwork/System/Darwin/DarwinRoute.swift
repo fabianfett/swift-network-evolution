@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_PRIVATE && canImport(Darwin) && !NETWORK_EMBEDDED
 import Darwin
 internal import os

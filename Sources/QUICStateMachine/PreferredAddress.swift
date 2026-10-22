@@ -17,14 +17,30 @@
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
 public struct PreferredAddress: Equatable {
-    let connectionID: QUICConnectionID
-    let statelessResetToken: QUICStatelessResetToken
-    let ipv4Port: Int
-    let ipv4Address: UInt32
-    let ipv6Port: Int
-    let ipv6Address: [UInt8]
+    package let connectionID: QUICConnectionID
+    package let statelessResetToken: QUICStatelessResetToken
+    package let ipv4Port: Int
+    package let ipv4Address: UInt32
+    package let ipv6Port: Int
+    package let ipv6Address: [UInt8]
 
-    var length: Int {
+    package init(
+        connectionID: QUICConnectionID,
+        statelessResetToken: QUICStatelessResetToken,
+        ipv4Port: Int,
+        ipv4Address: UInt32,
+        ipv6Port: Int,
+        ipv6Address: [UInt8]
+    ) {
+        self.connectionID = connectionID
+        self.statelessResetToken = statelessResetToken
+        self.ipv4Port = ipv4Port
+        self.ipv4Address = ipv4Address
+        self.ipv6Port = ipv6Port
+        self.ipv6Address = ipv6Address
+    }
+
+    package var length: Int {
         MemoryLayout<UInt32>.size  // ipv4Address
             + MemoryLayout<UInt16>.size  // ipv4Port
             + MemoryLayout<UInt128>.size  // ipv6Address
@@ -33,7 +49,7 @@ public struct PreferredAddress: Equatable {
             + connectionID.length
             + QUICStatelessResetToken.size
     }
-    static let minimumSize =
+    package static let minimumSize =
         MemoryLayout<UInt32>.size  // ipv4Address
         + MemoryLayout<UInt16>.size  // ipv4Port
         + MemoryLayout<UInt128>.size  // ipv6Address
@@ -41,7 +57,7 @@ public struct PreferredAddress: Equatable {
         + MemoryLayout<UInt8>.size  // connectionID length == 0
         + QUICStatelessResetToken.size
 
-    static let maximumSize =
+    package static let maximumSize =
         MemoryLayout<UInt32>.size  // ipv4Address
         + MemoryLayout<UInt16>.size  // ipv4Port
         + MemoryLayout<UInt128>.size  // ipv6Address

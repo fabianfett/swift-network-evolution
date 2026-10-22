@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if IMPORT_SWIFTTLS && canImport(SwiftTLS)
 #if EXPORT_SWIFTTLS
 @_spi(SwiftTLSOptions) @_spi(SwiftTLSProtocol) import SwiftTLS

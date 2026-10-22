@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if NETWORK_EMBEDDED || NETWORK_DRIVERKIT
 
 #if !NETWORK_DRIVERKIT

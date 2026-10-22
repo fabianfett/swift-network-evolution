@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -259,7 +261,7 @@ struct CongestionControl: ~Copyable {
     }
 
     var state: CongestionControlState
-    var log: LogPrefixer
+    package var log: LogPrefixer
     var algorithm: Algorithm
 
     init(state: CongestionControlState = CongestionControlState(), algorithm: Algorithm) {

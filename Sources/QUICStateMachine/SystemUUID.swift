@@ -14,15 +14,15 @@
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
 #if canImport(Synchronization)
@@ -33,11 +33,11 @@ internal import Synchronization
 @available(Network 0.1.0, *)
 public struct SystemUUID: Hashable, Equatable, CustomStringConvertible, Sendable, BitwiseCopyable {
 
-    internal typealias UUIDStorage = [16 of UInt8]
+    package typealias UUIDStorage = [16 of UInt8]
 
-    internal let storage: UUIDStorage
+    package let storage: UUIDStorage
 
-    internal init(_ storage: UUIDStorage) {
+    package init(_ storage: UUIDStorage) {
         self.storage = storage
     }
 
@@ -65,15 +65,6 @@ public struct SystemUUID: Hashable, Equatable, CustomStringConvertible, Sendable
         }
     }
 
-    public init(_ span: Span<UInt8>) throws(NetworkError) {
-        guard span.count == 16 else { throw NetworkError.posix(EINVAL) }
-        var storage = UUIDStorage(repeating: 0x00)
-        for i in 0..<16 {
-            storage[i] = span[i]
-        }
-        self.storage = storage
-    }
-
     /// Returns a string representation of the UUID.
     ///
     /// For example, `E621E1F8-C36C-495A-93FC-0C247A3E6E5F`.
@@ -96,36 +87,6 @@ public struct SystemUUID: Hashable, Equatable, CustomStringConvertible, Sendable
         description
     }
 
-    static internal let insecureUUIDValue = NetworkMutex<UInt128>(0)
-    static var nextInsecureUUIDValue: UInt128 {
-        var value: UInt128 = 0
-        insecureUUIDValue.withLock {
-            if $0 == 0 || $0 == UInt128.max {
-                $0 = UInt128.randomUUIDValue
-            }
-            value = $0
-            $0 += 1
-        }
-        return value
-    }
-
-    public init(insecure: Bool = false) {
-        var storage = UUIDStorage(repeating: 0x00)
-
-        let uuidValueNumber: UInt128
-        if insecure {
-            uuidValueNumber = SystemUUID.nextInsecureUUIDValue
-        } else {
-            uuidValueNumber = UInt128.randomUUIDValue
-        }
-        for i in (0..<16).reversed() {
-            let byte = UInt8((uuidValueNumber >> (i * 8)) & 0xFF)
-            storage[i] = byte
-        }
-
-        self.storage = storage
-    }
-
     public var isUUIDNULL: Bool {
         self == Self.empty
     }
@@ -134,12 +95,12 @@ public struct SystemUUID: Hashable, Equatable, CustomStringConvertible, Sendable
 // Availability due to Swift's `UInt128.random(in:)` (introduced in Swift 6.0 / iOS 18 / macOS 15)
 @available(macOS 15, iOS 18, tvOS 18, watchOS 11, *)
 extension UInt128 {
-    static var randomUUIDValue: UInt128 {
+    package static var randomUUIDValue: UInt128 {
         let random = UInt128.random(in: 1...UInt128.max)
         return random.withUUIDMaskApplied
     }
 
-    var withUUIDMaskApplied: UInt128 {
+    package var withUUIDMaskApplied: UInt128 {
         let originalValue = self
 
         // Apply UUID version 4 format (byte 6) and variant (byte 8) directly on UInt128
@@ -150,20 +111,3 @@ extension UInt128 {
         return (intermediateValue & ~(UInt128(0xC0) << 64)) | (UInt128(0x80) << 64)
     }
 }
-
-#if !NETWORK_STANDALONE
-@available(Network 0.1.0, *)
-extension SystemUUID: Codable {
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-        let array = [UInt8](copying: self.span, maxCount: 16)
-        try container.encode(array)
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        let array = try container.decode(Array<UInt8>.self)
-        self = try SystemUUID(array.span)
-    }
-}
-#endif

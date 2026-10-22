@@ -18,6 +18,8 @@
 //  draft-briscoe-iccrg-prague-congestion-control. It differs from these
 //  two as it performs CUBIC increase during congestion avoidance.
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -43,7 +45,7 @@ enum RTTControlType: UInt8 {
 
 @available(Network 0.1.0, *)
 struct Prague: CongestionControlProtocol, CubicLikeProtocol {
-    let log: LogPrefixer
+    package let log: LogPrefixer
 
     private static let alphaShift = 20
     private static let gShift = 4

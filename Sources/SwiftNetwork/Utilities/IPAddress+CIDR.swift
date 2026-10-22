@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 // MARK: - CIDR parsing
 
 // Parses an IPv4 CIDR string into a masked network address and subnet mask in network byte order.

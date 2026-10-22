@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if canImport(BasicContainers)
 import BasicContainers
 internal import DequeModule
@@ -195,144 +197,6 @@ extension TimerSchedulable {
 @available(Network 0.1.0, *)
 public protocol LoggableProtocol: ~Copyable, ProtocolInstance {
     var log: NetworkLoggerState { get set }
-}
-
-@_spi(ProtocolProvider)
-@available(Network 0.1.0, *)
-public struct NetworkLoggerState: ~Copyable {
-    public var logPrefix: String
-
-    public init(_ prefix: String = "") {
-        logPrefix = prefix
-    }
-
-    #if DisableDebugLogging
-    @inline(always)
-    public func info(_ message: @autoclosure () -> String) {}
-
-    @inline(always)
-    public func debug(_ message: @autoclosure () -> String) {}
-
-    @inline(always)
-    public func datapath(_ message: @autoclosure () -> String) {}
-    #else
-    #if !NETWORK_EMBEDDED
-    public func info(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        if !Logger.swiftNetworkProtocolLoggingEnabled {
-            return
-        }
-        let logPrefix = logPrefix
-        let message = message()
-        Logger.proto.info("\(callingFunction) \(logPrefix) \(message)")
-    }
-    public func debug(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        if !Logger.swiftNetworkProtocolLoggingEnabled {
-            return
-        }
-        let logPrefix = logPrefix
-        let message = message()
-        Logger.proto.debug("\(callingFunction) \(logPrefix) \(message)")
-    }
-    #if !NETWORK_PRIVATE
-    #if DatapathLogging
-    public func datapath(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        if !Logger.swiftNetworkDatapathLoggingEnabled {
-            return
-        }
-        let logPrefix = logPrefix
-        let message = message()
-        Logger.proto.debug("\(callingFunction) \(logPrefix) \(message)")
-    }
-    #else
-    @inline(always)
-    public func datapath(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {}
-    #endif
-    #endif
-    #else
-    public func info(_ message: String, callingFunction: StaticString = #function) {
-        if !Logger.swiftNetworkProtocolLoggingEnabled {
-            return
-        }
-        let logPrefix = logPrefix
-        Logger.proto.info("\(callingFunction) \(logPrefix) \(message)")
-    }
-
-    public func debug(_ message: String, callingFunction: StaticString = #function) {
-        if !Logger.swiftNetworkProtocolLoggingEnabled {
-            return
-        }
-        let logPrefix = logPrefix
-        Logger.proto.debug("\(callingFunction) \(logPrefix) \(message)")
-    }
-
-    #if DatapathLogging
-    public func datapath(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        if !Logger.swiftNetworkDatapathLoggingEnabled {
-            return
-        }
-        let logPrefix = logPrefix
-        let message = message()
-        Logger.proto.debug("\(callingFunction) \(logPrefix) \(message)")
-    }
-    #else
-    @inline(always)
-    public func datapath(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {}
-    #endif
-
-    #endif
-    #endif
-
-    #if DisableErrorLogging
-    @inline(always)
-    public func notice(_ message: @autoclosure () -> String) {}
-
-    @inline(always)
-    public func error(_ message: @autoclosure () -> String) {}
-
-    @inline(always)
-    public func fault(_ message: @autoclosure () -> String) {}
-    #else
-    #if !NETWORK_EMBEDDED
-    public func fault(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        let logPrefix = logPrefix
-        let message = message()
-        Logger.proto.fault("\(callingFunction) \(logPrefix) \(message)")
-    }
-    public func error(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        let logPrefix = logPrefix
-        let message = message()
-        Logger.proto.error("\(callingFunction) \(logPrefix) \(message)")
-    }
-    public func notice(_ message: @autoclosure () -> String, callingFunction: StaticString = #function) {
-        let logPrefix = logPrefix
-        let message = message()
-        #if os(Linux) || os(Android)
-        Logger.proto.notice("\(callingFunction) \(logPrefix) \(message)")
-        #else
-        Logger.proto.log("\(callingFunction) \(logPrefix) \(message)")
-        #endif
-    }
-    #else
-    public func fault(_ message: String, callingFunction: StaticString = #function) {
-        let logPrefix = logPrefix
-        Logger.proto.fault("\(callingFunction) \(logPrefix) \(message)")
-    }
-
-    public func error(_ message: String, callingFunction: StaticString = #function) {
-        let logPrefix = logPrefix
-        Logger.proto.error("\(callingFunction) \(logPrefix) \(message)")
-    }
-
-    public func notice(_ message: String, callingFunction: StaticString = #function) {
-        let logPrefix = logPrefix
-        #if os(Linux)
-        Logger.proto.notice("\(callingFunction) \(logPrefix) \(message)")
-        #else
-        Logger.proto.log("\(callingFunction) \(logPrefix) \(message)")
-        #endif
-    }
-    #endif
-    #endif
 }
 
 // MARK: Protocol Instance As Linkage

@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 /// The six prefix lengths defined by RFC 6052 for embedding IPv4 addresses into IPv6.
 ///
 /// Raw values represent the prefix length in **bytes** (not bits). Use `bitLength`

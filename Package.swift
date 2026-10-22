@@ -63,6 +63,10 @@ let package = Package(
             targets: ["SwiftNetwork"]
         ),
         .library(
+            name: "QUICStateMachine",
+            targets: ["QUICStateMachine"]
+        ),
+        .library(
             name: "SwiftNetworkBenchmarks",
             targets: ["SwiftNetworkBenchmarks"]
         ),
@@ -115,8 +119,24 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "QUICStateMachine",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.linux, .android])),
+                .product(name: "DequeModule", package: "swift-collections"),
+                .product(name: "BasicContainers", package: "swift-collections"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "CryptoExtras", package: "swift-crypto"),
+                .product(name: "SwiftTLS", package: "swift-tls"),
+            ],
+            swiftSettings: availabilityMacros + settings + [
+                // Fuzzers need testable imports.
+                .unsafeFlags(["-enable-testing"], fuzzBuildCondition)
+            ]
+        ),
+        .target(
             name: "SwiftNetwork",
             dependencies: [
+                "QUICStateMachine",
                 .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.linux, .android])),
                 .target(name: "SwiftNetworkLinuxShim", condition: .when(platforms: [.linux])),
                 .product(name: "DequeModule", package: "swift-collections"),

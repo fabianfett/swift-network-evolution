@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -26,29 +28,6 @@ internal import Logging
 #elseif canImport(os)
 internal import os
 #endif
-
-enum PacketBuilderError: Int, Error {
-    case argumentValidationFailed
-    case bufferTooShort
-    case frameError
-    case tokenLengthTooBig
-    case noPayloadsWritten
-
-    func description() -> String {
-        switch self {
-        case .argumentValidationFailed:
-            return "Argument validation failed"
-        case .bufferTooShort:
-            return "Buffer too short"
-        case .frameError:
-            return "Frame error"
-        case .tokenLengthTooBig:
-            return "Token length too big"
-        case .noPayloadsWritten:
-            return "No payloads written"
-        }
-    }
-}
 
 @available(Network 0.1.0, *)
 extension Packet {

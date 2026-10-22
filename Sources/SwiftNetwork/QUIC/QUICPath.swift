@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(Glibc)
@@ -244,7 +246,7 @@ public final class QUICPath: MultiplexingDatagramPath<
         set { if newValue { flags.insert(.reportedIdleEvent) } else { flags.remove(.reportedIdleEvent) } }
     }
 
-    var log: LogPrefixer {
+    package var log: LogPrefixer {
         parentProtocol.logPrefixer
     }
 

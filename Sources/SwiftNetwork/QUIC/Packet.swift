@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(BasicContainers)
@@ -30,65 +32,6 @@ internal import Logging
 #elseif canImport(os)
 internal import os
 #endif
-
-enum QUICPacketError: Int, Error {
-    case invalidDestinationConnectionID
-    case invalidSourceConnectionID
-    case invalidVersionNumber
-    case serializationBufferTooSmall
-    case serializationError
-    case invalidHeaderType
-    case longheaderKeyStateUpdate  // Attempt to modify keyState while parsing a LH packet.
-    case ackNumberUnderflow  // packet number < last acked
-    case invalidPacketNumber
-    case truncatedPacketNumberTooLarge
-    case deserializationError
-}
-
-enum PacketKeyState: Int, CaseIterable, CustomStringConvertible, Comparable {
-    case initial = 0
-    case handshake
-    case earlyData
-    case phase0 /* 1-RTT phase 0 */
-    case phase1 /* 1-RTT phase 1 */
-
-    static func < (lhs: PacketKeyState, rhs: PacketKeyState) -> Bool {
-        lhs.rawValue < rhs.rawValue
-    }
-
-    var description: String {
-        switch self {
-        case .initial:
-            return "initial"
-        case .handshake:
-            return "handshake"
-        case .earlyData:
-            return "0-rtt"
-        case .phase0:
-            return "kp0"
-        case .phase1:
-            return "kp1"
-        }
-    }
-
-    var isHandshakeConfirmed: Bool {
-        switch self {
-        case .earlyData, .phase0, .phase1:
-            return true
-        default:
-            return false
-        }
-    }
-
-    var is1RTT: Bool {
-        switch self {
-        case .phase0, .phase1:
-            return true
-        default:
-            return false
-        }
-    }
-}
 
 @available(Network 0.1.0, *)
 struct SentPacketRecord: ~Copyable {
@@ -674,26 +617,4 @@ struct Packet: ~Copyable {
     }
 }
 
-@available(Network 0.1.0, *)
-extension InPlaceSerializer where Factory: ~Escapable, Factory: ~Copyable {
-
-    mutating func connectionID(_ value: QUICConnectionID) throws(SerializationError) {
-        try self.uint8(UInt8(value.length))
-        try self.buffer(value.connectionID)
-    }
-
-    mutating func encodedPacketNumber(_ value: EncodedPacketNumber) throws(SerializationError) {
-        let encodedSize = value.size.rawValue
-        let offset = MemoryLayout<UInt64>.size - encodedSize
-
-        try withUnsafeBytes(of: value.number.bigEndian) { bytes throws(SerializationError) in
-            let sourcePtr = bytes.baseAddress!.advanced(by: offset)
-            let bufferPtr = UnsafeBufferPointer(
-                start: sourcePtr.assumingMemoryBound(to: UInt8.self),
-                count: encodedSize
-            )
-            try self.span(bufferPtr.span.bytes)
-        }
-    }
-}
 #endif

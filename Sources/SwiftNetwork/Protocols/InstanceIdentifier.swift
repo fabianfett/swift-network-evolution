@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 /// A unique identifier of a particular protocol instance that has been instantiated and registered
 /// with a NetworkContext.EventContext. Each protocol in the stack will have one of these, and
 /// this type can be used for comparison and hashing.

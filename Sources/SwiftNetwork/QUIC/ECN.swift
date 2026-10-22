@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(BasicContainers)
@@ -83,7 +85,7 @@ enum ECNState {
 // Global explicit congestion notification state
 @available(Network 0.1.0, *)
 struct ECN: ~Copyable, PrefixedLoggable {
-    let log: LogPrefixer
+    package let log: LogPrefixer
 
     // We have one copy of ECN counters per packet number space
     var counters = NetworkRigidArray<ECNCounters>(
@@ -202,7 +204,7 @@ struct ECN: ~Copyable, PrefixedLoggable {
 // Per path explicit congestion notification state
 @available(Network 0.1.0, *)
 struct ECNPathState: ~Copyable, PrefixedLoggable {
-    let log: LogPrefixer
+    package let log: LogPrefixer
 
     static let validationThreshold = 10
     static let lossThreshold: (ect0: Int, ect1: Int) = (3, 10)

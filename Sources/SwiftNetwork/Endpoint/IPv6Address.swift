@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 @available(Network 0.1.0, *)
 public struct IPv6Address: IPAddress, Hashable, CustomDebugStringConvertible {
 

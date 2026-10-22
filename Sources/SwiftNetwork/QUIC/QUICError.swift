@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if canImport(Glibc)
 import Glibc
 internal import Logging
@@ -248,55 +250,6 @@ extension NetworkError {
         self.init(quicTransportError: error)
     }
 }
-
-// QUICError is a common type for representing all exceptions thrown by the QUIC stack
-// More granular error types are not used as embedded swift does not support untyped throws
-
-#if !NETWORK_NO_SWIFT_QUIC
-@available(Network 0.1.0, *)
-enum QUICError: Error {
-    case packet(QUICPacketError)
-    case packetBuilder(PacketBuilderError)
-    case packetFormats(QUICPacketFormatsError)
-    #if IMPORT_CRYPTO || IMPORT_SWIFTTLS  // Keep in sync with protector scoping
-    case protector(SecFramerError)
-    #endif
-    case frameParse(FrameParseError)
-    case frameWrite(FrameWriteError)
-    case transportParametersDecode(TransportParameterDecodeErrors)
-    case transportParametersEncode(TransportParameterEncodeErrors)
-    case connectionID(QUICConnectionIDError)
-
-    var info: (code: Int, description: String) {
-        switch self {
-        case .packet(let subtype):
-            return (subtype.rawValue, "QUIC Packet Exception")
-        case .packetBuilder(let subtype):
-            return (subtype.rawValue, subtype.description())
-        case .packetFormats(let subtype):
-            return (subtype.rawValue, "Packet Formats Exception")
-        #if IMPORT_CRYPTO || IMPORT_SWIFTTLS  // Keep in sync with protector scoping
-        case .protector(let subtype):
-            return (subtype.rawValue, "QUIC Protector Exception")
-        #endif
-        case .frameParse(let subtype):
-            return (Int.min, subtype.description())
-        case .frameWrite(let subtype):
-            return (subtype.rawValue, "QUIC Frame Write Exception")
-        case .transportParametersDecode(let subtype):
-            return (subtype.rawValue, "QUIC Transport Parameters Decode Exception")
-        case .transportParametersEncode(let subtype):
-            return (subtype.rawValue, "QUIC Transport Parameters Encoder Exception")
-        case .connectionID(let subtype):
-            return (subtype.rawValue, "QUIC Connection ID error")
-        }
-    }
-}
-#else
-enum QUICError: Error {
-    case none
-}
-#endif
 
 #if os(Linux) || os(Android)
 typealias CryptoKitMetaError = any Error

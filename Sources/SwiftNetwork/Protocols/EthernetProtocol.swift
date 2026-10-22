@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 @available(Network 0.1.0, *)
 struct EthernetProtocol {
     struct Properties {

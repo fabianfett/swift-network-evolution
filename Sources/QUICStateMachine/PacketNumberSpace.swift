@@ -16,25 +16,25 @@
 
 #if canImport(BasicContainers)
 import BasicContainers
-internal import DequeModule
+package import DequeModule
 #endif
 
 #if canImport(Glibc)
 import Glibc
-internal import Logging
+package import Logging
 #elseif canImport(Android)
 import Android
-internal import Logging
+package import Logging
 #elseif canImport(Musl)
 import Musl
-internal import Logging
+package import Logging
 #elseif canImport(os)
-internal import os
+package import os
 #endif
 
 @available(Network 0.1.0, *)
-struct PacketIdentifier: Comparable {
-    static func < (lhs: PacketIdentifier, rhs: PacketIdentifier) -> Bool {
+package struct PacketIdentifier: Comparable {
+    package static func < (lhs: PacketIdentifier, rhs: PacketIdentifier) -> Bool {
         if lhs.space == rhs.space {
             return lhs.number < rhs.number
         }
@@ -44,15 +44,15 @@ struct PacketIdentifier: Comparable {
     private let _space: PacketNumberSpace
     private var _number: PacketNumber
 
-    init(space: PacketNumberSpace, number: PacketNumber) {
+    package init(space: PacketNumberSpace, number: PacketNumber) {
         self._space = space
         self._number = number
     }
 
-    var space: PacketNumberSpace {
+    package var space: PacketNumberSpace {
         _space
     }
-    var number: PacketNumber {
+    package var number: PacketNumber {
         get { _number }
         set(newValue) {
             _number = newValue
@@ -60,14 +60,14 @@ struct PacketIdentifier: Comparable {
     }
 }
 
-struct EncodedPacketNumber {
-    enum Size: Int, CaseIterable {
+package struct EncodedPacketNumber {
+    package enum Size: Int, CaseIterable {
         case oneByte = 1
         case twoBytes = 2
         case threeBytes = 3
         case fourBytes = 4
 
-        init?(rawValue: Int) {
+        package init?(rawValue: Int) {
             switch rawValue {
             case 1:
                 self = .oneByte
@@ -83,9 +83,14 @@ struct EncodedPacketNumber {
         }
     }
 
-    let number: Int64
-    let size: Size
-    var headerFieldSize: UInt8 {  // The QUIC packet header bit field values
+    package let number: Int64
+    package let size: Size
+
+    package init(number: Int64, size: Size) {
+        self.number = number
+        self.size = size
+    }
+    package var headerFieldSize: UInt8 {  // The QUIC packet header bit field values
         switch size {
         case .oneByte:
             return 0x00
@@ -100,92 +105,92 @@ struct EncodedPacketNumber {
 }
 
 @available(Network 0.1.0, *)
-struct PacketNumber: Comparable, ExpressibleByIntegerLiteral, Hashable, CustomStringConvertible {
+package struct PacketNumber: Comparable, ExpressibleByIntegerLiteral, Hashable, CustomStringConvertible {
 
-    init(integerLiteral value: Int64) {
+    package init(integerLiteral value: Int64) {
         self.value = value
     }
 
-    typealias IntegerLiteralType = Int64
+    package typealias IntegerLiteralType = Int64
 
-    var description: String {
+    package var description: String {
         "PacketNumber(\(value))"
     }
 
-    var value: Int64
-    static let initial = PacketNumber(0)  // Initial path in MPQUIC
-    static let none = PacketNumber(-1)
-    static let max = PacketNumber(0x3fff_FFFF_FFFF_FFFF)
+    package var value: Int64
+    package static let initial = PacketNumber(0)  // Initial path in MPQUIC
+    package static let none = PacketNumber(-1)
+    package static let max = PacketNumber(0x3fff_FFFF_FFFF_FFFF)
 
-    init(_ value: Int64) {
+    package init(_ value: Int64) {
         self.value = value
     }
 
-    init(_ value: UInt64) {
+    package init(_ value: UInt64) {
         self.value = Int64(truncatingIfNeeded: value)
     }
 
-    func isValid() -> Bool {
+    package func isValid() -> Bool {
         self >= .initial && self <= PacketNumber.max
     }
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
+    package static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.value == rhs.value
     }
 
-    static func < (lhs: Self, rhs: Self) -> Bool {
+    package static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.value < rhs.value
     }
 
-    static func < (lhs: Int64, rhs: Self) -> Bool {
+    package static func < (lhs: Int64, rhs: Self) -> Bool {
         lhs < rhs.value
     }
 
-    static func < (lhs: Self, rhs: Int64) -> Bool {
+    package static func < (lhs: Self, rhs: Int64) -> Bool {
         lhs.value < rhs
     }
 
-    static func > (lhs: Self, rhs: Int64) -> Bool {
+    package static func > (lhs: Self, rhs: Int64) -> Bool {
         lhs.value > rhs
     }
 
-    static func >= (lhs: Self, rhs: Int64) -> Bool {
+    package static func >= (lhs: Self, rhs: Int64) -> Bool {
         lhs.value >= rhs
     }
 
-    static func + (lhs: Self, rhs: Self) -> Self {
+    package static func + (lhs: Self, rhs: Self) -> Self {
         PacketNumber(lhs.value + rhs.value)
     }
 
-    static func + (lhs: Self, rhs: Int64) -> Self {
+    package static func + (lhs: Self, rhs: Int64) -> Self {
         PacketNumber(lhs.value + rhs)
     }
 
-    static func - (lhs: Self, rhs: Self) -> Self {
+    package static func - (lhs: Self, rhs: Self) -> Self {
         PacketNumber(lhs.value - rhs.value)
     }
 
-    static func - (lhs: Self, rhs: Int64) -> Self {
+    package static func - (lhs: Self, rhs: Int64) -> Self {
         PacketNumber(lhs.value - rhs)
     }
 
-    static func * (lhs: Self, rhs: Self) -> Self {
+    package static func * (lhs: Self, rhs: Self) -> Self {
         PacketNumber(lhs.value * rhs.value)
     }
 
-    static func / (lhs: Self, rhs: Self) -> Self {
+    package static func / (lhs: Self, rhs: Self) -> Self {
         PacketNumber(lhs.value / rhs.value)
     }
 
-    static func -= (lhs: inout Self, rhs: Self) {
+    package static func -= (lhs: inout Self, rhs: Self) {
         lhs.value -= rhs.value
     }
 
-    static func += (lhs: inout Self, rhs: Self) {
+    package static func += (lhs: inout Self, rhs: Self) {
         lhs.value += rhs.value
     }
 
-    func byteLength() -> Int {
+    package func byteLength() -> Int {
         if self == PacketNumber.none {
             return 0
         }
@@ -200,7 +205,7 @@ struct PacketNumber: Comparable, ExpressibleByIntegerLiteral, Hashable, CustomSt
     }
 
     @inline(always)
-    func encode(
+    package func encode(
         lastAcked: PacketNumber,
         fixedSize: EncodedPacketNumber.Size? = nil
     ) throws(QUICError) -> EncodedPacketNumber {
@@ -250,12 +255,12 @@ struct PacketNumber: Comparable, ExpressibleByIntegerLiteral, Hashable, CustomSt
 }
 
 @available(Network 0.1.0, *)
-enum PacketNumberSpace: UInt8, Comparable, CaseIterable {
+package enum PacketNumberSpace: UInt8, Comparable, CaseIterable {
     case initial = 0
     case handshake = 1
     case applicationData = 2
     @inline(always)
-    static func fromKeyState(keyState: PacketKeyState) -> PacketNumberSpace {
+    package static func fromKeyState(keyState: PacketKeyState) -> PacketNumberSpace {
         switch keyState {
         case .earlyData, .phase0, .phase1:
             return .applicationData
@@ -265,7 +270,7 @@ enum PacketNumberSpace: UInt8, Comparable, CaseIterable {
             return .handshake
         }
     }
-    static func < (lhs: PacketNumberSpace, rhs: PacketNumberSpace) -> Bool {
+    package static func < (lhs: PacketNumberSpace, rhs: PacketNumberSpace) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 }
@@ -274,7 +279,7 @@ enum PacketNumberSpace: UInt8, Comparable, CaseIterable {
 extension NetworkRigidArray {
     // This extension is used to subscript an array by a PacketNumberSpace's rawValue
     // This ensures the performance of the lookup in the data path
-    subscript<Index: RawRepresentable>(index: Index) -> Element where Index.RawValue == UInt8 {
+    package subscript<Index: RawRepresentable>(index: Index) -> Element where Index.RawValue == UInt8 {
         get {
             self[Int(index.rawValue)]
         }

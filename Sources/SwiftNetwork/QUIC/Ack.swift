@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 #if !NETWORK_NO_SWIFT_QUIC
 
 #if canImport(BasicContainers)
@@ -38,7 +40,7 @@ typealias AckBlock = (start: PacketNumber, end: PacketNumber)
 // ACK state per packet number space.
 @available(Network 0.1.0, *)
 struct AckSpace: ~Copyable, PrefixedLoggable {
-    var log: LogPrefixer
+    package var log: LogPrefixer
     var blocks: [AckBlock] = []
     var largestTimestamp: NetworkClock.Instant = .zero
     var delay = UInt64(0)
@@ -425,7 +427,7 @@ struct AckBlockSequence: Sequence {
 
 @available(Network 0.1.0, *)
 struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
-    var log: LogPrefixer
+    package var log: LogPrefixer
 
     // When an outgoing ACK reports more than this many blocks (i.e. this many gaps
     // in the packet numbers we've received), we piggyback a PING frame. An ACK
@@ -451,12 +453,12 @@ struct Ack: ~Copyable, PrefixedLoggable, NonCopyableTimerUser {
     static let immediateAcks = 8
 
     static let defaultPacketThreshold = 128
-    static let defaultDelayExponent = 3 /* 2 ** 3 */
+    static let defaultDelayExponent = AckDefaults.defaultDelayExponent
 
-    static let defaultMaxDelay: NetworkDuration = .milliseconds(25)
+    static let defaultMaxDelay = AckDefaults.defaultMaxDelay
 
-    static let maxDelayExponent = 20  // Values above 20 are invalid
-    static let maxDelay: NetworkDuration = .milliseconds(1 << 14)  // Values above 2^14ms are invalid
+    static let maxDelayExponent = AckDefaults.maxDelayExponent
+    static let maxDelay = AckDefaults.maxDelay
 
     private var initialAckSpace: AckSpace
     private var handshakeAckSpace: AckSpace

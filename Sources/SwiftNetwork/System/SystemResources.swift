@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+@_spi(Essentials) @_spi(ProtocolProvider) import QUICStateMachine
+
 /// An extension that adds system-resource APIs.
 ///
 /// Extends `System` with system-resource functions.
