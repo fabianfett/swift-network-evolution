@@ -287,20 +287,20 @@ protocol SecFramerProtocol: ~Copyable {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     )
         throws(QUICError)
     static func open(
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     )
         throws(QUICError)
     static func headerProtection(
         keys: borrowing SecFramerKeys,
         packet: inout Packet,
-        frame: inout Frame,
+        buffer: inout MutableSpan<UInt8>,
         mask: inout MutableRawSpan,
         loggingOperation: StaticString
     ) throws(QUICError)
@@ -333,7 +333,7 @@ struct SecFramerNull: ~Copyable, SecFramerProtocol {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
     }
 
@@ -341,14 +341,14 @@ struct SecFramerNull: ~Copyable, SecFramerProtocol {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
     }
 
     static func headerProtection(
         keys: borrowing SecFramerKeys,
         packet: inout Packet,
-        frame: inout Frame,
+        buffer: inout MutableSpan<UInt8>,
         mask: inout MutableRawSpan,
         loggingOperation: StaticString
     ) throws(QUICError) {
@@ -388,7 +388,7 @@ struct SecFramerAESGCM: ~Copyable, SecFramerProtocol {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
         #if !DisableDebugLogging
         let size = keys.size
@@ -400,9 +400,6 @@ struct SecFramerAESGCM: ~Copyable, SecFramerProtocol {
         )
         #endif
 
-        guard var buffer = frame.mutableSpan else {
-            throw QUICError.protector(SecFramerError.sealingFailed)
-        }
         do {
             let buffer = buffer.withUnsafeMutableBytes { $0 }
             let payload = UnsafeMutableRawBufferPointer(rebasing: buffer[packet.payloadRange])
@@ -428,7 +425,7 @@ struct SecFramerAESGCM: ~Copyable, SecFramerProtocol {
     static func headerProtection(
         keys: borrowing SecFramerKeys,
         packet: inout Packet,
-        frame: inout Frame,
+        buffer: inout MutableSpan<UInt8>,
         mask: inout MutableRawSpan,
         loggingOperation: StaticString
     ) throws(QUICError) {
@@ -438,10 +435,6 @@ struct SecFramerAESGCM: ~Copyable, SecFramerProtocol {
         let range = packet.sampleRange
         keys.log.datapath("\(loggingOperation) header for AES\(size), sample \(range)")
         #endif
-
-        guard var buffer = frame.mutableSpan else {
-            throw QUICError.protector(SecFramerError.headerProtectionFailed)
-        }
 
         #if canImport(CommonCrypto)
         let packetBuffer = buffer.withUnsafeMutableBytes { $0 }
@@ -487,7 +480,7 @@ struct SecFramerAESGCM: ~Copyable, SecFramerProtocol {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
         #if !DisableDebugLogging
         let size = keys.size
@@ -499,10 +492,6 @@ struct SecFramerAESGCM: ~Copyable, SecFramerProtocol {
             "Opening for AESGCM\(size), nonce len \(nonce.count), header \(headerLength), payload \(payloadLength), tag \(tagLength), pn \(pn)"
         )
         #endif
-        guard var buffer = frame.mutableSpan else {
-            keys.log.error("Unclaimed bytes nil")
-            throw QUICError.protector(SecFramerError.openFailed)
-        }
         do {
             let buffer = buffer.withUnsafeMutableBytes { $0 }
             let header = UnsafeMutableRawBufferPointer(rebasing: buffer[packet.headerRange])
@@ -560,7 +549,7 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
         #if !DisableDebugLogging
         let headerLength = packet.headerLength
@@ -570,9 +559,6 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
             "Sealing for ChaCha20Poly1305, nonce len \(nonce.count), header \(headerLength), payload \(payloadLength) tag \(tagLength)"
         )
         #endif
-        guard var buffer = frame.mutableSpan else {
-            throw QUICError.protector(SecFramerError.sealingFailed)
-        }
         do {
             try buffer.withUnsafeMutableBytes { buffer in
                 let payload = UnsafeMutableRawBufferPointer(rebasing: buffer[packet.payloadRange])
@@ -600,7 +586,7 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
     static func headerProtection(
         keys: borrowing SecFramerKeys,
         packet: inout Packet,
-        frame: inout Frame,
+        buffer: inout MutableSpan<UInt8>,
         mask: inout MutableRawSpan,
         loggingOperation: StaticString
     ) throws(QUICError) {
@@ -609,10 +595,6 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
         let range = packet.sampleRange
         keys.log.datapath("\(loggingOperation) header for ChaCha20Poly1305, sample \(range)")
         #endif
-
-        guard var buffer = frame.mutableSpan else {
-            throw QUICError.protector(.headerProtectionFailed)
-        }
 
         #if canImport(CryptoExtras)
         do {
@@ -652,7 +634,7 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
         keys: borrowing SecFramerKeys,
         nonce: ProtectorNonce,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
         #if !DisableDebugLogging
         let headerLength = packet.headerLength
@@ -662,10 +644,6 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
             "Opening for ChaCha20Poly1305, nonce len \(nonce.count), header \(headerLength), payload \(payloadLength), tag \(tagLength)"
         )
         #endif
-        guard var buffer = frame.mutableSpan else {
-            keys.log.error("Buffer nil")
-            throw QUICError.protector(SecFramerError.openFailed)
-        }
         #if !NETWORK_EMBEDDED
         do {
             let buffer = buffer.withUnsafeMutableBytes { $0 }
@@ -940,12 +918,9 @@ struct Protector: ~Copyable, PrefixedLoggable {
 
     private static func processHeaderProtection(
         packet: inout Packet,
-        frame: inout Frame,
+        buffer: inout MutableSpan<UInt8>,
         mask: RawSpan
     ) {
-        guard var buffer = frame.mutableSpan else {
-            return
-        }
 
         if packet.longHeader {
             buffer[0] ^= mask[0] & 0x0f
@@ -974,7 +949,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
 
     private static func sealInner(
         _ packet: inout Packet,
-        frame: inout Frame,
+        buffer: inout MutableSpan<UInt8>,
         keys: borrowing SecFramerKeys
     ) throws(QUICError) {
         var mask = Protector.AESBlockStorage(repeating: 0)
@@ -985,20 +960,20 @@ struct Protector: ~Copyable, PrefixedLoggable {
                 keys: keys,
                 nonce: nonce,
                 packet: &packet,
-                frame: &frame
+                buffer: &buffer
             )
             var maskSpan = mask.mutableSpan
             var maskRawSpan = maskSpan.mutableBytes
             try SecFramerAESGCM.headerProtection(
                 keys: keys,
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: &maskRawSpan,
                 loggingOperation: "seal"
             )
             Protector.processHeaderProtection(
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: mask.span.bytes
             )
         case .chaChaPoly:
@@ -1008,20 +983,20 @@ struct Protector: ~Copyable, PrefixedLoggable {
                 keys: keys,
                 nonce: nonce,
                 packet: &packet,
-                frame: &frame
+                buffer: &buffer
             )
             var maskSpan = mask.mutableSpan
             var maskRawSpan = maskSpan.mutableBytes
             try SecFramerChaChaPoly.headerProtection(
                 keys: keys,
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: &maskRawSpan,
                 loggingOperation: "seal"
             )
             Protector.processHeaderProtection(
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: mask.span.bytes
             )
             #else
@@ -1034,7 +1009,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
         }
     }
 
-    mutating func seal(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+    mutating func seal(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {
         let signpostInterval = QUICSignpost.sealBegin(
             keyState: packet.keyState!.description,
             packetNumber: packet.number
@@ -1042,7 +1017,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
         guard let keyStateIndex: Int = packet.keyState?.rawValue else {
             throw QUICError.protector(SecFramerError.noFramerFound)
         }
-        try Self.sealInner(&packet, frame: &frame, keys: writeFramer[keyStateIndex])
+        try Self.sealInner(&packet, buffer: &buffer, keys: writeFramer[keyStateIndex])
         QUICSignpost.sealEnd(signpostInterval)
         // Upon success, increment the sequence number all the way to the
         // the last recently used one because there could be gaps.
@@ -1052,7 +1027,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
     func openHeaderInner(
         keys: borrowing SecFramerKeys,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
         var mask = Protector.AESBlockStorage(repeating: 0)
         switch keys.type {
@@ -1062,11 +1037,11 @@ struct Protector: ~Copyable, PrefixedLoggable {
             try SecFramerAESGCM.headerProtection(
                 keys: keys,
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: &maskRawSpan,
                 loggingOperation: "open"
             )
-            Protector.processHeaderProtection(packet: &packet, frame: &frame, mask: mask.span.bytes)
+            Protector.processHeaderProtection(packet: &packet, buffer: &buffer, mask: mask.span.bytes)
         case .chaChaPoly:
             #if !NETWORK_EMBEDDED
             var maskSpan = mask.mutableSpan
@@ -1074,11 +1049,11 @@ struct Protector: ~Copyable, PrefixedLoggable {
             try SecFramerChaChaPoly.headerProtection(
                 keys: keys,
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: &maskRawSpan,
                 loggingOperation: "open"
             )
-            Protector.processHeaderProtection(packet: &packet, frame: &frame, mask: mask.span.bytes)
+            Protector.processHeaderProtection(packet: &packet, buffer: &buffer, mask: mask.span.bytes)
             #else
             throw (.protector(.unsupportedAlgorithm))
             #endif
@@ -1089,23 +1064,23 @@ struct Protector: ~Copyable, PrefixedLoggable {
             try SecFramerNull.headerProtection(
                 keys: keys,
                 packet: &packet,
-                frame: &frame,
+                buffer: &buffer,
                 mask: &maskRawSpan,
                 loggingOperation: "open"
             )
             // The mask stays zeroed, so this leaves the header untouched:
             // fuzzer input is treated as already-plaintext.
-            Protector.processHeaderProtection(packet: &packet, frame: &frame, mask: mask.span.bytes)
+            Protector.processHeaderProtection(packet: &packet, buffer: &buffer, mask: mask.span.bytes)
         #endif
         }
     }
 
-    func openHeader(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+    func openHeader(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {
         do throws(QUICError) {
             guard let keyStateIndex: Int = packet.keyState?.rawValue else {
                 throw QUICError.protector(SecFramerError.noFramerFound)
             }
-            try openHeaderInner(keys: readFramer[keyStateIndex], packet: &packet, frame: &frame)
+            try openHeaderInner(keys: readFramer[keyStateIndex], packet: &packet, buffer: &buffer)
         } catch QUICError.protector(SecFramerError.noFramerFound) {
             throw QUICError.protector(SecFramerError.noFramerFound)
         } catch {
@@ -1117,28 +1092,28 @@ struct Protector: ~Copyable, PrefixedLoggable {
     static func openInner(
         keys: borrowing SecFramerKeys,
         packet: inout Packet,
-        frame: inout Frame
+        buffer: inout MutableSpan<UInt8>
     ) throws(QUICError) {
         switch keys.type {
         case .aesGCM:
             let nonce = prepareNonce(iv: keys.iv, packetNumber: packet.number)
-            try SecFramerAESGCM.open(keys: keys, nonce: nonce, packet: &packet, frame: &frame)
+            try SecFramerAESGCM.open(keys: keys, nonce: nonce, packet: &packet, buffer: &buffer)
         case .chaChaPoly:
             #if !NETWORK_EMBEDDED
             let nonce = prepareNonce(iv: keys.iv, packetNumber: packet.number)
-            try SecFramerChaChaPoly.open(keys: keys, nonce: nonce, packet: &packet, frame: &frame)
+            try SecFramerChaChaPoly.open(keys: keys, nonce: nonce, packet: &packet, buffer: &buffer)
             #else
             throw (.protector(.unsupportedAlgorithm))
             #endif
         #if Fuzzing
         case .null:
             let nonce = prepareNonce(iv: keys.iv, packetNumber: packet.number)
-            try SecFramerNull.open(keys: keys, nonce: nonce, packet: &packet, frame: &frame)
+            try SecFramerNull.open(keys: keys, nonce: nonce, packet: &packet, buffer: &buffer)
         #endif
         }
     }
 
-    func open(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+    func open(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {
         let signpostInterval = QUICSignpost.openBegin(
             keyState: packet.keyState!.description,
             packetNumber: packet.number
@@ -1146,7 +1121,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
         guard let keyStateIndex: Int = packet.keyState?.rawValue else {
             throw QUICError.protector(SecFramerError.noFramerFound)
         }
-        try Self.openInner(keys: readFramer[keyStateIndex], packet: &packet, frame: &frame)
+        try Self.openInner(keys: readFramer[keyStateIndex], packet: &packet, buffer: &buffer)
         QUICSignpost.openEnd(signpostInterval)
     }
 
@@ -1555,7 +1530,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
         true
     }
 
-    func seal(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+    func seal(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {
     }
 
     func deriveInitialSecrets(destinationCID: QUICConnectionID) {
@@ -1565,13 +1540,13 @@ struct Protector: ~Copyable, PrefixedLoggable {
         true
     }
 
-    func openHeader(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+    func openHeader(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {
     }
 
     func trafficUpdate(previousKeyState: PacketKeyState) {
     }
 
-    func open(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+    func open(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {
     }
 
     func drop(keyState: PacketKeyState) {
