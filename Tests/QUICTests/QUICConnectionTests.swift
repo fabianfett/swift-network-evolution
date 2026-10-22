@@ -318,32 +318,8 @@ final class QUICConnectionTests: XCTestCase {
                 XCTFail("Failed to set up the connection: \(error)")
             }
             // What `crypto.start` wires up, without starting a handshake: the events under test only
-            // need the parent reference, but closing the connection tears the TLS linkage down, so
-            // that has to be bound too.
-            let crypto = connection.crypto
-            crypto.parentConnection = connection
-            var tlsParameters = Parameters()
-            tlsParameters.isServer = true
-            let tlsOptions = SwiftTLSProtocol.options()
-            tlsOptions.setProtocolInstance(crypto.tlsInstance.identifier)
-            // The TLS instance's own setup insists on the transport parameters it would carry into
-            // the handshake, which is all it reads here.
-            var tlsPerProtocolOptions = SwiftTLSProtocol.Options()
-            tlsPerProtocolOptions.quicTransportParameters =
-                (try? connection.localTransportParameters.serialize()) ?? []
-            tlsOptions.replacePerProtocolOptions(tlsPerProtocolOptions)
-            tlsParameters.defaultStack.append(applicationProtocol: .swiftTLS(tlsOptions))
-            do {
-                try crypto.invokeAttachLowerProtocol(
-                    crypto.tlsInstance,
-                    remote: nil,
-                    local: nil,
-                    parameters: tlsParameters,
-                    path: nil
-                )
-            } catch {
-                XCTFail("Failed to attach the TLS instance below crypto: \(error)")
-            }
+            // need the parent reference.
+            connection.crypto.parentConnection = connection
 
             let (lower, lowerLinkage) = storage.createDatagramLowerHarness(
                 identifier: "Lower",
@@ -439,9 +415,9 @@ final class QUICConnectionTests: XCTestCase {
         }
     }
 
-    /// Runs `body` the way an asynchronous certificate verification completing does: on the TLS
-    /// instance's event state, a turn of its own, with the connection's own state idle. Returns once
-    /// the events that turn queued have been delivered.
+    /// Runs `body` the way an asynchronous certificate verification completing does: a turn of its
+    /// own, with the connection's own state idle. Returns once the events that turn queued have been
+    /// delivered.
     private func onAsynchronousHandshakeTurn(
         _ connection: QUICConnection,
         _ body: @escaping (QUICCrypto, inout NetworkContext.EventContext) -> Void
@@ -449,8 +425,9 @@ final class QUICConnectionTests: XCTestCase {
         let finished = XCTestExpectation(description: "handshake turn delivered")
         connection.context.async {
             let crypto = connection.crypto
-            crypto.tlsInstance.async { eventContext in
-                body(crypto, &eventContext)
+            let context = connection.context
+            context.async {
+                body(crypto, &context.eventContext)
             }
             // What that turn queued is delivered as it unwinds, so wait for a turn after it.
             connection.context.async {
