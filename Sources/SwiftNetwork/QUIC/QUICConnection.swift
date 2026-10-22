@@ -2603,7 +2603,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             applyToAllFlows { stream in
                 applicationPendingItems.prependStreamToService(stream)
             }
-            sendFrames(in: &eventContext)
+            sendFramesUnlessOutboundDataPended(in: &eventContext)
             // We've already processed all the unblocked streams
             applicationPendingItems.unblockedSendStreams.removeAll(connection: self)
         } else {
@@ -2613,7 +2613,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
                 // Try to send data on just a single stream due
                 // to a new MAX_STREAM_DATA frame.
                 applicationPendingItems.prependStreamToService(stream)
-                sendFrames(in: &eventContext)
+                sendFramesUnlessOutboundDataPended(in: &eventContext)
 
                 stream.updateOutboundFlowControlCredit(connection: self)
             }
@@ -2643,6 +2643,17 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             }
         }
         synchronizeStats()
+        sendFramesUnlessOutboundDataPended(in: &eventContext)
+    }
+
+    // While the upper layer batches outbound data (between `.outboundDataBatchStart` and
+    // `.outboundDataBatchEnd`), the batch end sends everything at once. Sending here would emit
+    // an ACK-only packet ahead of the response the upper layer is about to write.
+    private func sendFramesUnlessOutboundDataPended(in eventContext: inout NetworkContext.EventContext) {
+        guard !pendOutboundData else {
+            log.datapath("Outbound data pended, defer send frames to batch end")
+            return
+        }
         sendFrames(in: &eventContext)
     }
 
