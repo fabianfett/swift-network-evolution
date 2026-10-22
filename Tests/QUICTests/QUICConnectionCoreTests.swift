@@ -249,6 +249,37 @@ final class QUICConnectionCoreTests: XCTestCase {
         XCTAssertTrue(finished)
     }
 
+    func testWritesPastTheFlowControlLimitArriveAsTheReaderConsumes() throws {
+        var pair = LockstepPair()
+        pair.exchange()
+        let streamID = try XCTUnwrap(pair.client.openStream(bidirectional: true))
+        let payload = [UInt8](repeating: 0x43, count: 700_000)
+        XCTAssertLessThan(pair.client.writableBytes(on: streamID), payload.count)
+        XCTAssertEqual(pair.client.write(payload.span.bytes, to: streamID, fin: true), payload.count)
+        var received = 0
+        var finished = false
+        for _ in 0..<200 where !finished {
+            pair.exchange()
+            guard var server = pair.server.take() else {
+                XCTFail("No server")
+                return
+            }
+            while true {
+                let progress: Int =
+                    server.read(from: streamID) { bytes, isFinished in
+                        received += bytes.byteCount
+                        finished = isFinished
+                        return (bytes.byteCount, bytes.byteCount)
+                    } ?? 0
+                if progress == 0 { break }
+            }
+            pair.server = consume server
+        }
+        XCTAssertEqual(received, payload.count)
+        XCTAssertTrue(finished)
+        XCTAssertTrue(pair.clientEvents.contains(.streamWritable(streamID)), "client events: \(pair.clientEvents)")
+    }
+
     func testCloseReachesPeer() {
         var pair = LockstepPair()
         pair.exchange()

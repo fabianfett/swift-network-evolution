@@ -436,27 +436,32 @@ public struct QUICConnectionCore: ~Copyable {
     }
 
     /// Enqueues bytes on a stream. Returns how many bytes were accepted.
+    ///
+    /// All bytes are buffered; flow control applies when they are sent. Writing past
+    /// ``writableBytes(on:)`` makes the stream report ``Event/streamWritable(_:)`` once the peer
+    /// raises its limit.
     @discardableResult
     public mutating func write(_ bytes: RawSpan, to streamID: UInt64, fin: Bool = false) -> Int {
         guard !self.isClosingOrDraining, var stream = self.streams.streams.removeValue(forKey: streamID) else {
             return 0
         }
         defer { self.streams.streams[streamID] = stream }
-        let capacity = stream.sendCapacity
-        let accepted = min(capacity, bytes.byteCount)
-        if accepted > 0 {
-            stream.send.append(bytes.extracting(0..<accepted))
+        guard stream.canSend, stream.resetCode == nil, !stream.send.isFinished else {
+            return 0
         }
-        if accepted < bytes.byteCount {
+        if bytes.byteCount > 0 {
+            stream.send.append(bytes)
+        }
+        if stream.send.writeOffset >= stream.sendLimit {
             stream.writableBlocked = true
         }
-        if fin && accepted == bytes.byteCount && stream.canSend && stream.resetCode == nil {
+        if fin {
             stream.send.finish()
         }
         if stream.hasPendingFrames {
             self.streams.enqueueForSending(streamID)
         }
-        return accepted
+        return bytes.byteCount
     }
 
     /// Finishes the send side of a stream.
