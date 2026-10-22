@@ -803,6 +803,24 @@ extension QUICConnectionStateMachine {
         }
     }
 
+    #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION
+    /// Installs the handler SwiftTLS calls when an asynchronous step, such as certificate
+    /// verification, finishes. The handler runs on an arbitrary thread; the driver hops back to its
+    /// own and calls ``resumeHandshake(with:now:)``.
+    public func setAsyncContinuationHandler(_ handler: (@Sendable (PendingAsyncResult) -> Void)?) {
+        self.handshake.setAsyncContinuationHandler(handler)
+    }
+
+    /// Continues the handshake with the result of an asynchronous step.
+    public mutating func resumeHandshake(with result: PendingAsyncResult, now: NetworkClock.Instant) {
+        guard !self.isClosingOrDraining else { return }
+        self.handshake.setAsyncResult(result)
+        var outputs: [CoreHandshake.Output] = []
+        self.handshake.resume(outputs: &outputs)
+        self.apply(outputs, now: now)
+    }
+    #endif
+
     mutating func confirmHandshake() {
         guard !self.isHandshakeConfirmed else { return }
         self.isHandshakeConfirmed = true

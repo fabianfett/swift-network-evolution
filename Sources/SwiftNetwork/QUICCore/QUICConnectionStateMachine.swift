@@ -651,3 +651,33 @@ extension Array where Element == CoreAckTracker {
 }
 
 #endif
+
+// MARK: - Handshake state for drivers
+
+@available(Network 0.1.0, *)
+extension QUICConnectionStateMachine {
+    /// Whether the TLS handshake completed.
+    public var isHandshakeComplete: Bool {
+        self.handshake.isComplete
+    }
+
+    /// Whether the connection is closing, draining or closed.
+    public var isTerminating: Bool {
+        self.isClosingOrDraining
+    }
+
+    /// The peer's `max_datagram_frame_size`, or `0` if it does not accept datagrams.
+    public var peerMaxDatagramFrameSize: Int {
+        self.peerTransportParameters?.intValue(.maxDatagramFrameSize) ?? 0
+    }
+
+    /// The peer's `active_connection_id_limit`.
+    public var peerActiveConnectionIDLimit: Int {
+        self.peerTransportParameters?.intValue(.activeConnectionIDLimit) ?? 2
+    }
+
+    /// Whether a stream exists.
+    public func hasStream(_ streamID: UInt64) -> Bool {
+        self.streams.streams[streamID] != nil
+    }
+}
