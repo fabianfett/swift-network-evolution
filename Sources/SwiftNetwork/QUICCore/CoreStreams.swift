@@ -147,6 +147,9 @@ struct CoreStreamMap {
     private var remoteClosedUnidirectional: UInt64 = 0
     var maxStreamsBidirectionalPending = false
     var maxStreamsUnidirectionalPending = false
+    /// The limits last sent in MAX_STREAMS (or the transport parameters).
+    var advertisedMaxStreamsBidirectional: UInt64
+    var advertisedMaxStreamsUnidirectional: UInt64
     private let initialLocalMaxStreamsBidirectional: UInt64
     private let initialLocalMaxStreamsUnidirectional: UInt64
 
@@ -158,6 +161,8 @@ struct CoreStreamMap {
         self.localMaxStreamsUnidirectional = localMaxStreamsUnidirectional
         self.initialLocalMaxStreamsBidirectional = localMaxStreamsBidirectional
         self.initialLocalMaxStreamsUnidirectional = localMaxStreamsUnidirectional
+        self.advertisedMaxStreamsBidirectional = localMaxStreamsBidirectional
+        self.advertisedMaxStreamsUnidirectional = localMaxStreamsUnidirectional
     }
 
     static func isLocal(_ id: UInt64, isServer: Bool) -> Bool {
@@ -289,12 +294,21 @@ struct CoreStreamMap {
                 self.remoteClosedBidirectional &+= 1
                 self.localMaxStreamsBidirectional =
                     self.remoteClosedBidirectional &+ self.initialLocalMaxStreamsBidirectional
-                self.maxStreamsBidirectionalPending = true
+                // MAX_STREAMS goes out once half of the window was used, not for every stream.
+                if self.localMaxStreamsBidirectional &- self.advertisedMaxStreamsBidirectional
+                    >= max(1, self.initialLocalMaxStreamsBidirectional / 2)
+                {
+                    self.maxStreamsBidirectionalPending = true
+                }
             } else {
                 self.remoteClosedUnidirectional &+= 1
                 self.localMaxStreamsUnidirectional =
                     self.remoteClosedUnidirectional &+ self.initialLocalMaxStreamsUnidirectional
-                self.maxStreamsUnidirectionalPending = true
+                if self.localMaxStreamsUnidirectional &- self.advertisedMaxStreamsUnidirectional
+                    >= max(1, self.initialLocalMaxStreamsUnidirectional / 2)
+                {
+                    self.maxStreamsUnidirectionalPending = true
+                }
             }
         }
     }

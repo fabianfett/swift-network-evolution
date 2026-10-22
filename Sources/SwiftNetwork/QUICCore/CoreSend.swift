@@ -396,6 +396,7 @@ extension QUICConnectionCore {
         if self.streams.maxStreamsBidirectionalPending && writer.offset &+ 9 <= limit {
             if writer.vle(0x12) && writer.vle(self.streams.localMaxStreamsBidirectional) {
                 self.streams.maxStreamsBidirectionalPending = false
+                self.streams.advertisedMaxStreamsBidirectional = self.streams.localMaxStreamsBidirectional
                 frames.append(.maxStreamsBidirectional)
                 isAckEliciting = true
             }
@@ -403,6 +404,7 @@ extension QUICConnectionCore {
         if self.streams.maxStreamsUnidirectionalPending && writer.offset &+ 9 <= limit {
             if writer.vle(0x13) && writer.vle(self.streams.localMaxStreamsUnidirectional) {
                 self.streams.maxStreamsUnidirectionalPending = false
+                self.streams.advertisedMaxStreamsUnidirectional = self.streams.localMaxStreamsUnidirectional
                 frames.append(.maxStreamsUnidirectional)
                 isAckEliciting = true
             }
