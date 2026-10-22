@@ -377,6 +377,11 @@ public struct QUICConnectionCore: ~Copyable {
     public mutating func close(errorCode: UInt64, isApplication: Bool, reason: String = "", now: NetworkClock.Instant) {
         guard !self.isClosingOrDraining else { return }
         self.closeReason = .local(errorCode: errorCode, isApplication: isApplication)
+        guard self.bytesSent > 0 else {
+            // Nothing was ever sent, so there is no peer state to close.
+            self.enterClosed()
+            return
+        }
         self.startClosing(
             PendingClose(errorCode: errorCode, isApplication: isApplication, frameType: 0, reason: reason),
             now: now
