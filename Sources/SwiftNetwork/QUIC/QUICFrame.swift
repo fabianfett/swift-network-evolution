@@ -693,7 +693,7 @@ struct FramePadding: ~Copyable, QUICFrameProtocol {
     let isVariableLength: Bool
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         packetNumberSpace: PacketNumberSpace,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -721,7 +721,10 @@ struct FramePadding: ~Copyable, QUICFrameProtocol {
         self.packetNumberSpace = packetNumberSpace
     }
 
-    init(frame: inout Frame, packetNumberSpace: PacketNumberSpace) throws(QUICError) {
+    init(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        packetNumberSpace: PacketNumberSpace
+    ) throws(QUICError) {
         self.packetNumberSpace = packetNumberSpace
         isVariableLength = false  // incoming padding frames are a fixed size
 
@@ -738,14 +741,10 @@ struct FramePadding: ~Copyable, QUICFrameProtocol {
         try countZeros(frame: &frame)
     }
 
-    private mutating func countZeros(frame: inout Frame) throws(QUICError) {
-        var extraPadding = 0
+    private mutating func countZeros(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
+        let extraPadding = frame.withUnclaimedBytes { bytes in Self.countLeadingZeroBytes(bytes) } ?? 0
 
-        if let bytes = frame.bytes {
-            extraPadding = Self.countLeadingZeroBytes(bytes)
-        }
-
-        guard frame.claim(fromStart: extraPadding) else {
+        guard frame.claimBytes(fromStart: extraPadding, fromEnd: 0) else {
             throw QUICError.frameParse(FrameParseError.parsingError)
         }
         self.extraPadding = extraPadding
@@ -790,7 +789,7 @@ struct FramePadding: ~Copyable, QUICFrameProtocol {
         return offset
     }
 
-    static func write(frame: inout Frame, length: Int) throws(QUICError) {
+    static func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, length: Int) throws(QUICError) {
         guard length >= 1 else {
             throw QUICError.frameWrite(FrameWriteError.smallBuffer)
         }
@@ -816,7 +815,7 @@ struct FramePing: ~Copyable, QUICFrameProtocol {
     private(set) var packetNumberSpace: PacketNumberSpace
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         packetNumberSpace: PacketNumberSpace,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -831,7 +830,10 @@ struct FramePing: ~Copyable, QUICFrameProtocol {
         self.packetNumberSpace = packetNumberSpace
     }
 
-    init(frame: inout Frame, packetNumberSpace: PacketNumberSpace) throws(QUICError) {
+    init(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        packetNumberSpace: PacketNumberSpace
+    ) throws(QUICError) {
         self.packetNumberSpace = packetNumberSpace
 
         var rawType: UInt64 = 0
@@ -843,7 +845,7 @@ struct FramePing: ~Copyable, QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    static func write(frame: inout Frame) throws(QUICError) {
+    static func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.ping.rawValue)
         }
@@ -899,7 +901,7 @@ struct FrameAck: ~Copyable, QUICFrameProtocol {
     }
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         packetNumberSpace: PacketNumberSpace,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -933,7 +935,10 @@ struct FrameAck: ~Copyable, QUICFrameProtocol {
         }
     }
 
-    init(frame: inout Frame, packetNumberSpace: PacketNumberSpace) throws(QUICError) {
+    init(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        packetNumberSpace: PacketNumberSpace
+    ) throws(QUICError) {
         self.packetNumberSpace = packetNumberSpace
         self.ranges = .init()
         var rawType: UInt64 = 0
@@ -1007,7 +1012,7 @@ struct FrameAck: ~Copyable, QUICFrameProtocol {
         }
     }
 
-    func write(frame: inout Frame) throws(QUICError) {
+    func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(type.rawValue)
             try write.vle(largest.value)
@@ -1058,7 +1063,7 @@ struct FrameResetStream: ~Copyable, QUICFrameProtocol {
     private(set) var finalSize: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -1075,7 +1080,7 @@ struct FrameResetStream: ~Copyable, QUICFrameProtocol {
         self.finalSize = finalSize
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -1091,7 +1096,7 @@ struct FrameResetStream: ~Copyable, QUICFrameProtocol {
     }
 
     static func write(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         id: UInt64,
         code: UInt64,
         finalSize: UInt64,
@@ -1253,7 +1258,7 @@ struct FrameStopSending: ~Copyable, QUICFrameProtocol {
     private(set) var code: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -1269,7 +1274,7 @@ struct FrameStopSending: ~Copyable, QUICFrameProtocol {
         self.id = id
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -1284,7 +1289,7 @@ struct FrameStopSending: ~Copyable, QUICFrameProtocol {
     }
 
     static func write(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         id: UInt64,
         code: UInt64,
         stats: inout Statistics
@@ -1632,7 +1637,7 @@ struct FrameNewToken: ~Copyable, QUICFrameProtocol {
     private(set) var token: [UInt8] = []
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -1647,7 +1652,7 @@ struct FrameNewToken: ~Copyable, QUICFrameProtocol {
         self.token = token
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         var length: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
@@ -1661,7 +1666,11 @@ struct FrameNewToken: ~Copyable, QUICFrameProtocol {
         stats.increment(.rxNewToken)
     }
 
-    static func write(frame: inout Frame, token: [UInt8], stats: inout Statistics) throws(QUICError) {
+    static func write(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        token: [UInt8],
+        stats: inout Statistics
+    ) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.newTokenCode)
             try write.vle(token.count)
@@ -2064,7 +2073,7 @@ struct FrameMaxData: ~Copyable, QUICFrameProtocol {
     private(set) var max: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameMaxData(frame: &frame)
@@ -2078,7 +2087,7 @@ struct FrameMaxData: ~Copyable, QUICFrameProtocol {
         self.max = max
     }
 
-    init(frame: inout Frame) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -2089,7 +2098,7 @@ struct FrameMaxData: ~Copyable, QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    static func write(frame: inout Frame, max: UInt64) throws(QUICError) {
+    static func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, max: UInt64) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.maxData.rawValue)
             try write.vle(max)
@@ -2109,7 +2118,7 @@ struct FrameMaxStreamData: ~Copyable, QUICFrameProtocol {
     private(set) var max: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameMaxStreamData(frame: &frame)
@@ -2124,7 +2133,7 @@ struct FrameMaxStreamData: ~Copyable, QUICFrameProtocol {
         self.max = max
     }
 
-    init(frame: inout Frame) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -2136,7 +2145,11 @@ struct FrameMaxStreamData: ~Copyable, QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    static func write(frame: inout Frame, id: UInt64, max: UInt64) throws(QUICError) {
+    static func write(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        id: UInt64,
+        max: UInt64
+    ) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.maxStreamData.rawValue)
             try write.vle(id)
@@ -2156,7 +2169,7 @@ struct FrameMaxStreamsBidirectional: ~Copyable, QUICFrameProtocol {
     public let max: UInt64
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameMaxStreamsBidirectional(frame: &frame)
@@ -2170,7 +2183,7 @@ struct FrameMaxStreamsBidirectional: ~Copyable, QUICFrameProtocol {
         self.max = max
     }
 
-    init(frame: inout Frame) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         var rawType: UInt64 = 0
         var _max: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
@@ -2183,7 +2196,7 @@ struct FrameMaxStreamsBidirectional: ~Copyable, QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    static func write(frame: inout Frame, max: UInt64) throws(QUICError) {
+    static func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, max: UInt64) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.maxStreamsBidirectional.rawValue)
             try write.vle(max)
@@ -2202,7 +2215,7 @@ struct FrameMaxStreamsUnidirectional: ~Copyable, QUICFrameProtocol {
     public let max: UInt64
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameMaxStreamsUnidirectional(frame: &frame)
@@ -2216,7 +2229,7 @@ struct FrameMaxStreamsUnidirectional: ~Copyable, QUICFrameProtocol {
         self.max = max
     }
 
-    init(frame: inout Frame) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         var rawType: UInt64 = 0
         var _max: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
@@ -2229,7 +2242,7 @@ struct FrameMaxStreamsUnidirectional: ~Copyable, QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    static func write(frame: inout Frame, max: UInt64) throws(QUICError) {
+    static func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, max: UInt64) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.maxStreamsUnidirectional.rawValue)
             try write.vle(max)
@@ -2248,7 +2261,7 @@ struct FrameDataBlocked: ~Copyable, QUICFrameProtocol {
     private(set) var limit: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2263,7 +2276,7 @@ struct FrameDataBlocked: ~Copyable, QUICFrameProtocol {
         self.limit = limit
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -2276,7 +2289,11 @@ struct FrameDataBlocked: ~Copyable, QUICFrameProtocol {
         stats.increment(.rxDataBlockedFrames)
     }
 
-    static func write(frame: inout Frame, limit: UInt64, stats: inout Statistics) throws(QUICError) {
+    static func write(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        limit: UInt64,
+        stats: inout Statistics
+    ) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.dataBlocked.rawValue)
             try write.vle(limit)
@@ -2298,7 +2315,7 @@ struct FrameStreamDataBlocked: ~Copyable, QUICFrameProtocol {
     private(set) var limit: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2314,7 +2331,7 @@ struct FrameStreamDataBlocked: ~Copyable, QUICFrameProtocol {
         self.limit = limit
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -2329,7 +2346,7 @@ struct FrameStreamDataBlocked: ~Copyable, QUICFrameProtocol {
     }
 
     static func write(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         id: UInt64,
         limit: UInt64,
         stats: inout Statistics
@@ -2355,7 +2372,7 @@ struct FrameStreamsBlockedBidirectional: ~Copyable, QUICFrameProtocol {
     public let limit: UInt64
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2370,7 +2387,7 @@ struct FrameStreamsBlockedBidirectional: ~Copyable, QUICFrameProtocol {
         self.limit = limit
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         var _limit: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
@@ -2385,7 +2402,11 @@ struct FrameStreamsBlockedBidirectional: ~Copyable, QUICFrameProtocol {
         stats.increment(.rxStreamDataBlockedFrames)
     }
 
-    static func write(frame: inout Frame, limit: UInt64, stats: inout Statistics) throws(QUICError) {
+    static func write(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        limit: UInt64,
+        stats: inout Statistics
+    ) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.streamsBlockedBidirectional.rawValue)
             try write.vle(limit)
@@ -2406,7 +2427,7 @@ struct FrameStreamsBlockedUnidirectional: ~Copyable, QUICFrameProtocol {
     public let limit: UInt64
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2421,7 +2442,7 @@ struct FrameStreamsBlockedUnidirectional: ~Copyable, QUICFrameProtocol {
         self.limit = limit
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         var _limit: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
@@ -2436,7 +2457,11 @@ struct FrameStreamsBlockedUnidirectional: ~Copyable, QUICFrameProtocol {
         stats.increment(.rxStreamDataBlockedFrames)
     }
 
-    static func write(frame: inout Frame, limit: UInt64, stats: inout Statistics) throws(QUICError) {
+    static func write(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        limit: UInt64,
+        stats: inout Statistics
+    ) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.streamsBlockedUnidirectional.rawValue)
             try write.vle(limit)
@@ -2459,7 +2484,7 @@ struct FrameNewConnectionID: QUICFrameProtocol {
     private(set) var statelessResetToken: QUICStatelessResetToken
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameNewConnectionID(frame: &frame)
@@ -2481,7 +2506,8 @@ struct FrameNewConnectionID: QUICFrameProtocol {
         self.statelessResetToken = statelessResetToken
     }
 
-    init(frame: inout Frame, pnSpace: PacketNumberSpace? = nil) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, pnSpace: PacketNumberSpace? = nil) throws(QUICError)
+    {
         var rawType: UInt64 = 0
         var cidLength: UInt8 = 0
         var tokenBuffer: [UInt8] = []
@@ -2522,7 +2548,7 @@ struct FrameNewConnectionID: QUICFrameProtocol {
         self.statelessResetToken = statelessResetToken
     }
 
-    func write(frame: inout Frame) throws(QUICError) {
+    func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(type.rawValue)
             try write.vle(sequence)
@@ -2544,7 +2570,7 @@ struct FrameRetireConnectionID: QUICFrameProtocol {
     private(set) var sequence: UInt64 = 0
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameRetireConnectionID(frame: &frame)
@@ -2558,7 +2584,7 @@ struct FrameRetireConnectionID: QUICFrameProtocol {
         self.sequence = sequence
     }
 
-    init(frame: inout Frame) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -2569,7 +2595,7 @@ struct FrameRetireConnectionID: QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    func write(frame: inout Frame) throws(QUICError) {
+    func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(type.rawValue)
             try write.vle(sequence)
@@ -2589,7 +2615,7 @@ struct FramePathChallenge: QUICFrameProtocol {
     private(set) var destinationConnectionID: QUICConnectionID?
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         destinationConnectionID: QUICConnectionID,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2607,7 +2633,10 @@ struct FramePathChallenge: QUICFrameProtocol {
         self.data = data
     }
 
-    init(frame: inout Frame, destinationConnectionID: QUICConnectionID) throws(QUICError) {
+    init(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        destinationConnectionID: QUICConnectionID
+    ) throws(QUICError) {
         self.destinationConnectionID = destinationConnectionID
 
         var rawType: UInt64 = 0
@@ -2620,7 +2649,7 @@ struct FramePathChallenge: QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    func write(frame: inout Frame) throws(QUICError) {
+    func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(type.rawValue)
             try write.uint64(data)
@@ -2640,7 +2669,7 @@ struct FramePathResponse: QUICFrameProtocol {
     private(set) var destinationConnectionID: QUICConnectionID?
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         destinationConnectionID: QUICConnectionID,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2658,7 +2687,10 @@ struct FramePathResponse: QUICFrameProtocol {
         self.data = data
     }
 
-    init(frame: inout Frame, destinationConnectionID: QUICConnectionID) throws(QUICError) {
+    init(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        destinationConnectionID: QUICConnectionID
+    ) throws(QUICError) {
         self.destinationConnectionID = destinationConnectionID
 
         var rawType: UInt64 = 0
@@ -2671,7 +2703,7 @@ struct FramePathResponse: QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    func write(frame: inout Frame) throws(QUICError) {
+    func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(type.rawValue)
             try write.uint64(data)
@@ -2777,7 +2809,7 @@ struct FrameConnectionClose: ~Copyable, QUICFrameProtocol {
     private(set) var reason: String = ""
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2794,7 +2826,7 @@ struct FrameConnectionClose: ~Copyable, QUICFrameProtocol {
         self.reason = reason
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
         var rawType: UInt64 = 0
         var rawFrameType: UInt64 = 0
         var rawCode: UInt64 = 0
@@ -2825,7 +2857,7 @@ struct FrameConnectionClose: ~Copyable, QUICFrameProtocol {
     }
 
     static func write(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         errorCode: UInt64,
         frameType: FrameType?,
@@ -2860,7 +2892,7 @@ struct FrameApplicationClose: ~Copyable, QUICFrameProtocol {
     private(set) var reason: String = ""
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
@@ -2876,7 +2908,7 @@ struct FrameApplicationClose: ~Copyable, QUICFrameProtocol {
         self.reason = reason
     }
 
-    init(frame: inout Frame, stats: inout Statistics) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable, stats: inout Statistics) throws(QUICError) {
 
         var rawType: UInt64 = 0
         var rawCode: UInt64 = 0
@@ -2896,7 +2928,7 @@ struct FrameApplicationClose: ~Copyable, QUICFrameProtocol {
     }
 
     static func write(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         stats: inout Statistics,
         errorCode: UInt64,
         reason: String?
@@ -2917,7 +2949,11 @@ struct FrameApplicationClose: ~Copyable, QUICFrameProtocol {
         stats.increment(.txApplicationCloseError)
     }
 
-    func write(frame: inout Frame, stats: inout Statistics, claim: Bool = false) throws(QUICError) {
+    func write(
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        stats: inout Statistics,
+        claim: Bool = false
+    ) throws(QUICError) {
         try FrameApplicationClose.write(
             frame: &frame,
             stats: &stats,
@@ -2934,7 +2970,7 @@ struct FrameHandshakeDone: ~Copyable, QUICFrameProtocol {
     let type = FrameType.handshakeDone
 
     static func parse(
-        frame: inout Frame,
+        frame: inout some ClaimableBytes & ~Copyable & ~Escapable,
         shorthandFrames: inout [QUICShorthandFrame]?
     ) throws(QUICError) -> QUICFrame {
         let frame = try FrameHandshakeDone(frame: &frame)
@@ -2946,7 +2982,7 @@ struct FrameHandshakeDone: ~Copyable, QUICFrameProtocol {
 
     init() {}
 
-    init(frame: inout Frame) throws(QUICError) {
+    init(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         var rawType: UInt64 = 0
         let result = Deserializer.deserialize(&frame, claim: true) { read throws(DeserializationError) in
             try read.vle(&rawType)
@@ -2956,7 +2992,7 @@ struct FrameHandshakeDone: ~Copyable, QUICFrameProtocol {
         try validateType(rawType)
     }
 
-    static func write(frame: inout Frame) throws(QUICError) {
+    static func write(frame: inout some ClaimableBytes & ~Copyable & ~Escapable) throws(QUICError) {
         let result = Serializer.serialize(&frame, claim: true) { write throws(SerializationError) in
             try write.vle(FrameType.handshakeDone.rawValue)
         }

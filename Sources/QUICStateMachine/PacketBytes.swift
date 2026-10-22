@@ -117,3 +117,88 @@ extension Serializer {
         return result
     }
 }
+
+/// Bytes that QUIC frames are parsed from and written into, with `Frame`'s claim semantics.
+///
+/// Both SwiftNetwork's `Frame` and `PacketBytes` conform, so the frame codec works for either.
+@available(Network 0.1.0, *)
+package protocol ClaimableBytes: ~Copyable, ~Escapable {
+    var unclaimedLength: Int { get }
+    mutating func claimBytes(fromStart: Int, fromEnd: Int) -> Bool
+    mutating func unclaimBytes(fromStart: Int, fromEnd: Int) -> Bool
+    /// Calls `body` with the unclaimed bytes, or returns `nil` if there are no bytes.
+    func withUnclaimedBytes<Result: ~Copyable, Failure: Error>(
+        _ body: (RawSpan) throws(Failure) -> Result
+    ) throws(Failure) -> Result?
+    /// Calls `body` with the unclaimed bytes, or returns `nil` if there are no bytes.
+    mutating func withUnclaimedMutableSpan<Result: ~Copyable, Failure: Error>(
+        _ body: (inout MutableSpan<UInt8>) throws(Failure) -> Result
+    ) throws(Failure) -> Result?
+}
+
+@available(Network 0.1.0, *)
+extension PacketBytes: ClaimableBytes {
+    package mutating func claimBytes(fromStart: Int, fromEnd: Int) -> Bool {
+        self.claim(fromStart: fromStart, fromEnd: fromEnd)
+    }
+
+    package mutating func unclaimBytes(fromStart: Int, fromEnd: Int) -> Bool {
+        self.unclaim(fromStart: fromStart, fromEnd: fromEnd)
+    }
+
+    package func withUnclaimedBytes<Result: ~Copyable, Failure: Error>(
+        _ body: (RawSpan) throws(Failure) -> Result
+    ) throws(Failure) -> Result? {
+        try body(self.bytes)
+    }
+
+    package mutating func withUnclaimedMutableSpan<Result: ~Copyable, Failure: Error>(
+        _ body: (inout MutableSpan<UInt8>) throws(Failure) -> Result
+    ) throws(Failure) -> Result? {
+        var span = self.mutableSpan
+        return try body(&span)
+    }
+}
+
+@available(Network 0.1.0, *)
+extension Deserializer where Factory == EmptySpanFactory {
+    package static func deserialize(
+        _ claimableBytes: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        claim: Bool,
+        _ builder: (_ buffer: inout Deserializer) throws(DeserializationError) -> Void
+    ) -> DeserializationResult {
+        let result = claimableBytes.withUnclaimedBytes { bytes in deserialize(bytes, builder) } ?? .success
+        if claim, case .success(let parsedBytes, _) = result {
+            guard claimableBytes.claimBytes(fromStart: parsedBytes, fromEnd: 0) else {
+                return .error(.bufferTooShort)
+            }
+        }
+        return result
+    }
+}
+
+@available(Network 0.1.0, *)
+extension Serializer {
+    package static func serialize(
+        _ claimableBytes: inout some ClaimableBytes & ~Copyable & ~Escapable,
+        claim: Bool,
+        _ builder: (_ serializer: inout InPlaceSerializer<EmptySpanFactory>) throws(SerializationError) -> Void
+    ) -> SerializationResult {
+        let result =
+            claimableBytes.withUnclaimedMutableSpan { span in
+                var serializer = InPlaceSerializer<EmptySpanFactory>(span.mutableBytes)
+                do {
+                    try builder(&serializer)
+                } catch {
+                    // Error already recorded in internalResult via invalidate
+                }
+                return serializer.finalResult
+            } ?? .success
+        if claim, case .success(let writtenBytes, _) = result {
+            guard claimableBytes.claimBytes(fromStart: writtenBytes, fromEnd: 0) else {
+                return .error(.bufferTooShort)
+            }
+        }
+        return result
+    }
+}

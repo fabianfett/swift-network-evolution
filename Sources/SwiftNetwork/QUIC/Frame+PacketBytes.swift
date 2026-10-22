@@ -79,3 +79,32 @@ extension Frame {
         }
     }
 }
+
+@available(Network 0.1.0, *)
+extension Frame: ClaimableBytes {
+    package mutating func claimBytes(fromStart: Int, fromEnd: Int) -> Bool {
+        self.claim(fromStart: fromStart, fromEnd: fromEnd)
+    }
+
+    package mutating func unclaimBytes(fromStart: Int, fromEnd: Int) -> Bool {
+        self.unclaim(fromStart: fromStart, fromEnd: fromEnd)
+    }
+
+    package func withUnclaimedBytes<Result: ~Copyable, Failure: Error>(
+        _ body: (RawSpan) throws(Failure) -> Result
+    ) throws(Failure) -> Result? {
+        guard let bytes = self.bytes else {
+            return nil
+        }
+        return try body(bytes)
+    }
+
+    package mutating func withUnclaimedMutableSpan<Result: ~Copyable, Failure: Error>(
+        _ body: (inout MutableSpan<UInt8>) throws(Failure) -> Result
+    ) throws(Failure) -> Result? {
+        guard var span = self.mutableSpan else {
+            return nil
+        }
+        return try body(&span)
+    }
+}
