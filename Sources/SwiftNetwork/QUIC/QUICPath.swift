@@ -140,60 +140,105 @@ public final class QUICPath: MultiplexingDatagramPath<
 
     static let slowInitialProbeInterval: NetworkDuration = .seconds(1)
 
-    private(set) var state: QUICPathState = QUICPathState()
-    var priority: Int = 0  // Relative priority to other paths, used to gate migration decisions
+    /// The path's protocol state; the class adds the framework path around it.
+    var protocolState: QUICPathProtocolState
+
+    typealias Flags = QUICPathProtocolState.Flags
+
+    private(set) var state: QUICPathState {
+        get { protocolState.state }
+        set { protocolState.state = newValue }
+    }
+    var priority: Int {  // Relative priority to other paths, used to gate migration decisions
+        get { protocolState.priority }
+        set { protocolState.priority = newValue }
+    }
     var interface: Interface?
     var localEndpoint: Endpoint?
     var remoteEndpoint: Endpoint?
 
-    private(set) var dcid: QUICConnectionID?  // The DCID we assigned before probing
-    private(set) var scid: QUICConnectionID?  // Contains the SCID we expect to see once we migrate.
+    private(set) var dcid: QUICConnectionID? {  // The DCID we assigned before probing
+        get { protocolState.dcid }
+        set { protocolState.dcid = newValue }
+    }
+    private(set) var scid: QUICConnectionID? {  // Contains the SCID we expect to see once we migrate.
+        get { protocolState.scid }
+        set { protocolState.scid = newValue }
+    }
 
-    var pendingInboundChallenges = [UInt64]()  // Received challenges requiring a response
+    var pendingInboundChallenges: [UInt64] {  // Received challenges requiring a response
+        get { protocolState.pendingInboundChallenges }
+        _modify { yield &protocolState.pendingInboundChallenges }
+    }
 
-    var pendingOutboundChallenges = [PendingChallenge]()  // Sent challenges waiting for a response
+    var pendingOutboundChallenges: [PendingChallenge] {  // Sent challenges waiting for a response
+        get { protocolState.pendingOutboundChallenges }
+        _modify { yield &protocolState.pendingOutboundChallenges }
+    }
     static let maximumPendingChallenges: Int = 6
-    private(set) var challengesSent: Int = 0
-    private(set) var lastChallengeSentTime: NetworkClock.Instant = .zero
-    private(set) var nextChallengeDuration: NetworkDuration = .zero
+    private(set) var challengesSent: Int {
+        get { protocolState.challengesSent }
+        set { protocolState.challengesSent = newValue }
+    }
+    private(set) var lastChallengeSentTime: NetworkClock.Instant {
+        get { protocolState.lastChallengeSentTime }
+        set { protocolState.lastChallengeSentTime = newValue }
+    }
+    private(set) var nextChallengeDuration: NetworkDuration {
+        get { protocolState.nextChallengeDuration }
+        set { protocolState.nextChallengeDuration = newValue }
+    }
 
+    // RTT, congestion control and pacer are kept out of `protocolState`: congestion control reads
+    // the RTT and the pacer of the path it is mutated on.
     var rtt: RTT
 
-    var bdp = BandwidthDelayProduct()
+    var bdp: BandwidthDelayProduct {
+        get { protocolState.bdp }
+        _modify { yield &protocolState.bdp }
+    }
 
     private var congestionControl: CongestionControl
 
     var pacer: Pacer
 
+    // Kept out of `protocolState`: PMTUD sends its probes through the connection, which reads the
+    // rest of the path while the PMTUD state is being mutated.
     var pmtudState = PMTUDState()
-    var recoveryState = Recovery.PathState()
-    var ecnState: ECNPathState?
-    var pathStatistics = Statistics()
-
-    var initialMSS = 0
-    var mss = 0
-    var maximumMSS = 0
-    var minimumMSS = 0
-
-    struct Flags: OptionSet {
-        init(rawValue: Self.RawValue) {
-            self.rawValue = rawValue
-        }
-        var rawValue: UInt16
-        static let pacePackets = Flags(rawValue: 1 << 0)
-        static let isInitialPath = Flags(rawValue: 1 << 1)
-        static let isPrimaryPath = Flags(rawValue: 1 << 2)
-        static let spinValue = Flags(rawValue: 1 << 3)
-        static let useSlowProbeInterval = Flags(rawValue: 1 << 4)
-        static let isPreferredAddress = Flags(rawValue: 1 << 5)
-        static let migrationPending = Flags(rawValue: 1 << 6)
-        static let isLossy = Flags(rawValue: 1 << 7)
-        static let hasPreAssignedCIDs = Flags(rawValue: 1 << 8)
-        static let isFlowControlled = Flags(rawValue: 1 << 9)
-        static let l4sEnabled = Flags(rawValue: 1 << 10)
-        static let reportedIdleEvent = Flags(rawValue: 1 << 11)
+    var recoveryState: Recovery.PathState {
+        _read { yield protocolState.recoveryState }
+        _modify { yield &protocolState.recoveryState }
     }
-    private var flags = Flags()
+    var ecnState: ECNPathState? {
+        _read { yield protocolState.ecnState }
+        _modify { yield &protocolState.ecnState }
+    }
+    var pathStatistics: Statistics {
+        _read { yield protocolState.pathStatistics }
+        _modify { yield &protocolState.pathStatistics }
+    }
+
+    var initialMSS: Int {
+        get { protocolState.initialMSS }
+        set { protocolState.initialMSS = newValue }
+    }
+    var mss: Int {
+        get { protocolState.mss }
+        set { protocolState.mss = newValue }
+    }
+    var maximumMSS: Int {
+        get { protocolState.maximumMSS }
+        set { protocolState.maximumMSS = newValue }
+    }
+    var minimumMSS: Int {
+        get { protocolState.minimumMSS }
+        set { protocolState.minimumMSS = newValue }
+    }
+
+    private var flags: Flags {
+        get { protocolState.flags }
+        set { protocolState.flags = newValue }
+    }
 
     var pacePackets: Bool {
         get { flags.contains(.pacePackets) }
@@ -340,6 +385,7 @@ public final class QUICPath: MultiplexingDatagramPath<
     #endif
 
     required init(parent: QUICConnection, in eventContext: inout NetworkContext.EventContext) {
+        self.protocolState = QUICPathProtocolState()
         self.rtt = RTT(logPrefixer: parent.logPrefixer)
         self.pacer = Pacer()
         // Overwritten with the real mss/qlog once `setup()` runs; RX/TX aren't allowed on a
