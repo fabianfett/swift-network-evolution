@@ -352,15 +352,6 @@ extension QUICConnection {
         }
     }
 
-    @inline(always)
-    fileprivate func updateMaximumUnreadInboundBytesAllowed(increment: UInt64) {
-        let oldValue = flowControlState.maximumUnreadInboundBytesAllowed
-        flowControlState.maximumUnreadInboundBytesAllowed = min(
-            oldValue + increment,
-            UInt64(FlowControlGlobals.shared.connectionReceiveHighWaterMarkMax)
-        )
-    }
-
     func updateFlowControlWithFinalSizeForZombieStream(finalSize: UInt64, lastSize: UInt64) {
         guard lastSize < finalSize else { return }
         let delta = finalSize - (lastSize + 1)
@@ -426,7 +417,7 @@ struct FlowControlStreamState: ~Copyable {
 }
 
 @available(Network 0.1.0, *)
-extension QUICStreamInstance {
+extension QUICStreamProtocolState {
 
     // Offset in the stream from which to next send bytes
     @inline(always)
@@ -438,17 +429,371 @@ extension QUICStreamInstance {
         flowControlState.largestInboundByteOffsetReceived
     }
 
-    func updateFlowControlWithEnqueuedBytesToSend(_ bytes: UInt64, connection: QUICConnection) {
+    mutating func updateFlowControlWithEnqueuedBytesToSend(
+        _ bytes: UInt64,
+        connectionFlowControl: inout FlowControlState
+    ) {
         flowControlState.pendingOutboundBytesToSend += bytes
-        connection.flowControlState.pendingOutboundBytesToSend += bytes
+        connectionFlowControl.pendingOutboundBytesToSend += bytes
+    }
+
+    mutating func recordSentBytes(_ bytes: UInt64, connectionFlowControl: inout FlowControlState) {
+        precondition(bytes <= flowControlState.pendingOutboundBytesToSend)
+        precondition(bytes <= connectionFlowControl.pendingOutboundBytesToSend)
+
+        flowControlState.recordSent(bytes)
+        connectionFlowControl.recordSent(bytes)
+    }
+
+    mutating func removePendingOutboundBytesFromFlowControl(connectionFlowControl: inout FlowControlState) {
+        let pendingBytes = flowControlState.pendingOutboundBytesToSend
+        flowControlState.pendingOutboundBytesToSend = 0
+
+        precondition(pendingBytes <= connectionFlowControl.pendingOutboundBytesToSend)
+        connectionFlowControl.pendingOutboundBytesToSend -= pendingBytes
+    }
+
+    /// Marks the stream as data blocked if it used up its send credit. Returns whether a
+    /// STREAM_DATA_BLOCKED frame is due.
+    mutating func markDataBlockedIfNecessary() -> Bool {
+        if flowControlState.totalOutboundBytesSent >= flowControlState.outboundMaxData {
+            if !flags.contains(.hasSentDataBlocked) {
+                flags.insert(.hasSentDataBlocked)
+                return true
+            }
+        }
+        return false
+    }
+
+    mutating func updateFlowControlWithInboundBytesDelivered(
+        _ bytes: UInt64,
+        connectionFlowControl: inout FlowControlState,
+        log: borrowing NetworkLoggerState
+    ) {
+        flowControlState.totalInboundBytesDelivered += bytes
+        flowControlState.inboundBytesDeliveredSinceLastUpdate += bytes
+        connectionFlowControl.totalInboundBytesDelivered += bytes
+        connectionFlowControl.inboundBytesDeliveredSinceLastUpdate += bytes
+
+        log.datapath(
+            "Total inbound bytes delivered is \(flowControlState.totalInboundBytesDelivered) (connection-wide total is \(connectionFlowControl.totalInboundBytesDelivered))"
+        )
+    }
+
+    mutating func updateFlowControlWithTotalInOrderInboundBytesRead(
+        _ newTotalInbound: UInt64,
+        connectionFlowControl: inout FlowControlState,
+        updateStream: Bool,
+        updateConnection: Bool,
+        log: borrowing NetworkLoggerState
+    ) {
+        let oldTotalInbound = flowControlState.totalInOrderInboundBytesRead
+        guard newTotalInbound >= oldTotalInbound else { return }
+        precondition(newTotalInbound >= oldTotalInbound)
+
+        if updateStream {
+            flowControlState.totalInOrderInboundBytesRead = newTotalInbound
+        }
+        if updateConnection {
+            let connectionTotal = connectionFlowControl.totalInOrderInboundBytesRead
+            let (newValue, overflow) = connectionTotal.addingReportingOverflow(newTotalInbound - oldTotalInbound)
+            if overflow {
+                log.error("Value overflowed when adding to connection total")
+            } else {
+                connectionFlowControl.totalInOrderInboundBytesRead = newValue
+            }
+        }
+
+        log.datapath(
+            "Total in-order inbound bytes changed from \(oldTotalInbound) to \(newTotalInbound) (new connection-wide total is \(connectionFlowControl.totalInOrderInboundBytesRead))"
+        )
+    }
+
+    var shouldSendInboundFlowControlCredit: Bool {
+        // We only need to send flow control updates before we receive
+        // the FIN bit and before we receive a RESET_STREAM.
+        guard self.receive.state == .receive else {
+            return false
+        }
+
+        return flowControlState.shouldSendInboundFlowControlCredit(
+            hasSentMaxData: flags.contains(.hasAdvertisedMaxStreamData)
+        )
+    }
+
+    /// Recalculates the stream's inbound max data. Returns whether a MAX_STREAM_DATA frame is due.
+    @inline(always)
+    mutating func recalculateInboundMaxStreamData(log: borrowing NetworkLoggerState) -> Bool {
+        guard flowControlState.recalculateInboundMaxData() else {
+            return false
+        }
+        log.datapath(
+            "Updating MAX_STREAM_DATA for \(streamID!.value) to \(flowControlState.inboundMaxData)"
+        )
+        flags.insert(.hasAdvertisedMaxStreamData)
+        return true
+    }
+
+    func availableRemoteReceiveWindow(connectionFlowControl: borrowing FlowControlState) -> UInt64 {
+        let connectionFlowControl = connectionFlowControl.remainingOutboundBytesAllowed
+        let streamFlowControl = self.flowControlState.remainingOutboundBytesAllowed
+        return min(connectionFlowControl, streamFlowControl)
+    }
+
+    mutating func updateOutboundMaxData(to newValue: UInt64, log: borrowing NetworkLoggerState) -> Bool {
+        guard newValue >= flowControlState.outboundMaxData else {
+            log.debug(
+                "Remote max data \(newValue) is not greater than \(self.flowControlState.outboundMaxData), ignoring"
+            )
+            return false
+        }
+        flowControlState.outboundMaxData = newValue
+        return true
+    }
+
+    /// The send credit of the stream, given the connection's flow control and the current path's
+    /// smallest MSS and available congestion window. Returns `nil` if the credit can't be computed.
+    func maximumUnreadOutboundBytesAllowed(
+        connectionFlowControl: borrowing FlowControlState,
+        minMSS: UInt64,
+        allowedCCWindow: UInt64
+    ) -> UInt64? {
+        guard
+            connectionFlowControl.outboundMaxData
+                >= connectionFlowControl.totalOutboundBytesSent
+        else {
+            return nil
+        }
+
+        guard flowControlState.outboundMaxData >= flowControlState.totalOutboundBytesSent else {
+            return nil
+        }
+
+        let maxPendingBytes = FlowControlGlobals.sendQueueFactor * minMSS
+        guard connectionFlowControl.pendingOutboundBytesToSend < maxPendingBytes,
+            flowControlState.pendingOutboundBytesToSend < maxPendingBytes
+        else {
+            return 0
+        }
+
+        // Avoid trickling of data by using these values
+        let connectionMin = maxPendingBytes - connectionFlowControl.pendingOutboundBytesToSend
+        let streamMin = maxPendingBytes - flowControlState.pendingOutboundBytesToSend
+
+        let connectionMax = min(
+            connectionFlowControl.outboundMaxData
+                - connectionFlowControl.totalOutboundBytesSent,
+            allowedCCWindow
+        )
+        let connectionCredit = max(connectionMax, connectionMin)
+
+        let streamCredit = max(
+            flowControlState.outboundMaxData - flowControlState.totalOutboundBytesSent,
+            streamMin
+        )
+
+        return min(connectionCredit, streamCredit)
+    }
+
+    /// The outcome of advancing the largest received offset of a stream.
+    enum LastReceivedOffsetUpdate {
+        /// The offset did not grow.
+        case unchanged
+        /// The offset grew by `delta`.
+        case advanced(delta: UInt64)
+        /// The offset exceeds the stream's or the connection's flow control limits.
+        case flowControlError(reason: String)
+    }
+
+    @inline(always)
+    mutating func updateLastReceivedOffset(
+        to newLastReceivedOffset: UInt64,
+        connectionFlowControl: inout FlowControlState,
+        log: borrowing NetworkLoggerState
+    ) -> LastReceivedOffsetUpdate {
+        let currentValue = flowControlState.largestInboundByteOffsetReceived
+        guard newLastReceivedOffset >= currentValue else { return .unchanged }
+        let delta: UInt64 = newLastReceivedOffset - currentValue
+
+        flowControlState.largestInboundByteOffsetReceived = newLastReceivedOffset
+
+        guard flowControlState.largestInboundByteOffsetReceived <= flowControlState.inboundMaxData else {
+            log.error(
+                "Received final size \(newLastReceivedOffset) which had exceeds stream flow control limits"
+            )
+            return .flowControlError(reason: "exceeded stream flow control limits")
+        }
+
+        let connectionMaxData = connectionFlowControl.inboundMaxData
+        let connectionCurrentLargestData = connectionFlowControl.largestInboundByteOffsetReceived
+        guard connectionMaxData >= connectionCurrentLargestData,
+            (connectionMaxData - connectionCurrentLargestData) >= delta
+        else {
+            log.error(
+                "Received final size \(newLastReceivedOffset) which had exceeds connection flow control limits"
+            )
+            return .flowControlError(reason: "exceeded flow control limits")
+        }
+
+        // This cannot overflow, since the value has been just checked
+        connectionFlowControl.largestInboundByteOffsetReceived += delta
+        return .advanced(delta: delta)
+    }
+
+    @inline(always)
+    mutating func startTrackingInboundFlowControlInterval(now: NetworkClock.Instant) {
+        // Start of a new measurement interval
+        if flowControlStreamState.receiveHighWaterMarkTime == .zero {
+            flowControlStreamState.receiveHighWaterMarkTime = now
+        }
+    }
+
+    /// Whether the receive high watermark may grow; it is capped for the stream and the connection.
+    func canGrowReceiveHighWaterMark(
+        connectionFlowControl: borrowing FlowControlState,
+        log: borrowing NetworkLoggerState
+    ) -> Bool {
+        // Do not grow the receive buffer if
+        // - the high water mark already reached the maximum
+        // - TODO: reassembly queue gaps
+        if flowControlState.maximumUnreadInboundBytesAllowed
+            >= FlowControlGlobals.shared.streamReceiveHighWaterMarkMax
+        {
+            log.datapath("Already at maximum inbound bytes allowed")
+            return false
+        }
+
+        if connectionFlowControl.maximumUnreadInboundBytesAllowed
+            > FlowControlGlobals.shared.connectionReceiveHighWaterMarkMax
+        {
+            log.datapath("Connection already at maximum inbound bytes allowed")
+            return false
+        }
+        return true
+    }
+
+    // Auto-tune the receive high watermark
+    // Grow the receive buffer based on 2*BDP to ensure
+    // that sender can send at full rate.
+    // Returns true if maximum was updated.
+    @inline(always)
+    mutating func growReceiveHighWaterMark(
+        dataLength: UInt64,
+        connectionFlowControl: inout FlowControlState,
+        now: NetworkClock.Instant,
+        rtt: NetworkDuration,
+        mss: UInt64,
+        log: borrowing NetworkLoggerState
+    ) -> Bool {
+        let increment = computeReceiveHighWaterMarkIncrease(
+            dataLength: dataLength,
+            now: now,
+            rtt: rtt,
+            mss: mss,
+            log: log
+        )
+
+        if increment > 0 {
+            let oldValue = flowControlState.maximumUnreadInboundBytesAllowed
+            flowControlState.maximumUnreadInboundBytesAllowed = min(
+                oldValue + increment,
+                UInt64(FlowControlGlobals.shared.streamReceiveHighWaterMarkMax)
+            )
+            let oldConnectionValue = connectionFlowControl.maximumUnreadInboundBytesAllowed
+            connectionFlowControl.maximumUnreadInboundBytesAllowed = min(
+                oldConnectionValue + increment,
+                UInt64(FlowControlGlobals.shared.connectionReceiveHighWaterMarkMax)
+            )
+            log.datapath(
+                "Increased the receive high watermark to \(flowControlState.maximumUnreadInboundBytesAllowed)"
+            )
+            return true
+        }
+        return false
+    }
+
+    @inline(always)
+    private mutating func computeReceiveHighWaterMarkIncrease(
+        dataLength: UInt64,
+        now: NetworkClock.Instant,
+        rtt: NetworkDuration,
+        mss: UInt64,
+        log: borrowing NetworkLoggerState
+    ) -> UInt64 {
+        let receiveHighWaterMarkTime = flowControlStreamState.receiveHighWaterMarkTime
+        if receiveHighWaterMarkTime > now {
+            log.fault("Timestamp should be greater than now")
+            return 0
+        }
+
+        var increment: UInt64 = 0
+        let receiveHighWaterMarkCount = flowControlStreamState.receiveHighWaterMarkCount + dataLength
+
+        // If one RTT has elapsed, we can stop counting the bytes.
+        // Here, we estimate if the bandwidth measured in this RTT
+        // is more than a certain value of the bandwidth measured
+        // in the previous RTT.
+        if now >= receiveHighWaterMarkTime.advanced(by: rtt) {
+            let receiveHighWaterMarkPreviousCount = flowControlStreamState.receiveHighWaterMarkPreviousCount
+            var newPreviousCount = receiveHighWaterMarkPreviousCount
+            if receiveHighWaterMarkCount > receiveHighWaterMarkPreviousCount {
+                let shift: Int
+                if receiveHighWaterMarkCount
+                    > (receiveHighWaterMarkPreviousCount + (receiveHighWaterMarkPreviousCount >> 1))
+                {
+
+                    // If we received more than 1.5 times
+                    // than last time, set rcvbuf to 4*BDP
+                    shift = 2
+                } else {
+                    shift = 1
+                }
+                log.datapath(
+                    "Estimated BDP \(receiveHighWaterMarkCount)B, current RTT \(rtt), estimated bandwidth 8 * \(receiveHighWaterMarkCount) / \(rtt.microseconds) Mbps"
+                )
+
+                let (incr, overflow) = (receiveHighWaterMarkCount << shift)
+                    .subtractingReportingOverflow(flowControlState.maximumUnreadInboundBytesAllowed)
+                if !overflow {
+                    newPreviousCount = receiveHighWaterMarkCount
+                    // Align the increase to whole segments. Increases of a fraction of an MSS isn't useful as it won't fill a whole packet.
+                    if mss != 0 {
+                        increment = (incr / mss) * mss
+                    }
+                }
+            }
+
+            // Reset the measurement
+            flowControlStreamState.receiveHighWaterMarkPreviousCount = newPreviousCount
+            flowControlStreamState.receiveHighWaterMarkCount = 0
+            flowControlStreamState.receiveHighWaterMarkTime = .zero
+        } else {
+            flowControlStreamState.receiveHighWaterMarkCount = receiveHighWaterMarkCount
+        }
+
+        return increment
+    }
+}
+
+@available(Network 0.1.0, *)
+extension QUICStreamInstance {
+
+    // Offset in the stream from which to next send bytes
+    @inline(always)
+    var sendOffset: UInt64 {
+        state.sendOffset
+    }
+
+    var lastReceivedOffset: UInt64 {
+        state.lastReceivedOffset
+    }
+
+    func updateFlowControlWithEnqueuedBytesToSend(_ bytes: UInt64, connection: QUICConnection) {
+        state.updateFlowControlWithEnqueuedBytesToSend(bytes, connectionFlowControl: &connection.flowControlState)
     }
 
     func updateFlowControlWithSentBytes(_ bytes: UInt64, connection: QUICConnection) {
-        precondition(bytes <= flowControlState.pendingOutboundBytesToSend)
-        precondition(bytes <= connection.flowControlState.pendingOutboundBytesToSend)
-
-        flowControlState.recordSent(bytes)
-        connection.flowControlState.recordSent(bytes)
+        state.recordSentBytes(bytes, connectionFlowControl: &connection.flowControlState)
 
         // Draining can reopen a permit that transient backpressure latched to 0
         if self.maximumStreamDataSize == 0 {
@@ -462,30 +807,20 @@ extension QUICStreamInstance {
     }
 
     func removePendingOutboundBytesFromFlowControl(connection: QUICConnection) {
-        let pendingBytes = flowControlState.pendingOutboundBytesToSend
-        flowControlState.pendingOutboundBytesToSend = 0
-
-        precondition(pendingBytes <= connection.flowControlState.pendingOutboundBytesToSend)
-        connection.flowControlState.pendingOutboundBytesToSend -= pendingBytes
+        state.removePendingOutboundBytesFromFlowControl(connectionFlowControl: &connection.flowControlState)
     }
 
     func reportDataBlockedIfNecessary(on pendingItems: inout PendingItems) {
-        if flowControlState.totalOutboundBytesSent >= flowControlState.outboundMaxData {
-            if !self.hasSentDataBlocked {
-                self.hasSentDataBlocked = true
-                pendingItems.appendStreamDataBlockedFlow(self.flowIdentifier)
-            }
+        if state.markDataBlockedIfNecessary() {
+            pendingItems.appendStreamDataBlockedFlow(self.flowIdentifier)
         }
     }
 
     func updateFlowControlWithInboundBytesDelivered(_ bytes: UInt64, connection: QUICConnection) {
-        flowControlState.totalInboundBytesDelivered += bytes
-        flowControlState.inboundBytesDeliveredSinceLastUpdate += bytes
-        connection.flowControlState.totalInboundBytesDelivered += bytes
-        connection.flowControlState.inboundBytesDeliveredSinceLastUpdate += bytes
-
-        log.datapath(
-            "Total inbound bytes delivered is \(flowControlState.totalInboundBytesDelivered) (connection-wide total is \(connection.flowControlState.totalInboundBytesDelivered))"
+        state.updateFlowControlWithInboundBytesDelivered(
+            bytes,
+            connectionFlowControl: &connection.flowControlState,
+            log: log
         )
     }
 
@@ -495,38 +830,17 @@ extension QUICStreamInstance {
         updateStream: Bool = true,
         updateConnection: Bool = true
     ) {
-        let oldTotalInbound = flowControlState.totalInOrderInboundBytesRead
-        guard newTotalInbound >= oldTotalInbound else { return }
-        precondition(newTotalInbound >= oldTotalInbound)
-
-        if updateStream {
-            flowControlState.totalInOrderInboundBytesRead = newTotalInbound
-        }
-        if updateConnection {
-            let connectionTotal = connection.flowControlState.totalInOrderInboundBytesRead
-            let (newValue, overflow) = connectionTotal.addingReportingOverflow(newTotalInbound - oldTotalInbound)
-            if overflow {
-                log.error("Value overflowed when adding to connection total")
-            } else {
-                connection.flowControlState.totalInOrderInboundBytesRead = newValue
-            }
-        }
-
-        log.datapath(
-            "Total in-order inbound bytes changed from \(oldTotalInbound) to \(newTotalInbound) (new connection-wide total is \(connection.flowControlState.totalInOrderInboundBytesRead))"
+        state.updateFlowControlWithTotalInOrderInboundBytesRead(
+            newTotalInbound,
+            connectionFlowControl: &connection.flowControlState,
+            updateStream: updateStream,
+            updateConnection: updateConnection,
+            log: log
         )
     }
 
     var shouldSendInboundFlowControlCredit: Bool {
-        // We only need to send flow control updates before we receive
-        // the FIN bit and before we receive a RESET_STREAM.
-        guard self.receive.state == .receive else {
-            return false
-        }
-
-        return flowControlState.shouldSendInboundFlowControlCredit(
-            hasSentMaxData: self.hasAdvertisedMaxStreamData
-        )
+        state.shouldSendInboundFlowControlCredit
     }
 
     func sendInboundFlowControlCreditIfNeeded(connection: QUICConnection) {
@@ -567,15 +881,9 @@ extension QUICStreamInstance {
         sendConnectionCredit: Bool
     ) {
         var sendConnectionCredit = sendConnectionCredit
-        if sendStreamCredit {
-            if flowControlState.recalculateInboundMaxData() {
-                log.datapath(
-                    "Updating MAX_STREAM_DATA for \(streamID!.value) to \(flowControlState.inboundMaxData)"
-                )
-                connection.applicationPendingItems.appendMaxStreamDataFlow(self.flowIdentifier)
-                hasAdvertisedMaxStreamData = true
-                sendConnectionCredit = true
-            }
+        if sendStreamCredit, state.recalculateInboundMaxStreamData(log: log) {
+            connection.applicationPendingItems.appendMaxStreamDataFlow(self.flowIdentifier)
+            sendConnectionCredit = true
         }
         if sendConnectionCredit {
             connection.sendInboundFlowControlCredit()
@@ -583,20 +891,11 @@ extension QUICStreamInstance {
     }
 
     func availableRemoteReceiveWindow(for connection: QUICConnection) -> UInt64 {
-        let connectionFlowControl = connection.flowControlState.remainingOutboundBytesAllowed
-        let streamFlowControl = self.flowControlState.remainingOutboundBytesAllowed
-        return min(connectionFlowControl, streamFlowControl)
+        state.availableRemoteReceiveWindow(connectionFlowControl: connection.flowControlState)
     }
 
     func updateOutboundMaxData(to newValue: UInt64) -> Bool {
-        guard newValue >= flowControlState.outboundMaxData else {
-            log.debug(
-                "Remote max data \(newValue) is not greater than \(self.flowControlState.outboundMaxData), ignoring"
-            )
-            return false
-        }
-        flowControlState.outboundMaxData = newValue
-        return true
+        state.updateOutboundMaxData(to: newValue, log: log)
     }
 
     func updateOutboundFlowControlCredit(connection: QUICConnection) {
@@ -604,7 +903,23 @@ extension QUICStreamInstance {
         if receivedStopSending {
             credit = 0
         } else {
-            guard let calculatedCredit = maximumUnreadOutboundBytesAllowed(connection: connection)
+            var minMSS: UInt64 = UInt64(Constants.initialMSS)
+            var allowedCCWindow: UInt64 = 0
+            connection.withCurrentPath { path in
+                let pathMSS = path.mss
+                if pathMSS < minMSS {
+                    minMSS = UInt64(pathMSS)
+                }
+
+                allowedCCWindow += path.congestionControlAvailableCongestionWindow
+                return
+            }
+            guard
+                let calculatedCredit = state.maximumUnreadOutboundBytesAllowed(
+                    connectionFlowControl: connection.flowControlState,
+                    minMSS: minMSS,
+                    allowedCCWindow: allowedCCWindow
+                )
             else {
                 return
             }
@@ -614,114 +929,35 @@ extension QUICStreamInstance {
         self.maximumStreamDataSize = Int(credit)
     }
 
-    fileprivate func maximumUnreadOutboundBytesAllowed(connection: QUICConnection) -> UInt64? {
-        guard
-            connection.flowControlState.outboundMaxData
-                >= connection.flowControlState.totalOutboundBytesSent
-        else {
-            return nil
-        }
-
-        guard flowControlState.outboundMaxData >= flowControlState.totalOutboundBytesSent else {
-            return nil
-        }
-
-        var minMSS: UInt64 = UInt64(Constants.initialMSS)
-        var allowedCCWindow: UInt64 = 0
-        connection.withCurrentPath { path in
-            let pathMSS = path.mss
-            if pathMSS < minMSS {
-                minMSS = UInt64(pathMSS)
-            }
-
-            allowedCCWindow += path.congestionControlAvailableCongestionWindow
-            return
-        }
-
-        let maxPendingBytes = FlowControlGlobals.sendQueueFactor * minMSS
-        guard connection.flowControlState.pendingOutboundBytesToSend < maxPendingBytes,
-            flowControlState.pendingOutboundBytesToSend < maxPendingBytes
-        else {
-            return 0
-        }
-
-        // Avoid trickling of data by using these values
-        let connectionMin = maxPendingBytes - connection.flowControlState.pendingOutboundBytesToSend
-        let streamMin = maxPendingBytes - flowControlState.pendingOutboundBytesToSend
-
-        let connectionMax = min(
-            connection.flowControlState.outboundMaxData
-                - connection.flowControlState.totalOutboundBytesSent,
-            allowedCCWindow
-        )
-        let connectionCredit = max(connectionMax, connectionMin)
-
-        let streamCredit = max(
-            flowControlState.outboundMaxData - flowControlState.totalOutboundBytesSent,
-            streamMin
-        )
-
-        return min(connectionCredit, streamCredit)
-    }
-
     @inline(always)
     func updateLastReceivedOffset(
         to newLastReceivedOffset: UInt64,
         connection: QUICConnection,
         in eventContext: inout NetworkContext.EventContext
     ) -> UInt64? {
-        let currentValue = flowControlState.largestInboundByteOffsetReceived
-        guard newLastReceivedOffset >= currentValue else { return nil }
-        let delta: UInt64 = newLastReceivedOffset - currentValue
-
-        flowControlState.largestInboundByteOffsetReceived = newLastReceivedOffset
-
-        var closeReason: String?
-
-        validation: repeat {
-            guard flowControlState.largestInboundByteOffsetReceived <= flowControlState.inboundMaxData
-            else {
-                log.error(
-                    "Received final size \(newLastReceivedOffset) which had exceeds stream flow control limits"
-                )
-                closeReason = "exceeded stream flow control limits"
-                break validation
-            }
-
-            let connectionMaxData = connection.flowControlState.inboundMaxData
-            let connectionCurrentLargestData = connection.flowControlState
-                .largestInboundByteOffsetReceived
-            guard connectionMaxData >= connectionCurrentLargestData,
-                (connectionMaxData - connectionCurrentLargestData) >= delta
-            else {
-                log.error(
-                    "Received final size \(newLastReceivedOffset) which had exceeds connection flow control limits"
-                )
-                closeReason = "exceeded flow control limits"
-                break validation
-            }
-        } while false
-
-        if let closeReason {
+        let update = state.updateLastReceivedOffset(
+            to: newLastReceivedOffset,
+            connectionFlowControl: &connection.flowControlState,
+            log: log
+        )
+        switch update {
+        case .unchanged:
+            return nil
+        case .advanced(let delta):
+            return delta
+        case .flowControlError(let reason):
             connection.close(
                 with: .flowControlError,
-                closeReason,
+                reason,
                 in: &eventContext
             )
             return nil
         }
-
-        // This cannot overflow, since the value has been just checked
-        connection.flowControlState.largestInboundByteOffsetReceived += delta
-        return delta
     }
 
     @inline(always)
     func startTrackingInboundFlowControlInterval(connection: QUICConnection) {
-        // Start of a new measurement interval
-        if flowControlStreamState.receiveHighWaterMarkTime == .zero {
-            flowControlStreamState.receiveHighWaterMarkTime = connection.now
-        }
+        state.startTrackingInboundFlowControlInterval(now: connection.now)
     }
 
     // Updates inbound flow control credit, and recalculates
@@ -761,120 +997,23 @@ extension QUICStreamInstance {
         )
     }
 
-    // Auto-tune the receive high watermark
-    // Grow the receive buffer based on 2*BDP to ensure
-    // that sender can send at full rate.
-    // Returns true if maximum was updated.
     @inline(always)
     fileprivate func updateMaximumUnreadInboundBytesAllowed(
         dataLengthAdded: UInt64,
         connection: QUICConnection
     ) -> Bool {
         guard dataLengthAdded > 0 else { return false }
-
-        // Do not grow the receive buffer if
-        // - the high water mark already reached the maximum
-        // - TODO: reassembly queue gaps
-        if flowControlState.maximumUnreadInboundBytesAllowed
-            >= FlowControlGlobals.shared.streamReceiveHighWaterMarkMax
-        {
-            log.datapath("Already at maximum inbound bytes allowed")
+        guard state.canGrowReceiveHighWaterMark(connectionFlowControl: connection.flowControlState, log: log) else {
             return false
         }
-
-        if connection.flowControlState.maximumUnreadInboundBytesAllowed
-            > FlowControlGlobals.shared.connectionReceiveHighWaterMarkMax
-        {
-            log.datapath("Connection already at maximum inbound bytes allowed")
-            return false
-        }
-
-        let increment = computeReceiveHighWaterMarkIncrease(
+        return state.growReceiveHighWaterMark(
             dataLength: dataLengthAdded,
-            connection: connection,
-            now: connection.now
+            connectionFlowControl: &connection.flowControlState,
+            now: connection.now,
+            rtt: connection.currentPath?.smoothedRTT ?? .zero,
+            mss: UInt64(connection.currentPath?.mss ?? 0),
+            log: log
         )
-
-        if increment > 0 {
-            self.updateMaximumUnreadInboundBytesAllowed(increment: increment)
-            connection.updateMaximumUnreadInboundBytesAllowed(increment: increment)
-            log.datapath(
-                "Increased the receive high watermark to \(flowControlState.maximumUnreadInboundBytesAllowed)"
-            )
-            return true
-        }
-        return false
-    }
-
-    @inline(always)
-    fileprivate func updateMaximumUnreadInboundBytesAllowed(increment: UInt64) {
-        let oldValue = flowControlState.maximumUnreadInboundBytesAllowed
-        flowControlState.maximumUnreadInboundBytesAllowed = min(
-            oldValue + increment,
-            UInt64(FlowControlGlobals.shared.streamReceiveHighWaterMarkMax)
-        )
-    }
-
-    @inline(always)
-    fileprivate func computeReceiveHighWaterMarkIncrease(
-        dataLength: UInt64,
-        connection: QUICConnection,
-        now: NetworkClock.Instant
-    ) -> UInt64 {
-        let receiveHighWaterMarkTime = flowControlStreamState.receiveHighWaterMarkTime
-        if receiveHighWaterMarkTime > now {
-            log.fault("Timestamp should be greater than now")
-            return 0
-        }
-
-        var increment: UInt64 = 0
-        let receiveHighWaterMarkCount = flowControlStreamState.receiveHighWaterMarkCount + dataLength
-
-        // If one RTT has elapsed, we can stop counting the bytes.
-        // Here, we estimate if the bandwidth measured in this RTT
-        // is more than a certain value of the bandwidth measured
-        // in the previous RTT.
-        let rtt = connection.currentPath?.smoothedRTT ?? .zero
-        if now >= receiveHighWaterMarkTime.advanced(by: rtt) {
-            let receiveHighWaterMarkPreviousCount = flowControlStreamState.receiveHighWaterMarkPreviousCount
-            var newPreviousCount = receiveHighWaterMarkPreviousCount
-            if receiveHighWaterMarkCount > receiveHighWaterMarkPreviousCount {
-                let mss = UInt64(connection.currentPath?.mss ?? 0)
-                let shift: Int
-                if receiveHighWaterMarkCount
-                    > (receiveHighWaterMarkPreviousCount + (receiveHighWaterMarkPreviousCount >> 1))
-                {
-
-                    // If we received more than 1.5 times
-                    // than last time, set rcvbuf to 4*BDP
-                    shift = 2
-                } else {
-                    shift = 1
-                }
-                log.datapath(
-                    "Estimated BDP \(receiveHighWaterMarkCount)B, current RTT \(rtt), estimated bandwidth 8 * \(receiveHighWaterMarkCount) / \(rtt.microseconds) Mbps"
-                )
-
-                let (incr, overflow) = (receiveHighWaterMarkCount << shift)
-                    .subtractingReportingOverflow(flowControlState.maximumUnreadInboundBytesAllowed)
-                if !overflow {
-                    newPreviousCount = receiveHighWaterMarkCount
-                    // Align the increase to whole segments. Increases of a fraction of an MSS isn't useful as it won't fill a whole packet.
-                    if mss != 0 {
-                        increment = (incr / mss) * mss
-                    }
-                }
-            }
-
-            // Reset the measurement
-            flowControlStreamState.receiveHighWaterMarkPreviousCount = newPreviousCount
-            flowControlStreamState.receiveHighWaterMarkCount = 0
-            flowControlStreamState.receiveHighWaterMarkTime = .zero
-        } else {
-            flowControlStreamState.receiveHighWaterMarkCount = receiveHighWaterMarkCount
-        }
-
-        return increment
     }
 }
 
