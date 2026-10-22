@@ -215,6 +215,10 @@ final class QUICConnectionCoreTests: XCTestCase {
         }
         XCTAssertEqual(responseReceived.count, response.count)
         XCTAssertTrue(responseFinished)
+        // Both directions are done once the client's FIN is acknowledged and the response read.
+        pair.exchange()
+        pair.clientEvents += LockstepPair.events(&pair.client)
+        XCTAssertTrue(pair.clientEvents.contains(.streamClosed(streamID)), "client events: \(pair.clientEvents)")
     }
 
     func testLossIsRecoveredByRetransmission() throws {

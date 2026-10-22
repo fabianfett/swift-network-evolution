@@ -62,6 +62,8 @@ public struct QUICConnectionCore: ~Copyable {
         case stopSending(UInt64, errorCode: UInt64)
         /// The peer acknowledged all data and the FIN of a stream.
         case streamFinishedSending(UInt64)
+        /// Both directions of a stream are done and the stream is gone.
+        case streamClosed(UInt64)
         /// The connection is closed and can be released.
         case closed(CloseReason)
     }
@@ -535,6 +537,7 @@ public struct QUICConnectionCore: ~Copyable {
     mutating func storeOrRemove(_ stream: consuming CoreStream) {
         let id = stream.id
         if stream.isClosed {
+            self.events.append(.streamClosed(id))
             self.streams.remove(id)
             // `remove` only forgets streams in the map, so make sure the ID is gone too.
             self.streams.streams[id] = nil
