@@ -26,7 +26,7 @@ import Crypto
 
 /// Two state machines connected back to back, driven in lockstep with a manual clock.
 @available(Network 0.1.0, *)
-private struct LockstepPair: ~Copyable {
+struct LockstepPair: ~Copyable {
     var client: QUICConnectionCore
     var server: QUICConnectionCore?
     var now = NetworkClock.Instant(milliseconds: 1_000)
@@ -308,6 +308,44 @@ final class QUICConnectionCoreTests: XCTestCase {
             }
             XCTAssertTrue(finished, "request \(request)")
             pair.exchange()
+        }
+    }
+
+    func testLostRequestAndResponseAreRetransmitted() throws {
+        for loseRequest in [true, false] {
+            var pair = LockstepPair()
+            pair.exchange()
+            let streamID = try XCTUnwrap(pair.client.openStream(bidirectional: true))
+            pair.client.write([UInt8]("GET".utf8).span.bytes, to: streamID, fin: true)
+            var dropped = false
+            // Lose the first datagram in the chosen direction that carries the stream data.
+            let dropOnce: (Bool, Int) -> Bool = { toServer, _ in
+                guard toServer == loseRequest, !dropped else { return false }
+                dropped = true
+                return true
+            }
+            pair.exchange(drop: dropOnce)
+            var finished = false
+            for _ in 0..<30 where !finished {
+                if var server = pair.server.take() {
+                    _ = server.read(from: streamID) { bytes, _ in (bytes.byteCount, ()) }
+                    if server.hasStream(streamID) {
+                        server.write([UInt8]("OK".utf8).span.bytes, to: streamID, fin: true)
+                    }
+                    pair.server = consume server
+                }
+                pair.exchange(drop: dropOnce)
+                _ = pair.client.read(from: streamID) { bytes, isFinished in
+                    if isFinished { finished = true }
+                    return (bytes.byteCount, ())
+                }
+                if !finished {
+                    pair.advanceToNextDeadline()
+                    pair.exchange(drop: dropOnce)
+                }
+            }
+            XCTAssertTrue(dropped)
+            XCTAssertTrue(finished, "lost \(loseRequest ? "request" : "response") was not recovered")
         }
     }
 

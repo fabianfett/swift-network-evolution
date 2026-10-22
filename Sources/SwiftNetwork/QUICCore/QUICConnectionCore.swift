@@ -141,6 +141,11 @@ public struct QUICConnectionCore: ~Copyable {
     var events = Deque<Event>()
     /// PATH_CHALLENGE data to answer with PATH_RESPONSE.
     var pendingPathResponses: [UInt64] = []
+    #if DEBUG
+    /// Raw frames written into the next 1-RTT packets, ack-eliciting and never retransmitted. Tests
+    /// use them to send what a misbehaving peer would.
+    var injectedFrames: [[UInt8]] = []
+    #endif
 
     var isClosed: Bool {
         if case .closed = self.state { return true }

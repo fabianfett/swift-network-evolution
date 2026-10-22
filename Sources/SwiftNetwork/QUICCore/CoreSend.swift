@@ -121,7 +121,15 @@ extension QUICConnectionCore {
         guard self.handshake.isComplete else { return false }
         return self.handshakeDonePending || self.maxDataPending || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || !self.pendingPathResponses.isEmpty
-            || self.hasSendableStreams
+            || self.hasSendableStreams || self.hasInjectedFrames
+    }
+
+    private var hasInjectedFrames: Bool {
+        #if DEBUG
+        return !self.injectedFrames.isEmpty
+        #else
+        return false
+        #endif
     }
 
     private var hasSendableStreams: Bool {
@@ -373,6 +381,14 @@ extension QUICConnectionCore {
         frames: inout [CoreSentFrame],
         isAckEliciting: inout Bool
     ) {
+        #if DEBUG
+        while let frame = self.injectedFrames.first, writer.offset &+ frame.count <= limit {
+            _ = writer.bytes(frame.span.bytes)
+            self.injectedFrames.removeFirst()
+            frames.append(.ping)
+            isAckEliciting = true
+        }
+        #endif
         if self.handshakeDonePending && writer.offset < limit {
             _ = writer.uint8(0x1e)
             self.handshakeDonePending = false
