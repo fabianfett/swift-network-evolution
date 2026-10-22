@@ -190,8 +190,16 @@ struct CoreWriter: ~Copyable, ~Escapable {
     mutating func bytes(_ source: RawSpan) -> Bool {
         let count = source.byteCount
         guard self.remaining >= count else { return false }
-        for i in 0..<count {
-            self.bytes[self.offset &+ i] = source.unsafeLoad(fromByteOffset: i, as: UInt8.self)
+        if count > 0 {
+            let offset = self.offset
+            self.bytes.withUnsafeMutableBufferPointer { destination in
+                source.withUnsafeBytes { source in
+                    UnsafeMutableRawBufferPointer(
+                        UnsafeMutableBufferPointer(rebasing: destination[offset..<(offset &+ count)])
+                    )
+                    .copyMemory(from: source)
+                }
+            }
         }
         self.offset &+= count
         return true
@@ -199,8 +207,12 @@ struct CoreWriter: ~Copyable, ~Escapable {
 
     mutating func zeros(_ count: Int) -> Bool {
         guard count >= 0, self.remaining >= count else { return false }
-        for i in 0..<count {
-            self.bytes[self.offset &+ i] = 0
+        if count > 0 {
+            let offset = self.offset
+            self.bytes.withUnsafeMutableBufferPointer { destination in
+                UnsafeMutableBufferPointer(rebasing: destination[offset..<(offset &+ count)])
+                    .update(repeating: 0)
+            }
         }
         self.offset &+= count
         return true

@@ -77,11 +77,7 @@ struct CoreSendBuffer {
 
     mutating func append(_ bytes: RawSpan) {
         precondition(self.finalSize == nil, "Appending to a finished stream")
-        let count = bytes.byteCount
-        self.storage.reserveCapacity(self.storage.count &+ count)
-        for i in 0..<count {
-            self.storage.append(bytes.unsafeLoad(fromByteOffset: i, as: UInt8.self))
-        }
+        bytes.withUnsafeBytes { self.storage.append(contentsOf: $0) }
     }
 
     mutating func append(_ bytes: [UInt8]) {
@@ -280,9 +276,8 @@ struct CoreReceiveBuffer {
         let before = self.readableCount
         if offset <= contiguousEnd {
             let skip = Int(contiguousEnd &- offset)
-            self.contiguous.reserveCapacity(self.contiguous.count &+ bytes.byteCount &- skip)
-            for i in skip..<bytes.byteCount {
-                self.contiguous.append(bytes.unsafeLoad(fromByteOffset: i, as: UInt8.self))
+            bytes.withUnsafeBytes { buffer in
+                self.contiguous.append(contentsOf: UnsafeRawBufferPointer(rebasing: buffer[skip...]))
             }
             self.drainSegments()
         } else {
