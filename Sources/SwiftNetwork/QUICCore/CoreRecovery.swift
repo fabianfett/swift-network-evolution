@@ -156,12 +156,15 @@ struct CoreRecovery {
             self.spaces[index].largestAcknowledged = largest
         }
 
-        // Remove acknowledged packets.
-        var remaining = Deque<CoreSentPacket>()
-        remaining.reserveCapacity(self.spaces[index].sent.count)
+        // Remove acknowledged packets. They lie between the smallest and the largest acknowledged
+        // packet number, so only that part of the queue changes.
+        let lower = Self.firstIndex(in: self.spaces[index].sent, atLeast: ranges[ranges.count &- 1].lowerBound)
+        let upper = Self.firstIndex(in: self.spaces[index].sent, above: largest)
+        var kept: [CoreSentPacket] = []
         var largestNewlyAcked: CoreSentPacket?
         var ackedAckEliciting = false
-        for packet in self.spaces[index].sent {
+        for position in lower..<upper {
+            let packet = self.spaces[index].sent[position]
             if Self.contains(ranges, packet.packetNumber) {
                 if packet.isInFlight {
                     self.bytesInFlight &-= packet.size
@@ -170,15 +173,16 @@ struct CoreRecovery {
                         ackedAckEliciting = true
                     }
                 }
-                if largestNewlyAcked == nil || packet.packetNumber > largestNewlyAcked!.packetNumber {
-                    largestNewlyAcked = packet
-                }
+                // Ascending order: the last one is the largest.
+                largestNewlyAcked = packet
                 result.acknowledged.append(packet)
             } else {
-                remaining.append(packet)
+                kept.append(packet)
             }
         }
-        self.spaces[index].sent = remaining
+        if lower < upper {
+            self.spaces[index].sent.replaceSubrange(lower..<upper, with: kept)
+        }
 
         guard let largestNewlyAcked else { return result }
 
@@ -205,6 +209,26 @@ struct CoreRecovery {
         // Reset the PTO backoff, unless the client is unsure the server validated its address.
         self.ptoCount = 0
         return result
+    }
+
+    /// The position of the first packet numbered `packetNumber` or higher.
+    private static func firstIndex(in sent: Deque<CoreSentPacket>, atLeast packetNumber: UInt64) -> Int {
+        var low = 0
+        var high = sent.count
+        while low < high {
+            let middle = low &+ (high &- low) / 2
+            if sent[middle].packetNumber < packetNumber {
+                low = middle &+ 1
+            } else {
+                high = middle
+            }
+        }
+        return low
+    }
+
+    /// The position of the first packet numbered above `packetNumber`.
+    private static func firstIndex(in sent: Deque<CoreSentPacket>, above packetNumber: UInt64) -> Int {
+        packetNumber == .max ? sent.count : Self.firstIndex(in: sent, atLeast: packetNumber &+ 1)
     }
 
     private static func contains(_ ranges: [ClosedRange<UInt64>], _ packetNumber: UInt64) -> Bool {
@@ -251,12 +275,11 @@ struct CoreRecovery {
         self.spaces[index].lossTime = nil
         let lossDelay = self.lossDelay
         var lost: [CoreSentPacket] = []
-        var remaining = Deque<CoreSentPacket>()
-        for packet in self.spaces[index].sent {
-            guard packet.packetNumber <= largestAcknowledged else {
-                remaining.append(packet)
-                continue
-            }
+        // Only packets up to the largest acknowledged one can be lost; they are at the front.
+        let end = Self.firstIndex(in: self.spaces[index].sent, above: largestAcknowledged)
+        var kept: [CoreSentPacket] = []
+        for position in 0..<end {
+            let packet = self.spaces[index].sent[position]
             let lostByTime = packet.timeSent.advanced(by: lossDelay) <= now
             let lostByCount = largestAcknowledged >= packet.packetNumber &+ Self.packetThreshold
             if lostByTime || lostByCount {
@@ -274,10 +297,12 @@ struct CoreRecovery {
                 } else {
                     self.spaces[index].lossTime = lossTime
                 }
-                remaining.append(packet)
+                kept.append(packet)
             }
         }
-        self.spaces[index].sent = remaining
+        if end > 0 {
+            self.spaces[index].sent.replaceSubrange(0..<end, with: kept)
+        }
         return lost
     }
 
