@@ -78,8 +78,7 @@ extension QUICConnection {
         isServer: Bool
     ) -> Bool {
         if options.retry || options.forceVersionNegotiation || options.forceUnsupportedClientVersion
-            || options.testSendingShortPackets || options.enablePacing || options.keepaliveCount > 0
-            || options.enableL4S == true
+            || options.testSendingShortPackets || options.enablePacing || options.enableL4S == true
             // The application announces and retires the connection IDs itself.
             || options.disableAutomaticNewConnectionIDs
         {
@@ -149,6 +148,7 @@ extension QUICConnection {
         if let perProtocolOptions = quicOptions.perProtocolOptions {
             let options = perProtocolOptions.quicConnectionOptions
             configuration.maxIdleTimeout = options.idleTimeout
+            configuration.maxUnacknowledgedKeepAlives = Int(options.keepaliveCount)
             configuration.maxUDPPayloadSize = UInt64(
                 min(
                     max(Int(options.maxUDPPayloadSize), Int(TransportParameters.minUDPPayloadSize)),
@@ -201,6 +201,9 @@ extension QUICConnection {
             now: self.now
         )
         self.coreBox = QUICConnectionCoreBox(core)
+        if self.keepaliveDuration != .zero {
+            self.coreBox?.core.setKeepAliveInterval(self.keepaliveDuration, now: self.now)
+        }
         self.state.change(to: .initialSent, logIDString: self.logPrefixer.logIDString)
         self.coreAfterUpdate(in: &eventContext)
     }
@@ -264,6 +267,9 @@ extension QUICConnection {
             now: self.now
         )
         self.coreBox = QUICConnectionCoreBox(core)
+        if self.keepaliveDuration != .zero {
+            self.coreBox?.core.setKeepAliveInterval(self.keepaliveDuration, now: self.now)
+        }
         path.assignDCID(sourceConnectionID, in: &eventContext)
         self.state.change(to: .initialReceived, logIDString: self.logPrefixer.logIDString)
         self.keyState = .handshake
@@ -564,6 +570,9 @@ extension QUICConnection {
         case .idleTimeout:
             self.errorToReport = NetworkError.posix(ETIMEDOUT)
             self.log.info("Idle timeout fired, closing connection due to inactivity")
+        case .keepAliveTimeout:
+            self.closeError = QUICTransportError(.noError, "keepalive limit reached")
+            self.errorToReport = NetworkError.posix(ETIMEDOUT)
         case .transportError(let errorCode, let reason):
             if self.closeError == nil {
                 self.closeError =

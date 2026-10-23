@@ -40,6 +40,8 @@ enum CoreSentFrame {
     case pathResponse
     case handshakeDone
     case ping
+    /// The PING of a keepalive.
+    case keepAlive
     case datagram
 }
 

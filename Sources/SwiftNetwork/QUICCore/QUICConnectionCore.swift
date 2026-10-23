@@ -38,6 +38,12 @@ public struct QUICConnectionCore: ~Copyable {
         public var initialMaxStreamsUnidirectional: UInt64 = 100
         /// Zero disables the idle timeout on our side (RFC 9000 Section 10.1).
         public var maxIdleTimeout: NetworkDuration = .seconds(30)
+        /// Sends a PING once nothing arrived for this long, to keep the connection and the path
+        /// alive; `nil` sends none. An interval at or above the idle timeout has no effect.
+        public var keepAliveInterval: NetworkDuration?
+        /// Closes the connection once this many keepalives in a row went unacknowledged; zero
+        /// never does.
+        public var maxUnacknowledgedKeepAlives = 0
         /// The largest UDP payload this endpoint sends.
         public var maxDatagramSize: Int = 1350
         /// The size a client pads the datagrams of its Initial packets to, at least 1200 bytes
@@ -92,6 +98,9 @@ public struct QUICConnectionCore: ~Copyable {
         case peer(errorCode: UInt64, isApplication: Bool, reason: String)
         /// The connection was idle for too long.
         case idleTimeout
+        /// Too many keepalives in a row went unacknowledged. The connection sent CONNECTION_CLOSE
+        /// with NO_ERROR.
+        case keepAliveTimeout
         /// The connection failed: a protocol violation or a TLS failure.
         case transportError(errorCode: UInt64, reason: String)
     }
@@ -159,7 +168,13 @@ public struct QUICConnectionCore: ~Copyable {
     /// both disabled it.
     var idleTimeout: NetworkDuration?
     var idleDeadline: NetworkClock.Instant?
-    var lastAckElicitingSentTime: NetworkClock.Instant?
+    /// Whether an ack-eliciting packet went out since the last packet arrived.
+    var sentAckElicitingSinceReceive = false
+    var keepAliveInterval: NetworkDuration?
+    /// When the next keepalive goes out, unless a packet arrives first.
+    var keepAliveDeadline: NetworkClock.Instant?
+    var keepAlivePending = false
+    var unacknowledgedKeepAlives = 0
     /// Probe packets to send per space after a PTO.
     var probesPending = [0, 0, 0]
     var pendingClose: PendingClose?
@@ -269,6 +284,7 @@ public struct QUICConnectionCore: ~Copyable {
         self.receiveMaxData = configuration.initialMaxData
         self.addressValidated = !isServer
         self.idleTimeout = configuration.maxIdleTimeout > .zero ? configuration.maxIdleTimeout : nil
+        self.keepAliveInterval = configuration.keepAliveInterval
         self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
 
         var tlsOptions = configuration.tlsOptions
@@ -339,6 +355,7 @@ public struct QUICConnectionCore: ~Copyable {
             break
         }
         consider(self.idleDeadline)
+        consider(self.keepAliveDeadline)
         consider(self.lossDetectionDeadline?.deadline)
         for space in PacketNumberSpace.allCases where !self.spaceDiscarded[Int(space.rawValue)] {
             consider(self.acks[space].ackDeadline)
@@ -379,6 +396,10 @@ public struct QUICConnectionCore: ~Copyable {
             self.closeReason = .idleTimeout
             self.enterClosed()
             return
+        }
+        if let keepAliveDeadline = self.keepAliveDeadline, now >= keepAliveDeadline {
+            self.keepAliveTimerFired(now: now)
+            if self.isClosingOrDraining { return }
         }
         for space in PacketNumberSpace.allCases {
             if let ackDeadline = self.acks[space].ackDeadline, now >= ackDeadline {
@@ -454,7 +475,7 @@ public struct QUICConnectionCore: ~Copyable {
         )
     }
 
-    private mutating func startClosing(_ close: PendingClose, now: NetworkClock.Instant) {
+    mutating func startClosing(_ close: PendingClose, now: NetworkClock.Instant) {
         self.pendingClose = close
         self.closeFrameSentInState = false
         let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
@@ -471,6 +492,50 @@ public struct QUICConnectionCore: ~Copyable {
         self.state = .closed
         self.handshake.release()
         self.events.append(.closed(self.closeReason ?? .idleTimeout))
+    }
+
+    // MARK: Keepalive
+
+    /// Starts, changes or stops (`nil`) the keepalives.
+    public mutating func setKeepAliveInterval(_ interval: NetworkDuration?, now: NetworkClock.Instant) {
+        self.keepAliveInterval = interval.flatMap { $0 > .zero ? $0 : nil }
+        self.rearmKeepAlive(now: now)
+    }
+
+    /// Schedules the next keepalive an interval from `now`, once the handshake completed.
+    mutating func rearmKeepAlive(now: NetworkClock.Instant) {
+        guard let interval = self.keepAliveInterval, self.handshake.isComplete, !self.isClosingOrDraining else {
+            self.keepAliveDeadline = nil
+            return
+        }
+        if let idleTimeout = self.idleTimeout, interval >= idleTimeout {
+            // The connection would idle out first.
+            self.keepAliveDeadline = nil
+            return
+        }
+        self.keepAliveDeadline = now.advanced(by: interval)
+    }
+
+    private mutating func keepAliveTimerFired(now: NetworkClock.Instant) {
+        let limit = self.configuration.maxUnacknowledgedKeepAlives
+        if limit > 0 && self.unacknowledgedKeepAlives >= limit {
+            self.log.error("Closing after \(self.unacknowledgedKeepAlives) unacknowledged keepalives")
+            self.keepAliveDeadline = nil
+            self.closeReason = .keepAliveTimeout
+            self.startClosing(
+                PendingClose(
+                    errorCode: CoreTransportError.noError,
+                    isApplication: false,
+                    frameType: 0,
+                    reason: "keepalive limit reached"
+                ),
+                now: now
+            )
+            return
+        }
+        self.keepAlivePending = true
+        self.unacknowledgedKeepAlives &+= 1
+        self.rearmKeepAlive(now: now)
     }
 
     // MARK: Streams

@@ -148,6 +148,10 @@ extension QUICConnectionCore {
                 self.discardSpace(.initial)
             }
             self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
+            self.sentAckElicitingSinceReceive = false
+            if self.keepAliveDeadline != nil {
+                self.rearmKeepAlive(now: now)
+            }
             return packetLength
         }
         // A packet we can't open, for example one whose keys we already dropped, still says how
@@ -489,6 +493,8 @@ extension QUICConnectionCore {
                 guard var stream = self.streams.streams.removeValue(forKey: id) else { continue }
                 stream.resetAcknowledged = true
                 self.storeOrRemove(stream)
+            case .keepAlive:
+                self.unacknowledgedKeepAlives = 0
             case .handshakeDone, .maxData, .maxStreamData, .maxStreamsBidirectional, .maxStreamsUnidirectional,
                 .stopSending, .dataBlocked, .streamDataBlocked, .newConnectionID, .retireConnectionID, .pathResponse,
                 .ping, .datagram:
@@ -532,7 +538,7 @@ extension QUICConnectionCore {
             case .handshakeDone:
                 self.handshakeDonePending = true
             case .dataBlocked, .streamDataBlocked, .newConnectionID, .retireConnectionID, .pathResponse, .ping,
-                .datagram:
+                .keepAlive, .datagram:
                 break
             }
         }
@@ -805,6 +811,7 @@ extension QUICConnectionCore {
             case .complete:
                 self.state = .established
                 self.events.append(.connected)
+                self.rearmKeepAlive(now: now)
                 if self.isServer {
                     // The server confirms the handshake as soon as it completes.
                     self.handshakeDonePending = true

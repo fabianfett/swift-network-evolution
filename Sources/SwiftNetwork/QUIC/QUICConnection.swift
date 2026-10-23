@@ -3247,6 +3247,12 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             return
         }
         keepaliveDuration = duration
+        if self.usesCore {
+            // A core created later picks the interval up from `keepaliveDuration`.
+            self.coreBox?.core.setKeepAliveInterval(duration, now: self.now)
+            self.coreAfterUpdate(in: &eventContext)
+            return
+        }
         if self.state != .connected {
             // We're not yet connected, so just save the value and return.
             // We'll setup the timer once we are connected.

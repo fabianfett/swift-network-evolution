@@ -101,6 +101,10 @@ extension QUICConnectionCore {
         if self.probesPending[index] > 0 {
             return true
         }
+        // Keepalives ignore the congestion window.
+        if space == .applicationData && self.keepAlivePending && self.handshake.isComplete {
+            return true
+        }
         // Handshake data ignores the congestion window: 1-RTT packets sent right after the
         // handshake can fill it, and the peer won't acknowledge them before it has our
         // (possibly lost) Finished. Waiting for room would deadlock.
@@ -121,7 +125,8 @@ extension QUICConnectionCore {
 
     var hasApplicationFramesToSend: Bool {
         guard self.handshake.isComplete else { return false }
-        return self.handshakeDonePending || self.maxDataPending || self.streams.maxStreamsBidirectionalPending
+        return self.handshakeDonePending || self.keepAlivePending || self.maxDataPending
+            || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || !self.pendingPathResponses.isEmpty
             || !self.datagramsToSend.isEmpty || self.hasSendableStreams || self.hasInjectedFrames
     }
@@ -254,7 +259,8 @@ extension QUICConnectionCore {
                 }
             }
 
-            let mayExceedCongestionWindow = self.probesPending[Int(space.rawValue)] > 0
+            let mayExceedCongestionWindow =
+                self.probesPending[Int(space.rawValue)] > 0 || (space == .applicationData && self.keepAlivePending)
             if !congestionLimited || mayExceedCongestionWindow || space != .applicationData {
                 // CRYPTO.
                 while true {
@@ -372,11 +378,13 @@ extension QUICConnectionCore {
             ),
             in: space
         )
-        if isAckEliciting {
-            if let idleTimeout = self.idleTimeout, self.lastAckElicitingSentTime == nil || self.idleDeadline == nil {
+        // The first ack-eliciting packet since a packet arrived restarts the idle timer
+        // (RFC 9000 Section 10.1).
+        if isAckEliciting && !self.sentAckElicitingSinceReceive {
+            self.sentAckElicitingSinceReceive = true
+            if let idleTimeout = self.idleTimeout {
                 self.idleDeadline = now.advanced(by: idleTimeout)
             }
-            self.lastAckElicitingSentTime = now
         }
         return totalLength
     }
@@ -404,6 +412,12 @@ extension QUICConnectionCore {
             isAckEliciting = true
         }
         #endif
+        if self.keepAlivePending && writer.offset < limit {
+            _ = writer.uint8(0x01)
+            self.keepAlivePending = false
+            frames.append(.keepAlive)
+            isAckEliciting = true
+        }
         if self.handshakeDonePending && writer.offset < limit {
             _ = writer.uint8(0x1e)
             self.handshakeDonePending = false
