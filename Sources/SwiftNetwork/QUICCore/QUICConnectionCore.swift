@@ -36,6 +36,7 @@ public struct QUICConnectionCore: ~Copyable {
         public var initialMaxStreamDataUnidirectional: UInt64 = 256 * 1024
         public var initialMaxStreamsBidirectional: UInt64 = 100
         public var initialMaxStreamsUnidirectional: UInt64 = 100
+        /// Zero disables the idle timeout on our side (RFC 9000 Section 10.1).
         public var maxIdleTimeout: NetworkDuration = .seconds(30)
         /// The largest UDP payload this endpoint sends.
         public var maxDatagramSize: Int = 1350
@@ -138,7 +139,9 @@ public struct QUICConnectionCore: ~Copyable {
     var addressValidated: Bool
     var bytesReceived = 0
     var bytesSent = 0
-    var idleTimeout: NetworkDuration
+    /// The effective idle timeout, the smaller of the two endpoints' nonzero values; `nil` when
+    /// both disabled it.
+    var idleTimeout: NetworkDuration?
     var idleDeadline: NetworkClock.Instant?
     var lastAckElicitingSentTime: NetworkClock.Instant?
     /// Probe packets to send per space after a PTO.
@@ -240,8 +243,8 @@ public struct QUICConnectionCore: ~Copyable {
         )
         self.receiveMaxData = configuration.initialMaxData
         self.addressValidated = !isServer
-        self.idleTimeout = configuration.maxIdleTimeout
-        self.idleDeadline = now.advanced(by: configuration.maxIdleTimeout)
+        self.idleTimeout = configuration.maxIdleTimeout > .zero ? configuration.maxIdleTimeout : nil
+        self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
 
         var tlsOptions = configuration.tlsOptions
         tlsOptions.quicTransportParameters = self.localTransportParameters()

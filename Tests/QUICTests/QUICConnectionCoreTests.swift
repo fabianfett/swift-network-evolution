@@ -381,6 +381,61 @@ final class QUICConnectionCoreTests: XCTestCase {
         pair.clientEvents += LockstepPair.events(&pair.client)
         XCTAssertTrue(pair.clientEvents.contains(.closed(.idleTimeout)), "client events: \(pair.clientEvents)")
     }
+
+    private static func configuration(idleTimeout: NetworkDuration) -> QUICConnectionCore.Configuration {
+        var configuration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
+        configuration.maxIdleTimeout = idleTimeout
+        return configuration
+    }
+
+    /// Runs the timers of an otherwise quiet connection for `duration`.
+    private static func idle(_ pair: inout LockstepPair, for duration: NetworkDuration) {
+        let end = pair.now.advanced(by: duration)
+        for _ in 0..<100 {
+            pair.advanceToNextDeadline()
+            pair.exchange()
+            if pair.now >= end || (pair.client.isClosed && pair.server?.isClosed != false) { break }
+        }
+    }
+
+    /// RFC 9000 Section 10.1: a zero max_idle_timeout disables the idle timeout.
+    func testNoIdleTimeoutWhenBothSidesDisableIt() {
+        var pair = LockstepPair(
+            clientConfiguration: Self.configuration(idleTimeout: .zero),
+            serverConfiguration: Self.configuration(idleTimeout: .zero)
+        )
+        pair.exchange()
+        XCTAssertTrue(pair.client.isHandshakeConfirmed)
+        Self.idle(&pair, for: .seconds(3600))
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
+        XCTAssertNil(pair.client.nextDeadline, "an idle connection without idle timeout needs no timer")
+    }
+
+    /// The effective idle timeout is the smaller of the two, and a disabled one doesn't count.
+    func testTheIdleTimeoutIsTheSmallerNonzeroOne() {
+        for (client, server, expected) in [
+            (NetworkDuration.zero, NetworkDuration.seconds(5), NetworkDuration.seconds(5)),
+            (.seconds(5), .zero, .seconds(5)),
+            (.seconds(5), .seconds(20), .seconds(5)),
+            (.seconds(20), .seconds(5), .seconds(5)),
+        ] {
+            var pair = LockstepPair(
+                clientConfiguration: Self.configuration(idleTimeout: client),
+                serverConfiguration: Self.configuration(idleTimeout: server)
+            )
+            pair.exchange()
+            let quietSince = pair.now
+            Self.idle(&pair, for: .seconds(60))
+            let context = "client \(client), server \(server)"
+            XCTAssertEqual(pair.client.closeReason, .idleTimeout, context)
+            XCTAssertEqual(pair.server?.closeReason, .idleTimeout, context)
+            // Closed within a second of the expected timeout.
+            let elapsed = quietSince.duration(to: pair.now)
+            XCTAssertGreaterThanOrEqual(elapsed, expected, context)
+            XCTAssertLessThan(elapsed, expected + .seconds(1), context)
+        }
+    }
 }
 
 #endif

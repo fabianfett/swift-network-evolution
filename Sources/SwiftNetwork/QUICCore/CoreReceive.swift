@@ -146,7 +146,7 @@ extension QUICConnectionCore {
             if space == .handshake && self.isServer {
                 self.discardSpace(.initial)
             }
-            self.idleDeadline = now.advanced(by: self.idleTimeout)
+            self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
             return packetLength
         }
         // A packet we can't open, for example one whose keys we already dropped, still says how
@@ -802,8 +802,12 @@ extension QUICConnectionCore {
         self.streams.peerMaxStreamsBidirectional = UInt64(parameters.intValue(.initialMaxStreamsBidirectional))
         self.streams.peerMaxStreamsUnidirectional = UInt64(parameters.intValue(.initialMaxStreamsUnidirectional))
         let peerIdle = NetworkDuration.milliseconds(parameters.intValue(.maxIdleTimeout))
-        if peerIdle > .zero && peerIdle < self.idleTimeout {
+        if peerIdle > .zero, self.idleTimeout.map({ peerIdle < $0 }) ?? true {
             self.idleTimeout = peerIdle
+            let deadline = now.advanced(by: peerIdle)
+            if self.idleDeadline.map({ deadline < $0 }) ?? true {
+                self.idleDeadline = deadline
+            }
         }
         let maxAckDelay = parameters.intValue(.maxAckDelay)
         self.recovery.maxAckDelay = .milliseconds(maxAckDelay)

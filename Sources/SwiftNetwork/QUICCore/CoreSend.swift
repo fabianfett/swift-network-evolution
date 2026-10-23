@@ -364,8 +364,8 @@ extension QUICConnectionCore {
             in: space
         )
         if isAckEliciting {
-            if self.lastAckElicitingSentTime == nil || self.idleDeadline == nil {
-                self.idleDeadline = now.advanced(by: self.idleTimeout)
+            if let idleTimeout = self.idleTimeout, self.lastAckElicitingSentTime == nil || self.idleDeadline == nil {
+                self.idleDeadline = now.advanced(by: idleTimeout)
             }
             self.lastAckElicitingSentTime = now
         }
