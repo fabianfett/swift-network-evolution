@@ -792,6 +792,9 @@ extension QUICConnectionCore {
 
     mutating func apply(_ outputs: [CoreHandshake.Output], now: NetworkClock.Instant) {
         for output in outputs {
+            // An output that failed the connection, such as invalid transport parameters, ends
+            // the handshake: completing it after that would reopen the connection.
+            guard !self.isClosingOrDraining else { return }
             switch output {
             case .secret(let level, let secret, let isWrite, let cipherSuite):
                 guard let tlsCipherSuite = TLSCipherSuite(sslCipherSuite: cipherSuite) else { continue }
@@ -803,7 +806,7 @@ extension QUICConnectionCore {
                 )
             case .peerTransportParameters(let bytes, let earlyData):
                 guard !earlyData || self.peerTransportParameters == nil else { continue }
-                self.setPeerTransportParameters(bytes, now: now)
+                self.setPeerTransportParameters(bytes, fromEarlyData: earlyData, now: now)
             case .earlyDataAccepted:
                 break
             case .sessionTickets:
@@ -827,7 +830,11 @@ extension QUICConnectionCore {
         }
     }
 
-    private mutating func setPeerTransportParameters(_ bytes: [UInt8], now: NetworkClock.Instant) {
+    private mutating func setPeerTransportParameters(
+        _ bytes: [UInt8],
+        fromEarlyData: Bool,
+        now: NetworkClock.Instant
+    ) {
         let parameters: TransportParameters
         do {
             parameters = try TransportParameters.deserialize(bytes.span, logPrefixer: self.log)
@@ -837,6 +844,11 @@ extension QUICConnectionCore {
                 reason: "Invalid transport parameters",
                 now: now
             )
+            return
+        }
+        // The parameters remembered for 0-RTT are from an earlier connection, with other IDs.
+        if let (code, reason) = self.transportParameterViolation(parameters, checkingConnectionIDs: !fromEarlyData) {
+            self.closeWithError(code, reason: reason, now: now)
             return
         }
         self.peerTransportParameters = parameters
@@ -861,6 +873,46 @@ extension QUICConnectionCore {
                 : UInt64(parameters.intValue(.initialMaxStreamDataUnidirectional))
             self.streams.streams[id] = stream
         }
+    }
+
+    /// What is wrong with the connection IDs or the roles of the peer's transport parameters, if
+    /// anything (RFC 9000 Sections 7.3 and 18.2).
+    private func transportParameterViolation(
+        _ parameters: TransportParameters,
+        checkingConnectionIDs: Bool
+    ) -> (code: UInt64, reason: String)? {
+        let parameterError = CoreTransportError.transportParameterError
+        if checkingConnectionIDs {
+            guard let initialSourceConnectionID = parameters[.initialSCID]?.connectionID else {
+                return (parameterError, "missing initial_source_connection_id")
+            }
+            guard initialSourceConnectionID == self.peerConnectionID else {
+                return (CoreTransportError.protocolViolation, "initial_source_connection_id mismatch")
+            }
+            if !self.isServer {
+                guard let originalDestinationConnectionID = parameters[.originalDCID]?.connectionID else {
+                    return (parameterError, "missing original_destination_connection_id")
+                }
+                guard originalDestinationConnectionID == self.originalDestinationConnectionID else {
+                    return (CoreTransportError.protocolViolation, "original_destination_connection_id mismatch")
+                }
+                if let retrySourceConnectionID = self.retrySourceConnectionID {
+                    guard parameters[.retrySCID]?.connectionID == retrySourceConnectionID else {
+                        return (CoreTransportError.protocolViolation, "retry_source_connection_id mismatch")
+                    }
+                } else if parameters[.retrySCID] != nil {
+                    return (CoreTransportError.protocolViolation, "retry_source_connection_id without Retry")
+                }
+            }
+        }
+        if self.isServer
+            && (parameters[.originalDCID] != nil || parameters[.preferredAddress] != nil
+                || parameters[.retrySCID] != nil || parameters[.statelessResetToken] != nil)
+        {
+            return (parameterError, "client sent a server-only transport parameter")
+        }
+        // `TransportParameters.deserialize` already rejected values out of range.
+        return nil
     }
 
     #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION

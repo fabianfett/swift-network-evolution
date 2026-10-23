@@ -63,6 +63,12 @@ public struct QUICConnectionCore: ~Copyable {
         /// the default 25 ms.
         public var maxAckDelay: NetworkDuration = .milliseconds(25)
 
+        #if DEBUG
+        /// Changes the transport parameters this endpoint sends, so tests can send what a broken
+        /// peer would.
+        var transportParametersForTesting: ((inout TransportParameters) -> Void)?
+        #endif
+
         public init(tlsOptions: SwiftTLSProtocol.Options) {
             self.tlsOptions = tlsOptions
         }
@@ -129,6 +135,8 @@ public struct QUICConnectionCore: ~Copyable {
     public internal(set) var localConnectionID: QUICConnectionID
     public internal(set) var peerConnectionID: QUICConnectionID
     let originalDestinationConnectionID: QUICConnectionID
+    /// The source connection ID of the server's Retry, which its transport parameters repeat.
+    var retrySourceConnectionID: QUICConnectionID?
     var initialToken: [UInt8] = []
     var receivedFirstServerPacket = false
 
@@ -327,6 +335,9 @@ public struct QUICConnectionCore: ~Copyable {
         if let maxDatagramFrameSize = self.configuration.maxDatagramFrameSize {
             parameters.append(.maxDatagramFrameSize(value: maxDatagramFrameSize))
         }
+        #if DEBUG
+        self.configuration.transportParametersForTesting?(&parameters)
+        #endif
         return (try? parameters.serialize()) ?? []
     }
 

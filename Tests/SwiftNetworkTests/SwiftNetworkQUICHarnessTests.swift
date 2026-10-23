@@ -127,8 +127,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { $0.initialMaxStreamsBidirectional = Constants.maxStreamLimit + 1 }
 
-        // The core doesn't validate transport parameters yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             expectHandshakeError: .init(
                 quicTransportError: QUICTransportError(.transportParameterError, "initial FC over limit")
             ),
