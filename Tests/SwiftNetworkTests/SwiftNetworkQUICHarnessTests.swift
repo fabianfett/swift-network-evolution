@@ -785,25 +785,21 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     // MARK: Datagram tests
 
     func testQUICDatagramHelloWorld() {
-        // The core doesn't do DATAGRAM yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(datagram: true, dataBlock: Array("Hello World!".utf8))
+        QUICTestHarness().runQUICTest(datagram: true, dataBlock: Array("Hello World!".utf8))
     }
 
     func testQUICDatagram1() {
-        // The core doesn't do DATAGRAM yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(datagram: true, blockSize: 1000, blockCount: 1)
+        QUICTestHarness().runQUICTest(datagram: true, blockSize: 1000, blockCount: 1)
     }
 
     func testQUICDatagram10() {
-        // The core doesn't do DATAGRAM yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(datagram: true, blockSize: 1000, blockCount: 10)
+        QUICTestHarness().runQUICTest(datagram: true, blockSize: 1000, blockCount: 10)
     }
 
     func testQUICDatagram10Batched() {
         // The batch is flushed at once, and two of these datagrams don't fit in one packet, so the
         // rest have to wait for the next packets rather than being dropped
-        // The core doesn't do DATAGRAM yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             datagram: true,
             blockSize: 1000,
             blockCount: 10,
@@ -822,8 +818,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
             observedInitialPacketSizes.withLock { $0.append(byteCount) }
         }
 
-        // The core doesn't do DATAGRAM yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             datagram: true,
             blockSize: 1000,
             blockCount: 10,
@@ -839,8 +834,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     }
 
     func testQUICDatagramRemoteMaxDatagramFrameSize() {
-        // The core doesn't do DATAGRAM yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             datagram: true,
             blockSize: 1000,
             blockCount: 1,

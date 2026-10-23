@@ -6507,8 +6507,12 @@ extension QUICConnection {
         flow flowID: MultiplexedFlowIdentifier,
         in eventContext: inout NetworkContext.EventContext
     ) {
-        guard secondaryFlow(for: flowID) != nil else {
+        guard let datagramFlow = secondaryFlow(for: flowID) else {
             log.error("Unable to find datagram flow \(flowID)")
+            return
+        }
+        if self.usesCore {
+            self.coreServiceDatagramsToSend(datagramFlow, in: &eventContext)
             return
         }
 
@@ -6551,6 +6555,10 @@ extension QUICConnection {
             "Created outbound datagram flow for \(flow.flowIdentifier.debugDescription)"
         )
 
+        if self.usesCore {
+            self.coreUpdateUsableDatagramSize(flow)
+            return
+        }
         withCurrentPath { path in
             flow.updateUsableDatagramFrameSize(connection: self, path: path)
         }

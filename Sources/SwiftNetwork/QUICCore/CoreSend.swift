@@ -49,9 +49,11 @@ extension QUICConnectionCore {
         }
         guard !spaces.isEmpty else { return nil }
 
-        // A datagram with an ack-eliciting Initial packet is padded to 1200 bytes.
+        // A datagram with an ack-eliciting Initial packet is padded to 1200 bytes, or the size
+        // the client is configured with.
         let padsInitial =
             spaces.first == .initial && (!self.isServer || self.handshake.send[PacketNumberSpace.initial].hasDataToSend)
+        let initialDatagramSize = max(Self.minimumInitialDatagramSize, self.configuration.initialDatagramSize)
         if padsInitial && limit < Self.minimumInitialDatagramSize {
             return nil
         }
@@ -60,7 +62,7 @@ extension QUICConnectionCore {
         var sentHandshake = false
         for (index, space) in spaces.enumerated() {
             let isLast = index == spaces.count &- 1
-            let padTo = (padsInitial && isLast) ? Self.minimumInitialDatagramSize : nil
+            let padTo = (padsInitial && isLast) ? min(initialDatagramSize, limit) : nil
             guard
                 let length = self.writePacket(
                     in: space,
@@ -121,7 +123,7 @@ extension QUICConnectionCore {
         guard self.handshake.isComplete else { return false }
         return self.handshakeDonePending || self.maxDataPending || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || !self.pendingPathResponses.isEmpty
-            || self.hasSendableStreams || self.hasInjectedFrames
+            || !self.datagramsToSend.isEmpty || self.hasSendableStreams || self.hasInjectedFrames
     }
 
     private var hasInjectedFrames: Bool {
@@ -237,7 +239,14 @@ extension QUICConnectionCore {
             // ACK.
             if self.acks[space].hasAckToSend {
                 let ackLength = self.acks[space].ackFrameLength(now: now, ackDelayExponent: 3)
-                if writer.offset &+ ackLength <= frameLimit {
+                // An ACK that isn't due yet stays out when the next datagram needs the room: a
+                // datagram as large as fits a packet would otherwise never go out.
+                var crowdsOutDatagram = false
+                if space == .applicationData, !self.acks[space].ackNeeded, let datagram = self.datagramsToSend.first {
+                    let datagramLength = 1 &+ CoreWriter.vleLength(UInt64(datagram.count)) &+ datagram.count
+                    crowdsOutDatagram = writer.offset &+ ackLength &+ datagramLength > frameLimit
+                }
+                if writer.offset &+ ackLength <= frameLimit && !crowdsOutDatagram {
                     if let largest = self.acks[space].writeAck(into: &writer, now: now, ackDelayExponent: 3) {
                         frames.append(.ack(largestAcknowledged: largest))
                         self.acks[space].onAckSent()
@@ -432,6 +441,8 @@ extension QUICConnectionCore {
             }
         }
 
+        self.writeDatagramFrames(into: &writer, limit: limit, frames: &frames, isAckEliciting: &isAckEliciting)
+
         // Stream frames, round robin.
         var deferred: [UInt64] = []
         while writer.offset &+ 24 < limit, let id = self.streams.popSendQueue() {
@@ -462,6 +473,39 @@ extension QUICConnectionCore {
         }
         for id in deferred {
             self.streams.enqueueForSending(id)
+        }
+    }
+
+    /// Writes queued DATAGRAM frames, oldest first, as long as they fit. One that can never fit
+    /// a packet, or the peer's limit, is dropped.
+    private mutating func writeDatagramFrames(
+        into writer: inout CoreWriter,
+        limit: Int,
+        frames: inout [CoreSentFrame],
+        isAckEliciting: inout Bool
+    ) {
+        let maximumPayload = self.maxDatagramPayloadSize
+        while let payload = self.datagramsToSend.first {
+            guard payload.count <= maximumPayload else {
+                self.log.debug("Dropping a datagram of \(payload.count) bytes; at most \(maximumPayload) fit")
+                self.datagramsToSend.removeFirst()
+                continue
+            }
+            let frameLength = 1 &+ CoreWriter.vleLength(UInt64(payload.count)) &+ payload.count
+            guard writer.offset &+ frameLength <= limit else {
+                if frames.isEmpty {
+                    // Nothing else is in this packet, so the datagram won't fit any packet.
+                    self.log.debug("Dropping a datagram of \(payload.count) bytes that doesn't fit a packet")
+                    self.datagramsToSend.removeFirst()
+                    continue
+                }
+                // The next packet has more room.
+                return
+            }
+            guard writer.vle(0x31), writer.vle(UInt64(payload.count)), writer.bytes(payload.span.bytes) else { return }
+            self.datagramsToSend.removeFirst()
+            frames.append(.datagram)
+            isAckEliciting = true
         }
     }
 

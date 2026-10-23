@@ -40,6 +40,11 @@ public struct QUICConnectionCore: ~Copyable {
         public var maxIdleTimeout: NetworkDuration = .seconds(30)
         /// The largest UDP payload this endpoint sends.
         public var maxDatagramSize: Int = 1350
+        /// The size a client pads the datagrams of its Initial packets to, at least 1200 bytes
+        /// (RFC 9000 Section 14.1).
+        public var initialDatagramSize: Int = 1200
+        /// The largest DATAGRAM frame (RFC 9221) this endpoint accepts, including its type and
+        /// length; `nil` refuses them.
         public var maxDatagramFrameSize: UInt64?
         public var activeConnectionIDLimit: UInt64 = 2
         /// The stateless reset token a server sends for the connection ID of its handshake.
@@ -74,6 +79,8 @@ public struct QUICConnectionCore: ~Copyable {
         case streamFinishedSending(UInt64)
         /// Both directions of a stream are done and the stream is gone.
         case streamClosed(UInt64)
+        /// DATAGRAM frames arrived; read them with ``readDatagram(_:)``.
+        case datagramsReadable
         /// The connection is closed and can be released.
         case closed(CloseReason)
     }
@@ -164,6 +171,12 @@ public struct QUICConnectionCore: ~Copyable {
     var events = Deque<Event>()
     /// PATH_CHALLENGE data to answer with PATH_RESPONSE.
     var pendingPathResponses: [UInt64] = []
+    /// DATAGRAM payloads to send, oldest first. They are never retransmitted.
+    var datagramsToSend = Deque<[UInt8]>()
+    /// DATAGRAM payloads received and not read yet.
+    var datagramsReceived = Deque<[UInt8]>()
+    /// Queued datagrams beyond this drop the oldest, on either side.
+    static let maximumQueuedDatagrams = 1024
     #if DEBUG
     /// Raw frames written into the next 1-RTT packets, ack-eliciting and never retransmitted. Tests
     /// use them to send what a misbehaving peer would.
@@ -588,6 +601,45 @@ public struct QUICConnectionCore: ~Copyable {
     public mutating func raiseLocalMaxStreams(to maximum: UInt64, bidirectional: Bool) {
         guard !self.isClosingOrDraining, maximum <= (1 << 60) else { return }
         self.streams.raiseLocalMaxStreams(to: maximum, bidirectional: bidirectional)
+    }
+
+    // MARK: Datagrams
+
+    /// The largest payload ``sendDatagram(_:)`` accepts: what fits a 1-RTT packet and the peer's
+    /// `max_datagram_frame_size`. Zero if the peer doesn't accept DATAGRAM frames, or before its
+    /// transport parameters arrived.
+    public var maxDatagramPayloadSize: Int {
+        let peerLimit = self.peerMaxDatagramFrameSize
+        guard peerLimit > 0 else { return 0 }
+        // A short header with the longest packet number, and the tag.
+        let packetOverhead = 1 &+ self.peerConnectionID.length &+ 4 &+ Self.tagLength
+        let frameLimit = min(peerLimit, self.configuration.maxDatagramSize &- packetOverhead)
+        // The frame type and the length field.
+        return max(0, frameLimit &- 1 &- CoreWriter.vleLength(UInt64(max(0, frameLimit))))
+    }
+
+    /// Queues a DATAGRAM frame. Returns `false` if the peer doesn't accept one this large, or
+    /// the connection is closing.
+    ///
+    /// Datagrams queued before the handshake completes wait for the peer's limit.
+    @discardableResult
+    public mutating func sendDatagram(_ payload: RawSpan) -> Bool {
+        guard !self.isClosingOrDraining else { return false }
+        if self.peerTransportParameters != nil {
+            guard payload.byteCount <= self.maxDatagramPayloadSize else { return false }
+        }
+        if self.datagramsToSend.count >= Self.maximumQueuedDatagrams {
+            self.datagramsToSend.removeFirst()
+        }
+        self.datagramsToSend.append([UInt8](copying: payload))
+        return true
+    }
+
+    /// Calls `body` with the oldest DATAGRAM payload received, and forgets it. Returns `nil` if
+    /// there is none.
+    public mutating func readDatagram<Result>(_ body: (RawSpan) -> Result) -> Result? {
+        guard let payload = self.datagramsReceived.popFirst() else { return nil }
+        return body(payload.span.bytes)
     }
 
     /// Starts a key update: 1-RTT packets are sent with the next generation of keys (RFC 9001

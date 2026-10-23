@@ -362,12 +362,7 @@ extension QUICConnectionCore {
             self.confirmHandshake()
             return true
         case 0x30, 0x31:  // DATAGRAM
-            if frameType == 0x31 {
-                guard let length = reader.vle(), reader.skip(Int(length)) else { return false }
-            } else {
-                _ = reader.skip(reader.remaining)
-            }
-            return true
+            return self.processDatagramFrame(hasLength: frameType == 0x31, reader: &reader, now: now)
         default:
             self.closeWithError(
                 CoreTransportError.frameEncodingError,
@@ -377,6 +372,45 @@ extension QUICConnectionCore {
             )
             return true
         }
+    }
+
+    /// RFC 9221 Section 3: a DATAGRAM frame larger than our limit, or without one, is a
+    /// PROTOCOL_VIOLATION.
+    private mutating func processDatagramFrame(
+        hasLength: Bool,
+        reader: inout CoreReader,
+        now: NetworkClock.Instant
+    ) -> Bool {
+        // The frame type was one byte.
+        let frameStart = reader.offset &- 1
+        let length: Int
+        if hasLength {
+            guard let value = reader.vle(), value <= UInt64(reader.remaining) else { return false }
+            length = Int(value)
+        } else {
+            length = reader.remaining
+        }
+        guard let range = reader.range(length) else { return false }
+        let frameLength = reader.offset &- frameStart
+        guard let localLimit = self.configuration.maxDatagramFrameSize, localLimit > 0,
+            UInt64(frameLength) <= localLimit
+        else {
+            self.closeWithError(
+                CoreTransportError.protocolViolation,
+                frameType: hasLength ? 0x31 : 0x30,
+                reason: "DATAGRAM frame too large",
+                now: now
+            )
+            return true
+        }
+        if self.datagramsReceived.count >= Self.maximumQueuedDatagrams {
+            self.datagramsReceived.removeFirst()
+        }
+        if self.datagramsReceived.isEmpty {
+            self.events.append(.datagramsReadable)
+        }
+        self.datagramsReceived.append([UInt8](copying: reader.bytes.extracting(range)))
+        return true
     }
 
     private mutating func enterDrainingFromPeer(now: NetworkClock.Instant) {

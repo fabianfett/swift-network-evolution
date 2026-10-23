@@ -79,8 +79,7 @@ extension QUICConnection {
     ) -> Bool {
         if options.retry || options.forceVersionNegotiation || options.forceUnsupportedClientVersion
             || options.testSendingShortPackets || options.enablePacing || options.keepaliveCount > 0
-            || options.maxDatagramFrameSize > 0 || options.enableL4S == true
-            || options.initialPacketSize > UInt16(Constants.initialMSS)
+            || options.enableL4S == true
             // The application announces and retires the connection IDs itself.
             || options.disableAutomaticNewConnectionIDs
         {
@@ -156,8 +155,14 @@ extension QUICConnection {
                     Int(TransportParameters.maxUDPPayloadSize)
                 )
             )
+            if options.maxDatagramFrameSize > 0 {
+                configuration.maxDatagramFrameSize = UInt64(
+                    min(options.maxDatagramFrameSize, UInt16(TransportParameters.maxDatagramFrameSize))
+                )
+            }
         }
         configuration.maxDatagramSize = self.initialMSS
+        configuration.initialDatagramSize = self.initialMSS
         configuration.activeConnectionIDLimit = Constants.activeCIDLimit
         return configuration
     }
@@ -382,6 +387,8 @@ extension QUICConnection {
                     stream.coreStreamClosed = true
                     self.coreCloseStreamIfDone(stream, in: &eventContext)
                 }
+            case .datagramsReadable:
+                self.coreDeliverDatagrams(in: &eventContext)
             case .closed(let reason):
                 self.coreReportClose(reason, in: &eventContext)
                 self.coreFinish(in: &eventContext)
@@ -482,7 +489,13 @@ extension QUICConnection {
         self.isHandshakeConfirmed = box.core.isHandshakeConfirmed || self.isServer
         let peerParameters = box.core.peerTransportParameters
         self.connectionMetadata.activeConnectionIDLimit = peerParameters?.intValue(.activeConnectionIDLimit) ?? 2
-        self.connectionMetadata.remoteMaxDatagramFrameSize = 0
+        self.remoteMaxDatagramFrameSize = min(
+            box.core.peerMaxDatagramFrameSize,
+            Int(TransportParameters.maxDatagramFrameSize)
+        )
+        self.connectionMetadata.remoteMaxDatagramFrameSize = UInt16(truncatingIfNeeded: self.remoteMaxDatagramFrameSize)
+        // Flows opened before the peer's limit was known sized themselves against zero.
+        self.applyToAllSecondaryFlows { self.coreUpdateUsableDatagramSize($0) }
         if peerParameters?[.disableActiveMigration] == nil {
             self.migrationSupported = true
         }
@@ -883,6 +896,138 @@ extension QUICConnection {
             stream.send.state = .dataSent
         }
         return true
+    }
+}
+
+// MARK: - Datagrams
+
+@available(Network 0.1.0, *)
+extension QUICConnection {
+    /// The payload a datagram flow can send: what the core takes, less the flow ID in front.
+    func coreUpdateUsableDatagramSize(_ flow: QUICDatagramFlow) {
+        var usable = self.coreBox?.core.maxDatagramPayloadSize ?? 0
+        if let flowID = flow.flowID {
+            usable -= flowID.variableLengthSize
+        }
+        if let contextID = flow.contextID {
+            usable -= contextID.variableLengthSize
+        }
+        flow.usableDatagramSize = max(0, usable)
+    }
+
+    /// Moves a flow's datagrams into the core, from `serviceDatagramsToSend`.
+    func coreServiceDatagramsToSend(_ flow: QUICDatagramFlow, in eventContext: inout NetworkContext.EventContext) {
+        guard let box = self.coreBox else { return }
+        let flowID = flow.flowID
+        let contextID = flow.contextID
+        self.accessDatagramsToSend(flow: flow) { datagrams in
+            while var datagram = datagrams.popFirst() {
+                // The flow and context IDs go in front of the payload (RFC 9297 Section 2.1).
+                var payload: [UInt8] = []
+                payload.reserveCapacity(datagram.unclaimedLength &+ 16)
+                if let flowID {
+                    payload.appendVLE(flowID)
+                }
+                if let contextID {
+                    payload.appendVLE(contextID)
+                }
+                _ = datagram.withUnclaimedBytes { bytes in
+                    bytes.withUnsafeBytes { payload.append(contentsOf: $0) }
+                }
+                let accepted = box.core.sendDatagram(payload.span.bytes)
+                if !accepted {
+                    flow.log.error("Unable to send datagram of \(payload.count) bytes")
+                }
+                datagram.finalize(success: accepted)
+            }
+        }
+        self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
+        self.coreAfterUpdate(in: &eventContext)
+    }
+
+    /// Hands the datagrams the core received to their flows, opening a flow for an unknown ID.
+    private func coreDeliverDatagrams(in eventContext: inout NetworkContext.EventContext) {
+        guard let box = self.coreBox else { return }
+        let useFlowID = self.datagramEnableFlowID
+        let useContextID = self.datagramUseContextID
+        // The payload is copied out first: delivering it may reach the core again.
+        while let payload = box.core.readDatagram({ [UInt8](copying: $0) }) {
+            var reader = CoreReader(payload.span.bytes)
+            var flowID: UInt64?
+            var contextID: UInt64?
+            if useFlowID {
+                flowID = reader.vle()
+            }
+            if useContextID {
+                contextID = reader.vle()
+            }
+            guard (flowID != nil || !useFlowID) && (contextID != nil || !useContextID) else {
+                self.log.error("Dropping a datagram without its flow or context ID")
+                continue
+            }
+            let offset = reader.offset
+            var frame = payload.span.bytes.extracting(offset..<payload.count).withUnsafeBytes {
+                Frame(copyBuffer: $0)
+            }
+            frame.metadataComplete = true
+            var matchingFlowIdentifier = self.findSecondaryFlow { candidate in
+                candidate.contextID == contextID && candidate.flowID == flowID
+            }
+            if matchingFlowIdentifier == nil {
+                guard !self.secondaryInboundFlowLinkage.isDetached else {
+                    self.log.error("No secondary inbound flow handler, cannot accept datagram flow")
+                    frame.finalize(success: false)
+                    continue
+                }
+                let newFlow = QUICDatagramFlow(parent: self, inbound: true, in: &eventContext)
+                newFlow.setup(datagramFlowID: flowID, contextID: contextID, logPrefixer: self.logPrefixer)
+                self.multiplexedSecondaryFlows[newFlow.flowIdentifier] = newFlow
+                self.coreUpdateUsableDatagramSize(newFlow)
+                let datagramMetadata = QUICProtocol.metadata()
+                datagramMetadata.perProtocolMetadata?.datagramFlowID = newFlow.flowID
+                datagramMetadata.perProtocolMetadata?.isDatagramFlow = true
+                datagramMetadata.perProtocolMetadata?.usableDatagramFrameSize = UInt16(newFlow.usableDatagramSize)
+                datagramMetadata.perProtocolMetadata?.quicConnectionMetadata = self.connectionMetadata
+                self.secondaryInboundFlowLinkage.deliverNewInboundFlowEvent(
+                    flowInstance: newFlow.identifier,
+                    flowMetadata: datagramMetadata,
+                    from: self.identifier,
+                    in: &eventContext
+                )
+                matchingFlowIdentifier = newFlow.flowIdentifier
+            }
+            guard let matchingFlowIdentifier else {
+                frame.finalize(success: false)
+                continue
+            }
+            try? self.deliverInboundDatagrams(
+                flow: matchingFlowIdentifier,
+                datagrams: .init(frame: frame),
+                in: &eventContext
+            )
+        }
+    }
+}
+
+@available(Network 0.1.0, *)
+extension [UInt8] {
+    /// Appends a variable-length integer (RFC 9000 Section 16) in its shortest encoding.
+    fileprivate mutating func appendVLE(_ value: UInt64) {
+        let length = CoreWriter.vleLength(value)
+        let prefix: UInt64
+        switch length {
+        case 1: prefix = 0x00
+        case 2: prefix = 0x40
+        case 4: prefix = 0x80
+        default: prefix = 0xc0
+        }
+        let shift = UInt64(8 * (length &- 1))
+        self.append(UInt8(truncatingIfNeeded: (prefix << shift | value) >> shift))
+        var index = length &- 1
+        while index > 0 {
+            index &-= 1
+            self.append(UInt8(truncatingIfNeeded: value >> UInt64(8 * index)))
+        }
     }
 }
 
