@@ -206,8 +206,7 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ]
         serverOptions.modifyConnectionOptions { $0.initialStatelessResetToken = QUICStatelessResetToken(token) }
-        // The core doesn't detect stateless resets yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             serverOptions: serverOptions,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait for reset error")
@@ -241,8 +240,7 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ]
         serverOptions.modifyConnectionOptions { $0.initialStatelessResetToken = QUICStatelessResetToken(token) }
-        // The core doesn't detect stateless resets yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             serverOptions: serverOptions,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait for reset error")

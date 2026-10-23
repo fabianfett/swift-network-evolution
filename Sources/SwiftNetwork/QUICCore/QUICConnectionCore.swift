@@ -107,6 +107,8 @@ public struct QUICConnectionCore: ~Copyable {
         /// Too many keepalives in a row went unacknowledged. The connection sent CONNECTION_CLOSE
         /// with NO_ERROR.
         case keepAliveTimeout
+        /// The peer lost the connection's state and sent a stateless reset (RFC 9000 Section 10.3).
+        case statelessReset
         /// The connection failed: a protocol violation or a TLS failure.
         case transportError(errorCode: UInt64, reason: String)
     }
@@ -139,6 +141,10 @@ public struct QUICConnectionCore: ~Copyable {
     var retrySourceConnectionID: QUICConnectionID?
     var initialToken: [UInt8] = []
     var receivedFirstServerPacket = false
+    /// The stateless reset tokens of the peer's connection IDs in use.
+    var peerStatelessResetTokens: [QUICStatelessResetToken] = []
+    /// The packets decrypted and processed so far.
+    var packetsProcessed = 0
 
     var protector: Protector
     var parser: PacketParser

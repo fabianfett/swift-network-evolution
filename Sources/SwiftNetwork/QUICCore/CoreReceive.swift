@@ -65,6 +65,7 @@ extension QUICConnectionCore {
         }
         let count = datagram.count
         self.bytesReceived &+= count
+        let packetsBefore = self.packetsProcessed
         var offset = 0
         while offset < count {
             let consumed = self.receivePacket(in: &datagram, at: offset, now: now)
@@ -72,6 +73,29 @@ extension QUICConnectionCore {
             offset &+= consumed
             if self.isClosingOrDraining { break }
         }
+        if self.packetsProcessed == packetsBefore && !self.isClosingOrDraining {
+            self.detectStatelessReset(datagram.span.bytes, now: now)
+        }
+    }
+
+    /// A datagram without a packet we could process may be a stateless reset: it ends in the
+    /// token of one of the peer's connection IDs (RFC 9000 Section 10.3.1).
+    private mutating func detectStatelessReset(_ datagram: RawSpan, now: NetworkClock.Instant) {
+        // A short header, at least one random byte, and the token.
+        let tokenSize = QUICStatelessResetToken.size
+        guard datagram.byteCount >= 5 &+ tokenSize, !self.peerStatelessResetTokens.isEmpty,
+            datagram.unsafeLoad(fromByteOffset: 0, as: UInt8.self) & 0x80 == 0
+        else {
+            return
+        }
+        let tail = [UInt8](copying: datagram.extracting((datagram.byteCount &- tokenSize)..<datagram.byteCount))
+        guard let token = QUICStatelessResetToken(tail), self.peerStatelessResetTokens.contains(token) else {
+            return
+        }
+        self.log.info("Received a stateless reset")
+        self.closeReason = .statelessReset
+        // RFC 9000 Section 10.3.1: draining, without sending anything.
+        self.enterDrainingFromPeer(now: now)
     }
 
     /// Decodes, decrypts and processes the packet at `offset`. Returns its length, or zero if the
@@ -132,6 +156,7 @@ extension QUICConnectionCore {
                 self.peerConnectionID = sourceConnectionID
             }
             let isAckEliciting = self.processFrames(bytes.bytes, in: space, now: now)
+            self.packetsProcessed &+= 1
             if self.isClosed { return packetLength }
             self.acks[space].onPacketReceived(
                 packetNumber,
@@ -852,6 +877,10 @@ extension QUICConnectionCore {
             return
         }
         self.peerTransportParameters = parameters
+        if !self.isServer, !fromEarlyData, let token = parameters[.statelessResetToken]?.statelessResetToken {
+            // The token of the connection ID the server used in its handshake.
+            self.peerStatelessResetTokens = [token]
+        }
         self.sendMaxData = UInt64(parameters.intValue(.initialMaxData))
         self.streams.peerMaxStreamsBidirectional = UInt64(parameters.intValue(.initialMaxStreamsBidirectional))
         self.streams.peerMaxStreamsUnidirectional = UInt64(parameters.intValue(.initialMaxStreamsUnidirectional))

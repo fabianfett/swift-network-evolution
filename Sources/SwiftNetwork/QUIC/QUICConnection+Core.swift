@@ -573,6 +573,10 @@ extension QUICConnection {
         case .keepAliveTimeout:
             self.closeError = QUICTransportError(.noError, "keepalive limit reached")
             self.errorToReport = NetworkError.posix(ETIMEDOUT)
+        case .statelessReset:
+            self.stats.increment(.statelessResetReceived)
+            self.log.info("Received valid stateless reset token")
+            self.errorToReport = NetworkError.posix(ECONNRESET)
         case .transportError(let errorCode, let reason):
             if self.closeError == nil {
                 self.closeError =
