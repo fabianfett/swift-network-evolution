@@ -198,7 +198,7 @@ extension QUICConnectionCore {
             if isLongHeader {
                 let type: UInt8 = space == .initial ? 0x00 : 0x02
                 var ok = writer.uint8(0xc0 | (type << 4) | encodedPacketNumber.headerFieldSize)
-                ok = ok && writer.uint32(QUICVersion.v1.rawValue)
+                ok = ok && writer.uint32(self.version)
                 ok = ok && writer.uint8(UInt8(self.peerConnectionID.length))
                 ok =
                     ok
@@ -658,7 +658,7 @@ extension QUICConnectionCore {
             if isLongHeader {
                 let type: UInt8 = space == .initial ? 0x00 : 0x02
                 var ok = writer.uint8(0xc0 | (type << 4) | encoded.headerFieldSize)
-                ok = ok && writer.uint32(QUICVersion.v1.rawValue)
+                ok = ok && writer.uint32(self.version)
                 ok = ok && writer.uint8(UInt8(self.peerConnectionID.length))
                 ok =
                     ok

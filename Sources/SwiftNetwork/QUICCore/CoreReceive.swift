@@ -130,7 +130,15 @@ extension QUICConnectionCore {
         case .drop:
             break
         case .packet(let packet):
-            // Version negotiation, retry, or a packet we can't decrypt (yet).
+            if packet.versionNegotiation {
+                self.processVersionNegotiation(packet, now: now)
+                return count &- offset
+            }
+            if packet.retry {
+                self.processRetry(packet, now: now)
+                return count &- offset
+            }
+            // A packet we can't decrypt (yet).
             if packet.failedDecryption {
                 self.log.debug("Dropping undecryptable packet in \(packet.numberSpace)")
             }
@@ -182,6 +190,81 @@ extension QUICConnectionCore {
         // A packet we can't open, for example one whose keys we already dropped, still says how
         // long it is. The packets coalesced after it may be fine (RFC 9000 Section 12.2).
         return Self.coalescedPacketLength(datagram.span.bytes.extracting(offset..<count)) ?? 0
+    }
+
+    /// A client switches to QUIC version 1 when the server doesn't speak the version it tried,
+    /// and gives up when the server doesn't speak version 1 either (RFC 9000 Section 6.2).
+    private mutating func processVersionNegotiation(_ packet: borrowing Packet, now: NetworkClock.Instant) {
+        guard !self.isServer, !self.receivedFirstServerPacket, !self.receivedVersionNegotiation,
+            packet.destinationConnectionID == self.localConnectionID,
+            packet.sourceConnectionID == self.peerConnectionID
+        else {
+            self.log.debug("Ignoring a Version Negotiation packet")
+            return
+        }
+        let versions = packet.versions ?? []
+        // One that lists the version we sent is forged or stale.
+        guard !versions.contains(where: { $0.rawValue == self.version }) else { return }
+        self.receivedVersionNegotiation = true
+        guard versions.contains(.v1) else {
+            self.log.error("The server supports no version we do")
+            self.closeReason = .transportError(
+                errorCode: CoreTransportError.internalError,
+                reason: "No supported version"
+            )
+            self.enterClosed()
+            return
+        }
+        self.log.info("Switching to QUIC version 1 after Version Negotiation")
+        self.version = QUICVersion.v1.rawValue
+        self.restartInitial()
+    }
+
+    /// A client follows the server's Retry (RFC 9000 Section 17.2.5.2): it addresses its Initial
+    /// packets, and derives their keys, from the Retry's source connection ID and sends the token.
+    private mutating func processRetry(_ packet: borrowing Packet, now: NetworkClock.Instant) {
+        guard !self.isServer, !self.receivedFirstServerPacket, self.retrySourceConnectionID == nil,
+            case .handshaking = self.state,
+            let token = packet.token, !token.isEmpty, token.count <= Int(Constants.retryTokenMaxLength),
+            let tag = packet.tag, let firstOctet = packet.retryFirstOctet, let version = packet.version,
+            let destinationConnectionID = packet.destinationConnectionID,
+            let sourceConnectionID = packet.sourceConnectionID,
+            destinationConnectionID == self.localConnectionID
+        else {
+            self.log.debug("Ignoring a Retry packet")
+            return
+        }
+        let pseudoRetry = QUICPseudoRetry.assemble(
+            firstByte: firstOctet,
+            version: version,
+            destinationCID: destinationConnectionID,
+            sourceCID: sourceConnectionID,
+            originalDCID: self.peerConnectionID,
+            token: token
+        )
+        do throws(QUICError) {
+            try Protector.openRetry(retryPseudo: pseudoRetry.span.bytes, retryTag: tag.span.bytes)
+        } catch {
+            self.log.error("Dropping a Retry with an invalid integrity tag")
+            return
+        }
+        self.log.info("Following a Retry with a token of \(token.count) bytes")
+        self.retrySourceConnectionID = sourceConnectionID
+        self.peerConnectionID = sourceConnectionID
+        self.initialToken = token
+        self.protector.deriveInitialSecrets(destinationCID: sourceConnectionID)
+        self.restartInitial()
+    }
+
+    /// Forgets the Initial packets in flight and sends their CRYPTO data again, as the server
+    /// discarded them. Packet numbers continue (RFC 9000 Section 17.2.5.2).
+    private mutating func restartInitial() {
+        self.recovery.discard(.initial)
+        let initial = PacketNumberSpace.initial
+        let sent = Int(self.handshake.send[initial].writeOffset)
+        if sent > 0 {
+            self.handshake.send[initial].onLost(offset: 0, length: sent, fin: false)
+        }
     }
 
     /// Follows the peer's key updates. The parser already rotated the keys if `phase` is a new

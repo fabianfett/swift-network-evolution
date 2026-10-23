@@ -59,6 +59,9 @@ public struct QUICConnectionCore: ~Copyable {
         public var disableActiveMigration = false
         /// The `max_udp_payload_size` transport parameter.
         public var maxUDPPayloadSize: UInt64 = 65527
+        /// The version of a client's Initial packets until the server answers with Version
+        /// Negotiation. Only tests use anything but QUIC version 1.
+        public var clientInitialVersion: UInt32 = QUICVersion.v1.rawValue
         /// How long this endpoint delays acknowledgements, sent as `max_ack_delay` unless it is
         /// the default 25 ms.
         public var maxAckDelay: NetworkDuration = .milliseconds(25)
@@ -138,8 +141,13 @@ public struct QUICConnectionCore: ~Copyable {
     public internal(set) var peerConnectionID: QUICConnectionID
     let originalDestinationConnectionID: QUICConnectionID
     /// The source connection ID of the server's Retry, which its transport parameters repeat.
-    var retrySourceConnectionID: QUICConnectionID?
-    var initialToken: [UInt8] = []
+    public internal(set) var retrySourceConnectionID: QUICConnectionID?
+    /// The version of the long headers this endpoint sends.
+    var version: UInt32 = QUICVersion.v1.rawValue
+    /// Whether a client acted on a Version Negotiation packet; it does so once.
+    var receivedVersionNegotiation = false
+    /// The token a client's Initial packets carry, from the server's Retry.
+    public internal(set) var initialToken: [UInt8] = []
     var receivedFirstServerPacket = false
     /// The stateless reset tokens of the peer's connection IDs in use.
     var peerStatelessResetTokens: [QUICStatelessResetToken] = []
@@ -249,13 +257,17 @@ public struct QUICConnectionCore: ~Copyable {
     /// Creates a server connection for a client's first Initial packet.
     ///
     /// - Parameters:
-    ///   - originalDestinationConnectionID: The destination connection ID of the client's Initial.
+    ///   - originalDestinationConnectionID: The destination connection ID of the client's first
+    ///     Initial, before any Retry.
     ///   - peerConnectionID: The source connection ID of the client's Initial.
+    ///   - retrySourceConnectionID: The source connection ID of the Retry this server sent, which
+    ///     the client's Initial is addressed to; `nil` without a Retry.
     public init(
         serverWith configuration: Configuration,
         localConnectionID: QUICConnectionID,
         originalDestinationConnectionID: QUICConnectionID,
         peerConnectionID: QUICConnectionID,
+        retrySourceConnectionID: QUICConnectionID? = nil,
         now: NetworkClock.Instant
     ) {
         self.init(
@@ -264,6 +276,7 @@ public struct QUICConnectionCore: ~Copyable {
             localConnectionID: localConnectionID,
             peerConnectionID: peerConnectionID,
             originalDestinationConnectionID: originalDestinationConnectionID,
+            retrySourceConnectionID: retrySourceConnectionID,
             now: now
         )
     }
@@ -274,6 +287,7 @@ public struct QUICConnectionCore: ~Copyable {
         localConnectionID: QUICConnectionID,
         peerConnectionID: QUICConnectionID,
         originalDestinationConnectionID: QUICConnectionID,
+        retrySourceConnectionID: QUICConnectionID? = nil,
         now: NetworkClock.Instant
     ) {
         self.isServer = isServer
@@ -282,9 +296,15 @@ public struct QUICConnectionCore: ~Copyable {
         self.localConnectionID = localConnectionID
         self.peerConnectionID = peerConnectionID
         self.originalDestinationConnectionID = originalDestinationConnectionID
+        self.retrySourceConnectionID = retrySourceConnectionID
+        if !isServer {
+            self.version = configuration.clientInitialVersion
+        }
+        // After a Retry, the client's Initial is addressed to the Retry's connection ID, which
+        // the Initial keys come from.
         self.protector = Protector(
             isClient: !isServer,
-            destinationCID: originalDestinationConnectionID,
+            destinationCID: retrySourceConnectionID ?? originalDestinationConnectionID,
             logPrefixer: self.log
         )
         self.parser = PacketParser(logPrefixer: self.log)
@@ -312,6 +332,9 @@ public struct QUICConnectionCore: ~Copyable {
         var parameters = TransportParameters(logPrefixer: self.log)
         if self.isServer {
             parameters.append(.originalDCID(connectionID: self.originalDestinationConnectionID))
+            if let retrySourceConnectionID = self.retrySourceConnectionID {
+                parameters.append(.retrySCID(connectionID: retrySourceConnectionID))
+            }
         }
         parameters.append(.initialSCID(connectionID: self.localConnectionID))
         parameters.append(.maxIdleTimeout(value: UInt64(self.configuration.maxIdleTimeout.milliseconds)))
@@ -504,7 +527,7 @@ public struct QUICConnectionCore: ~Copyable {
         self.state = .draining(until: now.advanced(by: pto * 3))
     }
 
-    private mutating func enterClosed() {
+    mutating func enterClosed() {
         guard !self.isClosed else { return }
         self.state = .closed
         self.handshake.release()

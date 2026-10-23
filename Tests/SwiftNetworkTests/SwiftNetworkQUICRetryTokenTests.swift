@@ -65,8 +65,7 @@ final class SwiftNetworkQUICRetryTokenTests: NetTestCase {
             $0.sourceConnectionID = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         }
 
-        // The core doesn't handle Retry yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             serverOptions: serverOptions,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait to validate tokens")
@@ -104,8 +103,7 @@ final class SwiftNetworkQUICRetryTokenTests: NetTestCase {
         tlsOptions.applicationProtocols = alpnList
         clientOptions.modifyTLSOptions { $0 = tlsOptions }
 
-        // The core doesn't handle Retry yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             clientOptions: clientOptions,
             serverOptions: serverOptions,
             afterHandshake: { harness in
@@ -135,8 +133,7 @@ final class SwiftNetworkQUICRetryTokenTests: NetTestCase {
             $0.sourceConnectionID = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         }
 
-        // The core doesn't handle Retry yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             dataBlock: dataBlock,
             serverOptions: serverOptions,
             afterHandshake: { harness in

@@ -6147,13 +6147,35 @@ extension QUICConnection {
             log.error("Failed to obtain token for retry")
             return
         }
+        sendRetry(
+            version: version,
+            destinationConnectionID: packetSCID,
+            sourceConnectionID: scid,
+            originalDestinationConnectionID: packetDCID,
+            token: _token,
+            path: path,
+            in: &eventContext
+        )
+    }
+
+    /// Sends a Retry packet carrying `token`, as the answer to an Initial addressed to
+    /// `originalDestinationConnectionID`.
+    func sendRetry(
+        version: QUICVersion,
+        destinationConnectionID: QUICConnectionID,
+        sourceConnectionID: QUICConnectionID,
+        originalDestinationConnectionID: QUICConnectionID,
+        token: [UInt8],
+        path: QUICPath,
+        in eventContext: inout NetworkContext.EventContext
+    ) {
         guard
             let retryPacket = try? QUICRetryPacket(
                 version: version,
-                destinationConnectionID: packetSCID,
-                sourceConnectionID: scid,
-                originalDCID: packetDCID,
-                token: _token
+                destinationConnectionID: destinationConnectionID,
+                sourceConnectionID: sourceConnectionID,
+                originalDCID: originalDestinationConnectionID,
+                token: token
             )
         else {
             log.error("Failed to create QUICRetryPacket")

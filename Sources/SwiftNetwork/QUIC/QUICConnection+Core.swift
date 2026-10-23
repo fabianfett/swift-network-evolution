@@ -77,8 +77,7 @@ extension QUICConnection {
         tlsOptions: SwiftTLSProtocol.Options?,
         isServer: Bool
     ) -> Bool {
-        if options.retry || options.forceVersionNegotiation || options.forceUnsupportedClientVersion
-            || options.testSendingShortPackets || options.enablePacing || options.enableL4S == true
+        if options.testSendingShortPackets || options.enablePacing || options.enableL4S == true
             // The application announces and retires the connection IDs itself.
             || options.disableAutomaticNewConnectionIDs
         {
@@ -147,6 +146,11 @@ extension QUICConnection {
             : connectionOptions.initialMaxStreamsUnidirectional
         if let perProtocolOptions = quicOptions.perProtocolOptions {
             let options = perProtocolOptions.quicConnectionOptions
+            if options.forceVersionNegotiation {
+                configuration.clientInitialVersion = QUICVersion.negotiationPattern.rawValue
+            } else if options.forceUnsupportedClientVersion {
+                configuration.clientInitialVersion = QUICVersion.unsupportedVersion
+            }
             configuration.maxIdleTimeout = options.idleTimeout
             configuration.maxUnacknowledgedKeepAlives = Int(options.keepaliveCount)
             configuration.maxUDPPayloadSize = UInt64(
@@ -243,7 +247,9 @@ extension QUICConnection {
         }
         // Only an Initial packet in a datagram of at least 1200 bytes starts a connection
         // (RFC 9000 Section 14.1).
-        guard (first >> 4) & 0x03 == 0x00, datagram.byteCount >= Constants.initialMSS, destinationLength >= 8 else {
+        guard (first >> 4) & 0x03 == 0x00, datagram.byteCount >= Constants.initialMSS, destinationLength >= 8,
+            let tokenLength = reader.vle(), let token = reader.array(Int(min(tokenLength, UInt64(Int.max))))
+        else {
             self.log.error("First packet from the client is not a full-size Initial")
             return false
         }
@@ -251,9 +257,42 @@ extension QUICConnection {
             self.log.error("Server failed to start: no TLS options")
             return false
         }
+        // With Retry enabled, the first Initial gets a Retry, and only the Initial that returns
+        // its token starts the connection (RFC 9000 Section 8.1.2).
+        var retrySourceConnectionID: QUICConnectionID?
+        if self.retryEnabled {
+            guard self.state == .retrySent else {
+                var randomNumberGenerator = SystemRandomNumberGenerator()
+                let retryToken = (0..<Int(Constants.retryTokenMaxLength)).map { _ in
+                    UInt8.random(in: 0...UInt8.max, using: &randomNumberGenerator)
+                }
+                self.initialToken = retryToken
+                self.initialDCID = destinationConnectionID
+                self.sendRetry(
+                    version: .v1,
+                    destinationConnectionID: sourceConnectionID,
+                    sourceConnectionID: scid,
+                    originalDestinationConnectionID: destinationConnectionID,
+                    token: retryToken,
+                    path: path,
+                    in: &eventContext
+                )
+                self.state.change(to: .retrySent, logIDString: self.logPrefixer.logIDString)
+                return false
+            }
+            guard token == self.initialToken, destinationConnectionID == scid else {
+                self.log.error("Initial packet received in retrySent state without a valid token")
+                return false
+            }
+            // The token was validated and is no longer needed.
+            self.initialToken = nil
+            retrySourceConnectionID = scid
+        }
+        let originalDestinationConnectionID =
+            retrySourceConnectionID != nil ? (self.initialDCID ?? destinationConnectionID) : destinationConnectionID
         configuration.statelessResetToken = self.coreStatelessResetToken
         configuration.disableActiveMigration = self.localCIDLength == 0
-        self.originalDCID = destinationConnectionID
+        self.originalDCID = originalDestinationConnectionID
         if self.initialDCID == nil {
             self.initialDCID = destinationConnectionID
         }
@@ -262,8 +301,9 @@ extension QUICConnection {
         let core = QUICConnectionCore(
             serverWith: configuration,
             localConnectionID: scid,
-            originalDestinationConnectionID: destinationConnectionID,
+            originalDestinationConnectionID: originalDestinationConnectionID,
             peerConnectionID: sourceConnectionID,
+            retrySourceConnectionID: retrySourceConnectionID,
             now: self.now
         )
         self.coreBox = QUICConnectionCoreBox(core)
@@ -325,9 +365,14 @@ extension QUICConnection {
                 connectionStatistics: &self.stats
             )
             self.lastPacketReceivedTimestamp = now
-            if let box = self.coreBox, !self.isServer, box.core.peerConnectionID != path.dcid {
-                // The server picked its connection ID.
-                path.assignDCID(box.core.peerConnectionID, in: &eventContext)
+            if let box = self.coreBox, !self.isServer {
+                if box.core.peerConnectionID != path.dcid {
+                    // The server picked its connection ID, or sent a Retry.
+                    path.assignDCID(box.core.peerConnectionID, in: &eventContext)
+                }
+                if !box.core.initialToken.isEmpty {
+                    self.initialToken = box.core.initialToken
+                }
             }
             self.coreAfterUpdate(in: &eventContext)
         }
