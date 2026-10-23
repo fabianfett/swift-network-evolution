@@ -87,7 +87,8 @@ extension QUICConnectionCore {
             localCIDLength: self.localConnectionID.length,
             isVersionSent: false,
             isConnected: self.handshake.isComplete,
-            connectionKeyState: .phase0
+            connectionKeyState: self.keyPhase,
+            keyUpdateThreshold: self.keyPhaseFirstReceived ?? .max
         )
         var region = datagram._mutatingExtracting(offset..<count)
         var bytes = PacketBytes(region._mutatingExtracting(0..<region.count))
@@ -119,6 +120,9 @@ extension QUICConnectionCore {
             if self.acks[space].isDuplicate(packetNumber) {
                 return packetLength
             }
+            if let packetKeyPhase = packet.keyState, !packet.longHeader {
+                self.onKeyPhaseReceived(packetKeyPhase, packetNumber: packetNumber)
+            }
             if !self.isServer, !self.receivedFirstServerPacket, packet.longHeader,
                 let sourceConnectionID = packet.sourceConnectionID
             {
@@ -148,6 +152,17 @@ extension QUICConnectionCore {
         // A packet we can't open, for example one whose keys we already dropped, still says how
         // long it is. The packets coalesced after it may be fine (RFC 9000 Section 12.2).
         return Self.coalescedPacketLength(datagram.span.bytes.extracting(offset..<count)) ?? 0
+    }
+
+    /// Follows the peer's key updates. The parser already rotated the keys if `phase` is a new
+    /// one; a packet in the previous phase was sent before the update and changes nothing.
+    private mutating func onKeyPhaseReceived(_ phase: PacketKeyState, packetNumber: UInt64) {
+        if phase == self.keyPhase {
+            self.keyPhaseFirstReceived = min(self.keyPhaseFirstReceived ?? packetNumber, packetNumber)
+        } else if let first = self.keyPhaseFirstReceived, packetNumber >= first {
+            self.keyPhase = phase
+            self.keyPhaseFirstReceived = packetNumber
+        }
     }
 
     /// The length of the long header packet at the start of `bytes`, from its Length field, which

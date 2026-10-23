@@ -108,6 +108,14 @@ public struct QUICConnectionCore: ~Copyable {
 
     var protector: Protector
     var parser: PacketParser
+    /// The key phase of the 1-RTT packets we send (RFC 9001 Section 6).
+    var keyPhase: PacketKeyState = .phase0
+    /// The lowest packet number received in `keyPhase`. A packet in the other phase with a higher
+    /// number is the peer's key update; one with a lower number was sent before the last update.
+    /// (The two can't be equal: a packet number is used once per space.)
+    /// `nil` after our own update until the peer follows it; zero before any 1-RTT packet, so
+    /// that a peer updating right away is followed.
+    var keyPhaseFirstReceived: UInt64? = 0
     var handshake: CoreHandshake
     var acks: [CoreAckTracker] = [CoreAckTracker(), CoreAckTracker(), CoreAckTracker()]
     var recovery: CoreRecovery
@@ -539,6 +547,20 @@ public struct QUICConnectionCore: ~Copyable {
         self.updateConnectionReceiveLimit()
         self.streams.streams[streamID] = stream
         self.streams.enqueueForSending(streamID)
+    }
+
+    /// Starts a key update: 1-RTT packets are sent with the next generation of keys (RFC 9001
+    /// Section 6). Returns `false` before the handshake is confirmed, and while the peer hasn't
+    /// sent a packet in the current key phase, which means it hasn't followed the last update yet.
+    @discardableResult
+    public mutating func updateKeys() -> Bool {
+        guard self.isHandshakeConfirmed, !self.isClosingOrDraining, self.keyPhaseFirstReceived != nil else {
+            return false
+        }
+        self.protector.trafficUpdate(previousKeyState: self.keyPhase)
+        self.keyPhase = self.keyPhase == .phase0 ? .phase1 : .phase0
+        self.keyPhaseFirstReceived = nil
+        return true
     }
 
     mutating func updateConnectionReceiveLimit() {

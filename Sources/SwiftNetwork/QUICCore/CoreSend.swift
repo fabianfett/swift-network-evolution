@@ -91,7 +91,7 @@ extension QUICConnectionCore {
     private func wantsToSend(in space: PacketNumberSpace, congestionLimited: Bool) -> Bool {
         let index = Int(space.rawValue)
         guard !self.spaceDiscarded[index] else { return false }
-        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : .phase0)
+        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
         guard self.protector.sealKeyReady(for: keyState) else { return false }
         if self.acks[space].ackNeeded && self.acks[space].hasAckToSend {
             return true
@@ -146,6 +146,11 @@ extension QUICConnectionCore {
         return false
     }
 
+    /// The Key Phase bit of a short header (RFC 9000 Section 17.3.1).
+    private var keyPhaseBit: UInt8 {
+        self.keyPhase == .phase1 ? 0x04 : 0x00
+    }
+
     // MARK: Packets
 
     /// Writes one packet of `space` at `offset`. Returns its length, or `nil` if nothing was written.
@@ -158,7 +163,7 @@ extension QUICConnectionCore {
         congestionLimited: Bool,
         now: NetworkClock.Instant
     ) -> Int? {
-        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : .phase0)
+        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
         let isLongHeader = space != .applicationData
         let packetNumber = self.protector.getPacketNumber(for: space)
         let largestAcknowledged = self.recovery.spaces[Int(space.rawValue)].largestAcknowledged
@@ -212,7 +217,7 @@ extension QUICConnectionCore {
                 guard ok else { return nil }
             } else {
                 let spin: UInt8 = 0
-                guard writer.uint8(0x40 | spin | encodedPacketNumber.headerFieldSize),
+                guard writer.uint8(0x40 | spin | self.keyPhaseBit | encodedPacketNumber.headerFieldSize),
                     writer.bytes(
                         self.peerConnectionID.connectionIDStorage.span.bytes.extracting(
                             0..<self.peerConnectionID.length
@@ -332,6 +337,7 @@ extension QUICConnectionCore {
                 headerLength: UInt16(headerLength),
                 spin: false
             )
+            try? packet.updateKeyState(to: self.keyPhase)
             packet.payloadLength = UInt16(payloadLength)
         }
         packet.number = packetNumber
@@ -533,7 +539,7 @@ extension QUICConnectionCore {
         guard !self.closeFrameSentInState, let close = self.pendingClose else { return nil }
         // Send in the highest space we have keys for.
         let space: PacketNumberSpace
-        if self.protector.sealKeyReady(for: .phase0) && self.handshake.isComplete {
+        if self.protector.sealKeyReady(for: self.keyPhase) && self.handshake.isComplete {
             space = .applicationData
         } else if self.protector.sealKeyReady(for: .handshake) && !self.spaceDiscarded[1] {
             space = .handshake
@@ -542,7 +548,7 @@ extension QUICConnectionCore {
         } else {
             return nil
         }
-        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : .phase0)
+        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
         guard self.protector.sealKeyReady(for: keyState) else { return nil }
         self.closeFrameSentInState = true
         let limit = min(buffer.count, self.configuration.maxDatagramSize)
@@ -584,7 +590,7 @@ extension QUICConnectionCore {
                 ok = ok && writer.vle2(0)
                 guard ok else { return nil }
             } else {
-                guard writer.uint8(0x40 | encoded.headerFieldSize),
+                guard writer.uint8(0x40 | self.keyPhaseBit | encoded.headerFieldSize),
                     writer.bytes(
                         self.peerConnectionID.connectionIDStorage.span.bytes.extracting(
                             0..<self.peerConnectionID.length
@@ -628,6 +634,7 @@ extension QUICConnectionCore {
                 headerLength: UInt16(headerLength),
                 spin: false
             )
+            try? packet.updateKeyState(to: self.keyPhase)
             packet.payloadLength = UInt16(payloadLength)
         }
         packet.number = packetNumber

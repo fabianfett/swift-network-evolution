@@ -236,6 +236,11 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
         var isVersionSent: Bool
         var isConnected: Bool
         var connectionKeyState: PacketKeyState
+        /// When set, a 1-RTT packet in the other key phase only starts a key update if its packet
+        /// number is at least this one, the first packet received in the current phase. Older packets
+        /// were sent before the update and open with the previous keys (RFC 9001 Section 6.5).
+        /// `nil` starts an update on every phase change.
+        var keyUpdateThreshold: UInt64? = nil
     }
 
     /// Parses the header of the packet at the start of `bytes`, removes header protection and
@@ -710,6 +715,7 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             (context.connectionKeyState == .phase0 || context.connectionKeyState == .phase1)
                 && (packet.keyState == .phase0 || packet.keyState == .phase1)
                 && context.connectionKeyState != packet.keyState
+                && (context.keyUpdateThreshold.map { UInt64(packet.number.value) >= $0 } ?? true)
         ) {
             protector.trafficUpdate(previousKeyState: context.connectionKeyState)
         }

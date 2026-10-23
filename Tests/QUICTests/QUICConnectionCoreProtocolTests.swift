@@ -768,7 +768,17 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
 
     /// Runs one connection with many streams over an impaired network and checks every byte and
     /// every event the plans promise, then that both sides forget every stream.
-    private func run(seed: UInt64, loss: Double, duplication: Double, corruption: Double, delay: Double) {
+    /// `keyUpdateEvery` rounds, one side (alternating) tries to update its keys. Returns how many
+    /// updates started.
+    @discardableResult
+    private func run(
+        seed: UInt64,
+        loss: Double,
+        duplication: Double,
+        corruption: Double,
+        delay: Double,
+        keyUpdateEvery: Int = 0
+    ) -> Int {
         var network = ImpairedNetwork(
             seed: seed,
             loss: loss,
@@ -788,6 +798,7 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
         var serverStreams: [UInt64: ServerStream] = [:]
         var clientResetsSent = Set<UInt64>()
 
+        var keyUpdates = 0
         var round = 0
         var done = false
         // What the client sent after the last round's receive; it goes out first next round.
@@ -803,6 +814,13 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
                 if let deadline = server.nextDeadline, deadline <= now {
                     server.handleTimeout(now: now)
                 }
+            }
+
+            if keyUpdateEvery > 0 && round % keyUpdateEvery == 0 {
+                let updated =
+                    (round / keyUpdateEvery) % 2 == 0
+                    ? pair.client.updateKeys() : (pair.withServer { $0.updateKeys() } ?? false)
+                if updated { keyUpdates += 1 }
             }
 
             // Client to server.
@@ -970,6 +988,22 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
         XCTAssertEqual(pair.server?.closeReason, .peer(errorCode: 0, isApplication: true, reason: ""), context)
         XCTAssertTrue(pair.client.isClosed, context)
         XCTAssertTrue(pair.server?.isClosed ?? false, context)
+        return keyUpdates
+    }
+
+    /// Key updates while packets are lost, duplicated, corrupted and reordered across them.
+    func testKeyUpdatesOverAnImpairedNetwork() {
+        for seed in UInt64(1)...8 {
+            let updates = self.run(
+                seed: seed,
+                loss: 0.1,
+                duplication: 0.1,
+                corruption: 0.05,
+                delay: 0.15,
+                keyUpdateEvery: 20
+            )
+            XCTAssertGreaterThanOrEqual(updates, 2, "seed \(seed)")
+        }
     }
 
     /// Seeds in which the client's Finished is lost while its first 1-RTT packets fill the
