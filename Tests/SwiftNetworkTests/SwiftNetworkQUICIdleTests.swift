@@ -61,7 +61,8 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
         // The idle state reported to the lower protocol must account for outstanding
         // transmit obligations, not just the application's idle mark.
         // A connection that still owes the peer an ACK is not idle.
-        QUICTestHarness().runQUICTest(
+        // Reaches into the ack and timer state of the legacy driver.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             afterHandshake: { harness in
                 // The test relies on the client still owing a delayed ACK for the echoed
@@ -161,7 +162,8 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
         let serverOptions = QUICProtocol.options()
         serverOptions.connectionOptions.pmtudIgnoreCost = true
 
-        QUICTestHarness().runQUICTest(
+        // Reaches into the ack, timer and PMTUD state of the legacy driver.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             clientOptions: clientOptions,
             serverOptions: serverOptions,

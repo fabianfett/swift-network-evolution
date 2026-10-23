@@ -117,7 +117,7 @@ extension QUICConnectionCore {
         return false
     }
 
-    private var hasApplicationFramesToSend: Bool {
+    var hasApplicationFramesToSend: Bool {
         guard self.handshake.isComplete else { return false }
         return self.handshakeDonePending || self.maxDataPending || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || !self.pendingPathResponses.isEmpty
@@ -536,33 +536,67 @@ extension QUICConnectionCore {
     // MARK: Closing
 
     private mutating func sendClose(into buffer: inout MutableSpan<UInt8>, now: NetworkClock.Instant) -> Int? {
-        guard !self.closeFrameSentInState, let close = self.pendingClose else { return nil }
-        // Send in the highest space we have keys for.
-        let space: PacketNumberSpace
-        if self.protector.sealKeyReady(for: self.keyPhase) && self.handshake.isComplete {
-            space = .applicationData
-        } else if self.protector.sealKeyReady(for: .handshake) && !self.spaceDiscarded[1] {
-            space = .handshake
-        } else if !self.spaceDiscarded[0] {
-            space = .initial
-        } else {
-            return nil
+        guard let close = self.pendingClose else { return nil }
+        if !self.closeFrameSentInState {
+            self.closeFrameSentInState = true
+            self.closeSpacesToSend = self.closeSpaces()
         }
-        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
-        guard self.protector.sealKeyReady(for: keyState) else { return nil }
-        self.closeFrameSentInState = true
+        // One datagram per space: some receivers drop the rest of a datagram after a packet they
+        // can't decrypt, which a coalesced close in a space the peer already dropped would be.
         let limit = min(buffer.count, self.configuration.maxDatagramSize)
+        while let space = self.closeSpacesToSend.first {
+            self.closeSpacesToSend.removeFirst()
+            if let length = self.writeClosePacket(close, in: space, into: &buffer, at: 0, maximumLength: limit) {
+                return length
+            }
+        }
+        return nil
+    }
+
+    /// The spaces a CONNECTION_CLOSE goes out in. Before the handshake is confirmed the peer may
+    /// lack the keys of the newest space, so it is every space we have keys for (RFC 9000
+    /// Section 10.2.3).
+    private func closeSpaces() -> [PacketNumberSpace] {
+        var spaces: [PacketNumberSpace] = []
+        if !self.spaceDiscarded[0] && self.protector.sealKeyReady(for: .initial) {
+            spaces.append(.initial)
+        }
+        if !self.spaceDiscarded[1] && self.protector.sealKeyReady(for: .handshake) {
+            spaces.append(.handshake)
+        }
+        if self.protector.sealKeyReady(for: self.keyPhase) && self.handshake.isComplete {
+            if self.isHandshakeConfirmed {
+                spaces = [.applicationData]
+            } else {
+                spaces.append(.applicationData)
+            }
+        }
+        return spaces
+    }
+
+    /// Writes one packet of `space` carrying CONNECTION_CLOSE at `offset`. Returns its length.
+    private mutating func writeClosePacket(
+        _ close: PendingClose,
+        in space: PacketNumberSpace,
+        into buffer: inout MutableSpan<UInt8>,
+        at offset: Int,
+        maximumLength: Int
+    ) -> Int? {
+        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
+        guard self.protector.sealKeyReady(for: keyState), maximumLength > 64 else { return nil }
         let packetNumber = self.protector.getPacketNumber(for: space)
         guard let encoded = try? packetNumber.encode(lastAcked: .none, fixedSize: .fourBytes) else { return nil }
         let isLongHeader = space != .applicationData
-        // An application close is sent as a transport close outside 1-RTT packets.
+        // An application close is sent as a transport close with APPLICATION_ERROR outside 1-RTT
+        // packets, which hides the application's code and reason (RFC 9000 Section 10.2.3).
         let isApplication = close.isApplication && space == .applicationData
-        let errorCode = close.isApplication && !isApplication ? CoreTransportError.noError : close.errorCode
+        let hidesApplicationClose = close.isApplication && !isApplication
+        let errorCode = hidesApplicationClose ? CoreTransportError.applicationError : close.errorCode
         var headerLength = 0
         var lengthFieldOffset = 0
         var payloadEnd = 0
         do {
-            var writer = CoreWriter(buffer._mutatingExtracting(0..<limit))
+            var writer = CoreWriter(buffer._mutatingExtracting(offset..<(offset &+ maximumLength)))
             if isLongHeader {
                 let type: UInt8 = space == .initial ? 0x00 : 0x02
                 var ok = writer.uint8(0xc0 | (type << 4) | encoded.headerFieldSize)
@@ -602,19 +636,21 @@ extension QUICConnectionCore {
             }
             headerLength = writer.offset
             guard self.writePacketNumber(encoded, into: &writer) else { return nil }
-            let reasonBytes = Array(close.reason.utf8.prefix(256))
+            let reasonBytes = hidesApplicationClose ? [] : Array(close.reason.utf8.prefix(256))
             var ok = writer.vle(isApplication ? 0x1d : 0x1c) && writer.vle(errorCode)
             if !isApplication {
                 ok = ok && writer.vle(close.frameType)
             }
             ok = ok && writer.vle(UInt64(reasonBytes.count)) && writer.bytes(reasonBytes.span.bytes)
-            guard ok else { return nil }
+            guard ok, writer.remaining >= Self.tagLength else { return nil }
             payloadEnd = writer.offset
         }
         let totalLength = payloadEnd &+ Self.tagLength
         let payloadLength = totalLength &- headerLength
         if isLongHeader {
-            var lengthWriter = CoreWriter(buffer._mutatingExtracting(lengthFieldOffset..<(lengthFieldOffset &+ 2)))
+            var lengthWriter = CoreWriter(
+                buffer._mutatingExtracting((offset &+ lengthFieldOffset)..<(offset &+ lengthFieldOffset &+ 2))
+            )
             _ = lengthWriter.vle2(UInt16(payloadLength))
         }
         var packet: Packet
@@ -640,7 +676,7 @@ extension QUICConnectionCore {
         packet.number = packetNumber
         packet.packetNumberLength = UInt8(encoded.size.rawValue)
         packet.tagLength = UInt8(Self.tagLength)
-        var sealRegion = buffer._mutatingExtracting(0..<totalLength)
+        var sealRegion = buffer._mutatingExtracting(offset..<(offset &+ totalLength))
         do {
             try self.protector.seal(&packet, buffer: &sealRegion)
         } catch {

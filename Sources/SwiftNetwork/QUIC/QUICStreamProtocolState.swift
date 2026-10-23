@@ -41,7 +41,7 @@ struct QUICStreamProtocolState: ~Copyable {
         init(rawValue: Self.RawValue) {
             self.rawValue = rawValue
         }
-        var rawValue: UInt16
+        var rawValue: UInt32
         static let hasSentDataBlocked = Flags(rawValue: 1 << 0)
         static let updatingCredit = Flags(rawValue: 1 << 1)
         static let stopSendRequested = Flags(rawValue: 1 << 2)
@@ -58,6 +58,8 @@ struct QUICStreamProtocolState: ~Copyable {
         static let peerAcknowledgedFIN = Flags(rawValue: 1 << 13)
         static let markedInboundFINOnFrame = Flags(rawValue: 1 << 14)
         static let applicationMarkedIdle = Flags(rawValue: 1 << 15)
+        /// `QUICConnectionCore` is done with both directions of the stream.
+        static let coreStreamClosed = Flags(rawValue: 1 << 16)
     }
     var flags = Flags()
 

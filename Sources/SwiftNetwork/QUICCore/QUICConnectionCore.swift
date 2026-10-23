@@ -42,6 +42,15 @@ public struct QUICConnectionCore: ~Copyable {
         public var maxDatagramSize: Int = 1350
         public var maxDatagramFrameSize: UInt64?
         public var activeConnectionIDLimit: UInt64 = 2
+        /// The stateless reset token a server sends for the connection ID of its handshake.
+        public var statelessResetToken: QUICStatelessResetToken?
+        /// Tells the peer not to migrate, as a server whose connection IDs are empty has to.
+        public var disableActiveMigration = false
+        /// The `max_udp_payload_size` transport parameter.
+        public var maxUDPPayloadSize: UInt64 = 65527
+        /// How long this endpoint delays acknowledgements, sent as `max_ack_delay` unless it is
+        /// the default 25 ms.
+        public var maxAckDelay: NetworkDuration = .milliseconds(25)
 
         public init(tlsOptions: SwiftTLSProtocol.Options) {
             self.tlsOptions = tlsOptions
@@ -148,7 +157,10 @@ public struct QUICConnectionCore: ~Copyable {
     var probesPending = [0, 0, 0]
     var pendingClose: PendingClose?
     var closeFrameSentInState = false
-    var closeReason: CloseReason?
+    /// The spaces whose CONNECTION_CLOSE didn't go out yet, oldest first.
+    var closeSpacesToSend: [PacketNumberSpace] = []
+    /// Why the connection is closing, draining or closed; `nil` while it is open.
+    public internal(set) var closeReason: CloseReason?
     var events = Deque<Event>()
     /// PATH_CHALLENGE data to answer with PATH_RESPONSE.
     var pendingPathResponses: [UInt64] = []
@@ -260,7 +272,7 @@ public struct QUICConnectionCore: ~Copyable {
         }
         parameters.append(.initialSCID(connectionID: self.localConnectionID))
         parameters.append(.maxIdleTimeout(value: UInt64(self.configuration.maxIdleTimeout.milliseconds)))
-        parameters.append(.maxUDPPayloadSize(value: 65527))
+        parameters.append(.maxUDPPayloadSize(value: self.configuration.maxUDPPayloadSize))
         parameters.append(.initialMaxData(value: self.configuration.initialMaxData))
         parameters.append(
             .initialMaxStreamDataBidirectionalLocal(value: self.configuration.initialMaxStreamDataBidirectionalLocal)
@@ -274,6 +286,15 @@ public struct QUICConnectionCore: ~Copyable {
         parameters.append(.initialMaxStreamsBidirectional(value: self.configuration.initialMaxStreamsBidirectional))
         parameters.append(.initialMaxStreamsUnidirectional(value: self.configuration.initialMaxStreamsUnidirectional))
         parameters.append(.activeConnectionIDLimit(value: self.configuration.activeConnectionIDLimit))
+        if self.configuration.maxAckDelay != .milliseconds(25) {
+            parameters.append(.maxAckDelay(duration: self.configuration.maxAckDelay))
+        }
+        if self.isServer, let statelessResetToken = self.configuration.statelessResetToken {
+            parameters.append(.statelessResetToken(statelessResetToken: statelessResetToken))
+        }
+        if self.configuration.disableActiveMigration {
+            parameters.append(.disableActiveMigration())
+        }
         if let maxDatagramFrameSize = self.configuration.maxDatagramFrameSize {
             parameters.append(.maxDatagramFrameSize(value: maxDatagramFrameSize))
         }
@@ -552,6 +573,23 @@ public struct QUICConnectionCore: ~Copyable {
         self.streams.enqueueForSending(streamID)
     }
 
+    /// The limit on the streams of one kind the peer may open, as last raised.
+    public func localMaxStreams(bidirectional: Bool) -> UInt64 {
+        bidirectional ? self.streams.localMaxStreamsBidirectional : self.streams.localMaxStreamsUnidirectional
+    }
+
+    /// The peer's limit on the streams of one kind this endpoint may open.
+    public func peerMaxStreams(bidirectional: Bool) -> UInt64 {
+        bidirectional ? self.streams.peerMaxStreamsBidirectional : self.streams.peerMaxStreamsUnidirectional
+    }
+
+    /// Lets the peer open streams of one kind up to `maximum`, sending MAX_STREAMS. A limit
+    /// can't shrink, so a lower value changes nothing.
+    public mutating func raiseLocalMaxStreams(to maximum: UInt64, bidirectional: Bool) {
+        guard !self.isClosingOrDraining, maximum <= (1 << 60) else { return }
+        self.streams.raiseLocalMaxStreams(to: maximum, bidirectional: bidirectional)
+    }
+
     /// Starts a key update: 1-RTT packets are sent with the next generation of keys (RFC 9001
     /// Section 6). Returns `false` before the handshake is confirmed, and while the peer hasn't
     /// sent a packet in the current key phase, which means it hasn't followed the last update yet.
@@ -735,5 +773,20 @@ extension QUICConnectionCore {
     /// Whether a stream exists.
     public func hasStream(_ streamID: UInt64) -> Bool {
         self.streams.streams[streamID] != nil
+    }
+
+    /// Whether the connection has nothing to do until the peer or the application acts: no
+    /// ack-eliciting packet in flight, nothing to send, and no acknowledgement owed.
+    public var isQuiescent: Bool {
+        guard !self.recovery.hasAckElicitingInFlight else { return false }
+        for space in PacketNumberSpace.allCases where !self.spaceDiscarded[Int(space.rawValue)] {
+            if self.acks[space].ackNeeded || self.acks[space].ackDeadline != nil {
+                return false
+            }
+            if self.handshake.send[space].hasDataToSend || self.probesPending[Int(space.rawValue)] > 0 {
+                return false
+            }
+        }
+        return !self.hasApplicationFramesToSend
     }
 }

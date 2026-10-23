@@ -70,7 +70,8 @@ final class SwiftNetworkQUICKeepaliveTests: NetTestCase {
 
         var networkError: NetworkError? = nil
 
-        QUICTestHarness().runQUICTest(
+        // The core doesn't send keepalives yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             clientOptions: clientOptions,
             serverOptions: serverOptions,
             afterHandshake: { harness in
@@ -108,7 +109,8 @@ final class SwiftNetworkQUICKeepaliveTests: NetTestCase {
 
         var networkError: NetworkError? = nil
 
-        QUICTestHarness().runQUICTest(
+        // The core doesn't send keepalives yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             clientOptions: clientOptions,
             serverOptions: serverOptions,
             afterHandshake: { harness in

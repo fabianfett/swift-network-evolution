@@ -163,7 +163,8 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
     func testQUICClientClosesOnFrameNotAllowedDuringHandshake() throws {
         // Same setup as above, so the server still sends Handshake packets. RFC 9000 §12.4: a frame
         // that is not permitted in a Handshake packet is a PROTOCOL_VIOLATION for the client
-        QUICTestHarness().runQUICTest(
+        // Injects a frame through the pending items of the legacy driver.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             clientDrops: .init(1...Int.max),
             waitForServerConnected: false,
             afterHandshake: { harness in
@@ -205,7 +206,8 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ]
         serverOptions.modifyConnectionOptions { $0.initialStatelessResetToken = QUICStatelessResetToken(token) }
-        QUICTestHarness().runQUICTest(
+        // The core doesn't detect stateless resets yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             serverOptions: serverOptions,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait for reset error")
@@ -239,7 +241,8 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ]
         serverOptions.modifyConnectionOptions { $0.initialStatelessResetToken = QUICStatelessResetToken(token) }
-        QUICTestHarness().runQUICTest(
+        // The core doesn't detect stateless resets yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             serverOptions: serverOptions,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait for reset error")

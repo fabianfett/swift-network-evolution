@@ -450,6 +450,12 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
 
     var streamMetadata = QUICStreamProtocol.QUICStreamMetadata()
 
+    /// Whether `QUICConnectionCore` is done with the stream: both directions finished.
+    var coreStreamClosed: Bool {
+        get { flags.contains(.coreStreamClosed) }
+        set { if newValue { flags.insert(.coreStreamClosed) } else { flags.remove(.coreStreamClosed) } }
+    }
+
     var flowControlState: FlowControlState {
         _read { yield state.flowControlState }
         _modify { yield &state.flowControlState }
@@ -982,6 +988,10 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
     {
 
         let parent = parentProtocol
+        if parent.usesCore {
+            parent.coreStreamDrained(self, in: &eventContext)
+            return
+        }
 
         // Record with flow control that bytes have been delivered, and update flow credits.
         deliveredInboundBytes(consumedLength: bytes, connection: parent)

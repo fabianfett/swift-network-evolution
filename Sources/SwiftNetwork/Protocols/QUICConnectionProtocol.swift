@@ -205,6 +205,9 @@ public struct QUICConnectionProtocol: NetworkProtocol {
             }
         }
 
+        /// Which implementation runs the connection.
+        var driver: QUICConnectionDriver = .automatic
+
         internal var _idleTimeout: NetworkDuration = .seconds(30)
         public var idleTimeout: NetworkDuration {
             get { self._idleTimeout }

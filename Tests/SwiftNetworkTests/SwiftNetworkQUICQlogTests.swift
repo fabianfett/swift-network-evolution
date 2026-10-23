@@ -63,7 +63,8 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
         let description = "ClientQLogDescription"
         // NOTE: Test not using a trailing slash at the end of the path name
         let path = "/tmp"
-        let harness = QUICTestHarness()
+        // The core doesn't write qlog yet.
+        let harness = QUICTestHarness(clientDriver: .legacy)
 
         let clientOptions = QUICProtocol.options()
         clientOptions.modifyConnectionOptions { connectionOptions in
@@ -106,7 +107,8 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
         let description = "ServerQLogDescription"
         // NOTE: Test using a trailing slash at the end of the path name
         let path = "/tmp/"
-        let harness = QUICTestHarness()
+        // The core doesn't write qlog yet.
+        let harness = QUICTestHarness(serverDriver: .legacy)
 
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { connectionOptions in
@@ -153,7 +155,8 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
         let path = "/tmp/"
         let finalPath = path + "qlog_server_\(title)_C1.qlog"
         unlink(finalPath)
-        let harness = QUICTestHarness()
+        // The core doesn't write qlog yet.
+        let harness = QUICTestHarness(serverDriver: .legacy)
 
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { connectionOptions in

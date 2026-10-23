@@ -44,6 +44,7 @@ enum CoreTransportError {
     static let frameEncodingError: UInt64 = 0x7
     static let transportParameterError: UInt64 = 0x8
     static let protocolViolation: UInt64 = 0xa
+    static let applicationError: UInt64 = 0xc
     static let cryptoBufferExceeded: UInt64 = 0xd
     static let cryptoError: UInt64 = 0x100
 }
@@ -136,7 +137,7 @@ extension QUICConnectionCore {
                 packetNumber,
                 isAckEliciting: isAckEliciting,
                 immediate: space != .applicationData || !self.handshake.isComplete,
-                maxAckDelay: .milliseconds(25),
+                maxAckDelay: self.configuration.maxAckDelay,
                 now: now
             )
             if space == .handshake && self.isServer && !self.addressValidated {
@@ -809,8 +810,8 @@ extension QUICConnectionCore {
                 self.idleDeadline = deadline
             }
         }
-        let maxAckDelay = parameters.intValue(.maxAckDelay)
-        self.recovery.maxAckDelay = .milliseconds(maxAckDelay)
+        // max_ack_delay is a duration; `intValue` traps on it.
+        self.recovery.maxAckDelay = parameters[.maxAckDelay]?.duration ?? .milliseconds(25)
         // Streams opened before the parameters arrived get their limits now.
         for (id, var stream) in self.streams.streams where stream.canSend && stream.sendLimit == 0 {
             stream.sendLimit =

@@ -59,7 +59,8 @@ internal import os
 @available(Network 0.1.0, *)
 final class SwiftNetworkQUICStatisticsTests: NetTestCase {
     func testQUICStatisticsForOneStream() throws {
-        QUICTestHarness().runQUICTest(
+        // The core doesn't keep statistics yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             blockSize: 10240,
             blockCount: 4,
             afterData: { harness in
@@ -89,7 +90,8 @@ final class SwiftNetworkQUICStatisticsTests: NetTestCase {
     }
 
     func testQUICStatisticsForMultipleStreams() throws {
-        QUICTestHarness().runQUICTest(
+        // The core doesn't keep statistics yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             streamCount: 6,
             blockSize: 10240,
             blockCount: 4,

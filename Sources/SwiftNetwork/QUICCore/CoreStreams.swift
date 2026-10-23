@@ -152,6 +152,9 @@ struct CoreStreamMap {
     var advertisedMaxStreamsUnidirectional: UInt64
     private let initialLocalMaxStreamsBidirectional: UInt64
     private let initialLocalMaxStreamsUnidirectional: UInt64
+    /// How far the application raised the limits on the peer's streams.
+    private var raisedLocalMaxStreamsBidirectional: UInt64 = 0
+    private var raisedLocalMaxStreamsUnidirectional: UInt64 = 0
 
     init(isServer: Bool, localMaxStreamsBidirectional: UInt64, localMaxStreamsUnidirectional: UInt64) {
         self.isServer = isServer
@@ -287,6 +290,22 @@ struct CoreStreamMap {
         }
     }
 
+    /// Raises our limit on the streams the peer opens to `maximum`, and announces it in MAX_STREAMS.
+    /// A lower value changes nothing: a limit can't shrink (RFC 9000 Section 4.6).
+    mutating func raiseLocalMaxStreams(to maximum: UInt64, bidirectional: Bool) {
+        if bidirectional {
+            guard maximum > self.localMaxStreamsBidirectional else { return }
+            self.raisedLocalMaxStreamsBidirectional &+= maximum &- self.localMaxStreamsBidirectional
+            self.localMaxStreamsBidirectional = maximum
+            self.maxStreamsBidirectionalPending = true
+        } else {
+            guard maximum > self.localMaxStreamsUnidirectional else { return }
+            self.raisedLocalMaxStreamsUnidirectional &+= maximum &- self.localMaxStreamsUnidirectional
+            self.localMaxStreamsUnidirectional = maximum
+            self.maxStreamsUnidirectionalPending = true
+        }
+    }
+
     /// Raises our limit on the streams the peer opens once one of its streams is done.
     mutating func returnStreamCredit(_ id: UInt64) {
         if !self.isLocal(id) {
@@ -294,6 +313,7 @@ struct CoreStreamMap {
                 self.remoteClosedBidirectional &+= 1
                 self.localMaxStreamsBidirectional =
                     self.remoteClosedBidirectional &+ self.initialLocalMaxStreamsBidirectional
+                    &+ self.raisedLocalMaxStreamsBidirectional
                 // MAX_STREAMS goes out once half of the window was used, not for every stream.
                 if self.localMaxStreamsBidirectional &- self.advertisedMaxStreamsBidirectional
                     >= max(1, self.initialLocalMaxStreamsBidirectional / 2)
@@ -304,6 +324,7 @@ struct CoreStreamMap {
                 self.remoteClosedUnidirectional &+= 1
                 self.localMaxStreamsUnidirectional =
                     self.remoteClosedUnidirectional &+ self.initialLocalMaxStreamsUnidirectional
+                    &+ self.raisedLocalMaxStreamsUnidirectional
                 if self.localMaxStreamsUnidirectional &- self.advertisedMaxStreamsUnidirectional
                     >= max(1, self.initialLocalMaxStreamsUnidirectional / 2)
                 {

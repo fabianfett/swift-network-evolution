@@ -88,7 +88,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     func testQUICHandshakeWithShortPackets() {
         let clientOptions = QUICProtocol.options()
         clientOptions.modifyConnectionOptions { $0.testSendingShortPackets = true }
-        QUICTestHarness().runQUICTest(clientOptions: clientOptions)
+        // The legacy client sends Initials in datagrams below 1200 bytes, which the core server drops (RFC 9000 Section 14.1).
+        QUICTestHarness(driver: .legacy).runQUICTest(clientOptions: clientOptions)
     }
 
     func testQUICHandshakeWithGiantALPNList() {
@@ -126,7 +127,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { $0.initialMaxStreamsBidirectional = Constants.maxStreamLimit + 1 }
 
-        QUICTestHarness().runQUICTest(
+        // The core doesn't validate transport parameters yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             expectHandshakeError: .init(
                 quicTransportError: QUICTransportError(.transportParameterError, "initial FC over limit")
             ),
@@ -274,7 +276,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         serverOptions.modifyConnectionOptions { $0.initialSourceConnectionID = QUICConnectionID(10) }
         serverOptions.modifyConnectionOptions { $0.initialStatelessResetToken = QUICStatelessResetToken() }
         serverOptions.modifyConnectionOptions { $0.disableAutomaticNewConnectionIDs = true }
-        QUICTestHarness().runQUICTest(
+        // The core doesn't issue connection IDs yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             serverOptions: serverOptions,
             extraServerCIDs: [
                 (QUICConnectionID(10), QUICStatelessResetToken()),
@@ -782,21 +785,25 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     // MARK: Datagram tests
 
     func testQUICDatagramHelloWorld() {
-        QUICTestHarness().runQUICTest(datagram: true, dataBlock: Array("Hello World!".utf8))
+        // The core doesn't do DATAGRAM yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(datagram: true, dataBlock: Array("Hello World!".utf8))
     }
 
     func testQUICDatagram1() {
-        QUICTestHarness().runQUICTest(datagram: true, blockSize: 1000, blockCount: 1)
+        // The core doesn't do DATAGRAM yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(datagram: true, blockSize: 1000, blockCount: 1)
     }
 
     func testQUICDatagram10() {
-        QUICTestHarness().runQUICTest(datagram: true, blockSize: 1000, blockCount: 10)
+        // The core doesn't do DATAGRAM yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(datagram: true, blockSize: 1000, blockCount: 10)
     }
 
     func testQUICDatagram10Batched() {
         // The batch is flushed at once, and two of these datagrams don't fit in one packet, so the
         // rest have to wait for the next packets rather than being dropped
-        QUICTestHarness().runQUICTest(
+        // The core doesn't do DATAGRAM yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             datagram: true,
             blockSize: 1000,
             blockCount: 10,
@@ -815,7 +822,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
             observedInitialPacketSizes.withLock { $0.append(byteCount) }
         }
 
-        QUICTestHarness().runQUICTest(
+        // The core doesn't do DATAGRAM yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             datagram: true,
             blockSize: 1000,
             blockCount: 10,
@@ -831,7 +839,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     }
 
     func testQUICDatagramRemoteMaxDatagramFrameSize() {
-        QUICTestHarness().runQUICTest(
+        // The core doesn't do DATAGRAM yet.
+        QUICTestHarness(driver: .legacy).runQUICTest(
             datagram: true,
             blockSize: 1000,
             blockCount: 1,

@@ -69,7 +69,8 @@ final class SwiftNetworkQUICVersionNegotiation: NetTestCase {
             $0.sourceConnectionID = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         }
 
-        QUICTestHarness().runQUICTest(
+        // The core client doesn't do version negotiation yet; the core server answers.
+        QUICTestHarness(clientDriver: .legacy).runQUICTest(
             clientOptions: clientOptions,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait to validate version")
@@ -94,7 +95,8 @@ final class SwiftNetworkQUICVersionNegotiation: NetTestCase {
         clientOptions.modifyConnectionOptions {
             $0.sourceConnectionID = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         }
-        QUICTestHarness().runQUICTest(
+        // The core client doesn't do version negotiation yet; the core server answers.
+        QUICTestHarness(clientDriver: .legacy).runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             clientOptions: clientOptions,
             afterHandshake: { harness in
@@ -117,7 +119,8 @@ final class SwiftNetworkQUICVersionNegotiation: NetTestCase {
             $0.sourceConnectionID = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         }
         clientOptions.modifyConnectionOptions { $0.forceUnsupportedClientVersion = true }
-        QUICTestHarness().runQUICTest(
+        // The core client doesn't do version negotiation yet; the core server answers.
+        QUICTestHarness(clientDriver: .legacy).runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             clientOptions: clientOptions,
             afterHandshake: { harness in

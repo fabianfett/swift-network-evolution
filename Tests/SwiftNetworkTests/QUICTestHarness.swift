@@ -96,8 +96,21 @@ class QUICTestHarness {
     /// Backing storage for every protocol instance and linkage this harness builds.
     lazy var storage = TestNetworkProtocolStorage(context: context)
 
-    init(context: NetworkContext = .init(identifier: #function)) {
+    /// Which implementation runs the client's and the server's connection. A test that needs
+    /// something `QUICConnectionCore` doesn't do yet asks for `.legacy`; every other handshake
+    /// checks that the core ran.
+    let clientDriver: QUICConnectionDriver
+    let serverDriver: QUICConnectionDriver
+
+    init(
+        context: NetworkContext = .init(identifier: #function),
+        driver: QUICConnectionDriver = .automatic,
+        clientDriver: QUICConnectionDriver? = nil,
+        serverDriver: QUICConnectionDriver? = nil
+    ) {
         self.context = context
+        self.clientDriver = clientDriver ?? driver
+        self.serverDriver = serverDriver ?? driver
         self.context.activate()
 
         clientPort = BridgeDatagramProtocol.BridgeInstance.nextGeneratedPort
@@ -140,6 +153,8 @@ class QUICTestHarness {
             }
         }
         quicOptions.modifyTLSOptions { $0 = tlsOptions }
+        let driver = server ? self.serverDriver : self.clientDriver
+        quicOptions.modifyConnectionOptions { $0.driver = driver }
 
         if datagram {
             quicOptions.modifyPerProtocolOptions { streamOptions in
@@ -475,10 +490,30 @@ class QUICTestHarness {
         XCTAssertTrue(clientConnected, "QUIC client failed to become connected")
         XCTAssertTrue(serverConnected || !waitForServerConnected, "QUIC server failed to become connected")
         XCTAssertNotNil(state, "Result cannot be nil here for the tests to proceed")
+        self.assertDrivers()
         guard clientConnected, serverConnected || !waitForServerConnected else {
             XCTFail("This test cannot continue without both client and server being connected")
             throw NetworkError.posix(EINVAL)
         }
+    }
+
+    /// Checks that the connections run on the implementation the test asked for.
+    func assertDrivers(file: StaticString = #filePath, line: UInt = #line) {
+        guard QUICConnectionDriver.environmentOverride == nil, let state else { return }
+        XCTAssertEqual(
+            state.clientInstance.usesCore,
+            self.clientDriver != .legacy,
+            "client driver",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            state.serverInstance.usesCore,
+            self.serverDriver != .legacy,
+            "server driver",
+            file: file,
+            line: line
+        )
     }
 
     func createNewStream(
