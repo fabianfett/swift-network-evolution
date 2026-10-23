@@ -59,6 +59,10 @@ public struct QUICConnectionCore: ~Copyable {
         public var disableActiveMigration = false
         /// The `max_udp_payload_size` transport parameter.
         public var maxUDPPayloadSize: UInt64 = 65527
+        /// Whether this endpoint spins the latency spin bit (RFC 9000 Section 17.4). When it
+        /// doesn't, every short header carries `spinValue`.
+        public var spinBitEnabled = false
+        public var spinValue = false
         /// The version of a client's Initial packets until the server answers with Version
         /// Negotiation. Only tests use anything but QUIC version 1.
         public var clientInitialVersion: UInt32 = QUICVersion.v1.rawValue
@@ -153,6 +157,12 @@ public struct QUICConnectionCore: ~Copyable {
     var peerStatelessResetTokens: [QUICStatelessResetToken] = []
     /// The packets decrypted and processed so far.
     var packetsProcessed = 0
+    /// The spin bit of the short headers we send.
+    var spinValue: Bool
+    /// The largest packet number of a short header packet received, which the spin bit follows.
+    var largestShortHeaderPacketNumber: UInt64?
+    /// What happened on the connection, for the framework's statistics.
+    var statistics = Statistics()
 
     var protector: Protector
     var parser: PacketParser
@@ -319,6 +329,7 @@ public struct QUICConnectionCore: ~Copyable {
         self.addressValidated = !isServer
         self.idleTimeout = configuration.maxIdleTimeout > .zero ? configuration.maxIdleTimeout : nil
         self.keepAliveInterval = configuration.keepAliveInterval
+        self.spinValue = configuration.spinValue
         self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
 
         var tlsOptions = configuration.tlsOptions
@@ -461,6 +472,7 @@ public struct QUICConnectionCore: ~Copyable {
                 }
             case .probe(let space):
                 self.probesPending[Int(space.rawValue)] = 2
+                self.statistics.increment(.probeTimeOuts)
                 // Probe in every other space with keys and data in flight too (RFC 9002 Section
                 // 6.2.4): the peer may already have dropped the keys of the space whose timer fired.
                 // That includes 1-RTT before the handshake is confirmed, whose own timer isn't armed

@@ -73,8 +73,7 @@ final class SwiftNetworkQUICSpinBitTests: NetTestCase {
             guard (firstByte & 0xC0) == 0x40 else { return }
             observedSpinBitValues.withLock { values -> Void in values.insert((firstByte & 0x20) != 0) }
         }
-        // The core doesn't spin yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait to validate spin bit")

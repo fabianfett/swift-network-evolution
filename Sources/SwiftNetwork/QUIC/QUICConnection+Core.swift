@@ -168,6 +168,8 @@ extension QUICConnection {
         configuration.maxDatagramSize = self.initialMSS
         configuration.initialDatagramSize = self.initialMSS
         configuration.activeConnectionIDLimit = Constants.activeCIDLimit
+        configuration.spinBitEnabled = self.spinBitEnabled
+        configuration.spinValue = self.initialSpinValue
         return configuration
     }
 }
@@ -402,6 +404,7 @@ extension QUICConnection {
                 self.coreReportClose(reason, in: &eventContext)
             }
         } while self.coreUpdatePending
+        self.coreSynchronizeStatistics()
         self.coreRescheduleTimer(in: &eventContext)
         self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
     }
@@ -495,6 +498,28 @@ extension QUICConnection {
             connectionStatistics: &self.stats
         )
         path.serviceLowerSendQueue(in: &eventContext)
+    }
+
+    /// The statistics the core keeps; `QUICConnection` counts datagrams and flows itself.
+    private static let coreStatistics: [QUICStatistic] = [
+        .probeTimeOuts, .keepAliveFramesSent, .keepAliveFramesAcknowledged,
+        .rxStreamFrames, .rxStreamBytes, .txStreamFrames, .txStreamBytes,
+        .rxStreamResetFrames, .rxStreamStopSendingFrames, .txStreamResetFrames, .txStreamStopSendingFrames,
+        .rxInitialCryptoFrames, .rxInitialCryptoBytes, .rxHandshakeCryptoFrames, .rxHandshakeCryptoBytes,
+        .rx1RTTCryptoFrames, .rx1RTTCryptoBytes, .txInitialCryptoFrames, .txInitialCryptoBytes,
+        .txHandshakeCryptoFrames, .txHandshakeCryptoBytes, .tx1RTTCryptoFrames, .tx1RTTCryptoBytes,
+        .txRetransmittedCryptoFrames, .txRetransmittedCryptoBytes, .txRetransmittedBytes,
+        .txLostBytes, .txLostPackets,
+        .txDatagramFrameWithLength, .rxDatagramFrameWithLength, .rxDatagramFrameWithOutLength,
+    ]
+
+    /// Copies the core's statistics, and its spin bit, to where the framework reads them.
+    private func coreSynchronizeStatistics() {
+        guard let box = self.coreBox else { return }
+        for statistic in Self.coreStatistics {
+            self.stats[statistic] = box.core.statistics[statistic]
+        }
+        self.currentPath?.spinValue = box.core.spinValue
     }
 
     // MARK: Timer

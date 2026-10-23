@@ -156,6 +156,13 @@ extension QUICConnectionCore {
             if let packetKeyPhase = packet.keyState, !packet.longHeader {
                 self.onKeyPhaseReceived(packetKeyPhase, packetNumber: packetNumber)
             }
+            if !packet.longHeader, self.largestShortHeaderPacketNumber.map({ packetNumber > $0 }) ?? true {
+                self.largestShortHeaderPacketNumber = packetNumber
+                // The server reflects the spin bit, the client inverts it (RFC 9000 Section 17.4).
+                if self.configuration.spinBitEnabled {
+                    self.spinValue = self.isServer ? packet.spinValue : !packet.spinValue
+                }
+            }
             if !self.isServer, !self.receivedFirstServerPacket, packet.longHeader,
                 let sourceConnectionID = packet.sourceConnectionID
             {
@@ -382,14 +389,17 @@ extension QUICConnectionCore {
             return self.processAckFrame(reader: &reader, hasECN: frameType == 0x03, in: space, now: now)
         case 0x04:  // RESET_STREAM
             guard let id = reader.vle(), let code = reader.vle(), let finalSize = reader.vle() else { return false }
+            self.statistics.increment(.rxStreamResetFrames)
             return self.processResetStream(id: id, errorCode: code, finalSize: finalSize, now: now)
         case 0x05:  // STOP_SENDING
             guard let id = reader.vle(), let code = reader.vle() else { return false }
+            self.statistics.increment(.rxStreamStopSendingFrames)
             return self.processStopSending(id: id, errorCode: code, now: now)
         case 0x06:  // CRYPTO
             guard let offset = reader.vle(), let length = reader.vle(), let range = reader.range(Int(length)) else {
                 return false
             }
+            self.countCryptoFrame(sent: false, in: space, length: range.count)
             var outputs: [CoreHandshake.Output] = []
             guard
                 self.handshake.receive(
@@ -518,6 +528,7 @@ extension QUICConnectionCore {
         if self.datagramsReceived.count >= Self.maximumQueuedDatagrams {
             self.datagramsReceived.removeFirst()
         }
+        self.statistics.increment(hasLength ? .rxDatagramFrameWithLength : .rxDatagramFrameWithOutLength)
         if self.datagramsReceived.isEmpty {
             self.events.append(.datagramsReadable)
         }
@@ -603,6 +614,7 @@ extension QUICConnectionCore {
                 self.storeOrRemove(stream)
             case .keepAlive:
                 self.unacknowledgedKeepAlives = 0
+                self.statistics.increment(.keepAliveFramesAcknowledged)
             case .handshakeDone, .maxData, .maxStreamData, .maxStreamsBidirectional, .maxStreamsUnidirectional,
                 .stopSending, .dataBlocked, .streamDataBlocked, .newConnectionID, .retireConnectionID, .pathResponse,
                 .ping, .datagram:
@@ -612,6 +624,8 @@ extension QUICConnectionCore {
     }
 
     mutating func onPacketLost(_ packet: CoreSentPacket, in space: PacketNumberSpace) {
+        self.statistics.increment(.txLostPackets)
+        self.statistics.increment(.txLostBytes, by: packet.size)
         for frame in packet.frames {
             switch frame {
             case .ack:
@@ -700,6 +714,8 @@ extension QUICConnectionCore {
         }
         let previousHighest = stream.receive.highestOffset
         let end = offset &+ UInt64(length)
+        self.statistics.increment(.rxStreamFrames)
+        self.statistics.increment(.rxStreamBytes, by: length)
         if end > stream.receiveLimit {
             self.closeWithError(CoreTransportError.flowControlError, reason: "Stream flow control", now: now)
             return true

@@ -153,6 +153,22 @@ extension QUICConnectionCore {
         return false
     }
 
+    /// Counts a CRYPTO frame for the statistics.
+    mutating func countCryptoFrame(sent: Bool, in space: PacketNumberSpace, length: Int) {
+        let frames: QUICStatistic
+        let bytes: QUICStatistic
+        switch (space, sent) {
+        case (.initial, true): (frames, bytes) = (.txInitialCryptoFrames, .txInitialCryptoBytes)
+        case (.handshake, true): (frames, bytes) = (.txHandshakeCryptoFrames, .txHandshakeCryptoBytes)
+        case (.applicationData, true): (frames, bytes) = (.tx1RTTCryptoFrames, .tx1RTTCryptoBytes)
+        case (.initial, false): (frames, bytes) = (.rxInitialCryptoFrames, .rxInitialCryptoBytes)
+        case (.handshake, false): (frames, bytes) = (.rxHandshakeCryptoFrames, .rxHandshakeCryptoBytes)
+        case (.applicationData, false): (frames, bytes) = (.rx1RTTCryptoFrames, .rx1RTTCryptoBytes)
+        }
+        self.statistics.increment(frames)
+        self.statistics.increment(bytes, by: length)
+    }
+
     /// The Key Phase bit of a short header (RFC 9000 Section 17.3.1).
     private var keyPhaseBit: UInt8 {
         self.keyPhase == .phase1 ? 0x04 : 0x00
@@ -223,7 +239,7 @@ extension QUICConnectionCore {
                 ok = ok && writer.vle2(0)
                 guard ok else { return nil }
             } else {
-                let spin: UInt8 = 0
+                let spin: UInt8 = self.spinValue ? 0x20 : 0
                 guard writer.uint8(0x40 | spin | self.keyPhaseBit | encodedPacketNumber.headerFieldSize),
                     writer.bytes(
                         self.peerConnectionID.connectionIDStorage.span.bytes.extracting(
@@ -279,9 +295,16 @@ extension QUICConnectionCore {
                     else {
                         break
                     }
+                    let isRetransmission =
+                        chunk.offset &+ UInt64(chunk.length) <= self.handshake.send[space].sendOffset
                     self.handshake.send[space].markSent(offset: chunk.offset, length: chunk.length, fin: false)
                     frames.append(.crypto(offset: chunk.offset, length: chunk.length))
                     isAckEliciting = true
+                    self.countCryptoFrame(sent: true, in: space, length: chunk.length)
+                    if isRetransmission {
+                        self.statistics.increment(.txRetransmittedCryptoFrames)
+                        self.statistics.increment(.txRetransmittedCryptoBytes, by: chunk.length)
+                    }
                 }
 
                 if space == .applicationData && self.handshake.isComplete
@@ -350,7 +373,7 @@ extension QUICConnectionCore {
             packet = Packet(
                 destinationConnectionID: self.peerConnectionID,
                 headerLength: UInt16(headerLength),
-                spin: false
+                spin: self.spinValue
             )
             try? packet.updateKeyState(to: self.keyPhase)
             packet.payloadLength = UInt16(payloadLength)
@@ -416,6 +439,7 @@ extension QUICConnectionCore {
             _ = writer.uint8(0x01)
             self.keepAlivePending = false
             frames.append(.keepAlive)
+            self.statistics.increment(.keepAliveFramesSent)
             isAckEliciting = true
         }
         if self.handshakeDonePending && writer.offset < limit {
@@ -519,6 +543,7 @@ extension QUICConnectionCore {
             guard writer.vle(0x31), writer.vle(UInt64(payload.count)), writer.bytes(payload.span.bytes) else { return }
             self.datagramsToSend.removeFirst()
             frames.append(.datagram)
+            self.statistics.increment(.txDatagramFrameWithLength)
             isAckEliciting = true
         }
     }
@@ -538,6 +563,7 @@ extension QUICConnectionCore {
                 stream.resetPending = false
                 stream.send.reset()
                 frames.append(.resetStream(id: id))
+                self.statistics.increment(.txStreamResetFrames)
                 isAckEliciting = true
             }
         }
@@ -545,6 +571,7 @@ extension QUICConnectionCore {
             if writer.vle(0x05) && writer.vle(id) && writer.vle(code) {
                 stream.stopSendingPending = false
                 frames.append(.stopSending(id: id))
+                self.statistics.increment(.txStreamStopSendingFrames)
                 isAckEliciting = true
             }
         }
@@ -587,6 +614,11 @@ extension QUICConnectionCore {
             self.sentData &+= newBytes
             frames.append(.stream(id: id, offset: chunk.offset, length: chunk.length, fin: chunk.fin))
             isAckEliciting = true
+            self.statistics.increment(.txStreamFrames)
+            self.statistics.increment(.txStreamBytes, by: chunk.length)
+            if UInt64(chunk.length) > newBytes {
+                self.statistics.increment(.txRetransmittedBytes, by: chunk.length &- Int(newBytes))
+            }
             if chunk.length == 0 { return }
         }
     }
@@ -726,7 +758,7 @@ extension QUICConnectionCore {
             packet = Packet(
                 destinationConnectionID: self.peerConnectionID,
                 headerLength: UInt16(headerLength),
-                spin: false
+                spin: self.spinValue
             )
             try? packet.updateKeyState(to: self.keyPhase)
             packet.payloadLength = UInt16(payloadLength)
