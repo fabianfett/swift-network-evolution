@@ -82,5 +82,7 @@ package enum AckDefaults {
     package static let defaultDelayExponent = 3 /* 2 ** 3 */
     package static let defaultMaxDelay: NetworkDuration = .milliseconds(25)
     package static let maxDelayExponent = 20  // Values above 20 are invalid
-    package static let maxDelay: NetworkDuration = .milliseconds(1 << 14)  // Values above 2^14ms are invalid
+    /// The largest valid max_ack_delay: values of 2^14 ms or greater are invalid (RFC 9000
+    /// Section 18.2).
+    package static let maxDelay: NetworkDuration = .milliseconds((1 << 14) - 1)
 }

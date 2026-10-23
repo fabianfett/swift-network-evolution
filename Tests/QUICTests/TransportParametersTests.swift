@@ -410,8 +410,9 @@ final class TransportParametersTests: XCTestCase {
 
     // MARK: - Ack delay parameters: decoding
 
+    // RFC 9000, Section 18.2: values of 2^14 or greater are invalid.
     func testDeserializeMaxAckDelayBounds() throws {
-        let maximum = UInt64(1 << 14)
+        let maximum = UInt64(1 << 14) - 1
         let accepted = try decode(encodedIntegerParameter(.maxAckDelay, maximum))
         XCTAssertEqual(accepted[.maxAckDelay]?.duration, .milliseconds(maximum))
 
