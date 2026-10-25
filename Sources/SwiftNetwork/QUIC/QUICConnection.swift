@@ -200,7 +200,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     var flowControlState = FlowControlState(isStream: false)
 
     // All the CIDs advertised to the peer
-    private(set) var localCIDs = QUICConnectionIDList()
+    var localCIDs = QUICConnectionIDList()
     private var nextLocalCIDSequenceNumber: UInt64 = 1
     private var largestSentLocalCIDSequenceNumber: UInt64 = 1
 
@@ -7026,6 +7026,10 @@ extension QUICConnection {
             return .unconsumed
         }
 
+        if self.usesCore {
+            self.coreHandleApplicationEvent(quicEvent, in: &eventContext)
+            return .consumed
+        }
         switch quicEvent {
         case .announceNewInboundConnectionID(let connectionID, let statelessResetToken):
             log.info("Announcing new CID \(connectionID) to the peer")

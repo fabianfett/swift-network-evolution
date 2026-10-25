@@ -35,8 +35,9 @@ import Darwin
 #endif
 
 /// Which implementation runs a `QUICConnection`.
+@_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
-enum QUICConnectionDriver: Equatable {
+public enum QUICConnectionDriver: Equatable, Sendable {
     /// `QUICConnectionCore` if it supports the connection's options, the classes otherwise.
     case automatic
     /// `QUICConnectionCore`.
@@ -77,10 +78,7 @@ extension QUICConnection {
         tlsOptions: SwiftTLSProtocol.Options?,
         isServer: Bool
     ) -> Bool {
-        if options.testSendingShortPackets || options.enablePacing || options.enableL4S == true
-            // The application announces and retires the connection IDs itself.
-            || options.disableAutomaticNewConnectionIDs
-        {
+        if options.testSendingShortPackets || options.enablePacing || options.enableL4S == true {
             return false
         }
         #if QlogOutput
@@ -153,6 +151,7 @@ extension QUICConnection {
             }
             configuration.maxIdleTimeout = options.idleTimeout
             configuration.maxUnacknowledgedKeepAlives = Int(options.keepaliveCount)
+            configuration.automaticallyIssueConnectionIDs = !options.disableAutomaticNewConnectionIDs
             configuration.maxUDPPayloadSize = UInt64(
                 min(
                     max(Int(options.maxUDPPayloadSize), Int(TransportParameters.minUDPPayloadSize)),
@@ -168,6 +167,7 @@ extension QUICConnection {
         configuration.maxDatagramSize = self.initialMSS
         configuration.initialDatagramSize = self.initialMSS
         configuration.activeConnectionIDLimit = Constants.activeCIDLimit
+        configuration.maxIssuedConnectionIDs = Constants.defaultMaxConnectionIDs
         configuration.spinBitEnabled = self.spinBitEnabled
         configuration.spinValue = self.initialSpinValue
         return configuration
@@ -367,14 +367,8 @@ extension QUICConnection {
                 connectionStatistics: &self.stats
             )
             self.lastPacketReceivedTimestamp = now
-            if let box = self.coreBox, !self.isServer {
-                if box.core.peerConnectionID != path.dcid {
-                    // The server picked its connection ID, or sent a Retry.
-                    path.assignDCID(box.core.peerConnectionID, in: &eventContext)
-                }
-                if !box.core.initialToken.isEmpty {
-                    self.initialToken = box.core.initialToken
-                }
+            if let box = self.coreBox, !self.isServer, !box.core.initialToken.isEmpty {
+                self.initialToken = box.core.initialToken
             }
             self.coreAfterUpdate(in: &eventContext)
         }
@@ -404,7 +398,7 @@ extension QUICConnection {
                 self.coreReportClose(reason, in: &eventContext)
             }
         } while self.coreUpdatePending
-        self.coreSynchronizeStatistics()
+        self.coreSynchronizeStatistics(in: &eventContext)
         self.coreRescheduleTimer(in: &eventContext)
         self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
     }
@@ -443,6 +437,35 @@ extension QUICConnection {
                 }
             case .datagramsReadable:
                 self.coreDeliverDatagrams(in: &eventContext)
+            case .newLocalConnectionID(let sequenceNumber, let connectionID, let token):
+                try? self.localCIDs.insert(sequenceNumber: sequenceNumber, connectionID: connectionID, token: token)
+                self.deliverNetworkProtocolEvent(
+                    flow: .allFlows,
+                    event: .init(quicEvent: .newInboundConnectionID(connectionID)),
+                    in: &eventContext
+                )
+            case .retiredLocalConnectionID(let connectionID):
+                self.localCIDs.retire(connectionID: connectionID)
+                self.deliverNetworkProtocolEvent(
+                    flow: .allFlows,
+                    event: .init(quicEvent: .retiredInboundConnectionID(connectionID)),
+                    in: &eventContext
+                )
+            case .newPeerConnectionID(let sequenceNumber, let connectionID, let token):
+                try? self.remoteCIDs.insert(sequenceNumber: sequenceNumber, connectionID: connectionID, token: token)
+                self.deliverNetworkProtocolEvent(
+                    flow: .allFlows,
+                    event: .init(quicEvent: .newOutboundConnectionID(connectionID, statelessResetToken: token)),
+                    in: &eventContext
+                )
+            case .retiredPeerConnectionID(let connectionID, let token):
+                let retired = self.remoteCIDs.retire(connectionID: connectionID)
+                guard let token = token ?? retired?.token else { continue }
+                self.deliverNetworkProtocolEvent(
+                    flow: .allFlows,
+                    event: .init(quicEvent: .retiredOutboundConnectionID(connectionID, statelessResetToken: token)),
+                    in: &eventContext
+                )
             case .closed(let reason):
                 self.coreReportClose(reason, in: &eventContext)
                 self.coreFinish(in: &eventContext)
@@ -513,13 +536,19 @@ extension QUICConnection {
         .txDatagramFrameWithLength, .rxDatagramFrameWithLength, .rxDatagramFrameWithOutLength,
     ]
 
-    /// Copies the core's statistics, and its spin bit, to where the framework reads them.
-    private func coreSynchronizeStatistics() {
+    /// Copies the core's statistics, spin bit and destination connection ID to where the
+    /// framework reads them.
+    private func coreSynchronizeStatistics(in eventContext: inout NetworkContext.EventContext) {
         guard let box = self.coreBox else { return }
         for statistic in Self.coreStatistics {
             self.stats[statistic] = box.core.statistics[statistic]
         }
-        self.currentPath?.spinValue = box.core.spinValue
+        guard let path = self.currentPath else { return }
+        path.spinValue = box.core.spinValue
+        if box.core.peerConnectionID != path.dcid {
+            // The server picked its connection ID, a Retry did, or one was retired.
+            path.assignDCID(box.core.peerConnectionID, in: &eventContext)
+        }
     }
 
     // MARK: Timer
@@ -565,6 +594,22 @@ extension QUICConnection {
         self.isHandshakeConfirmed = box.core.isHandshakeConfirmed || self.isServer
         let peerParameters = box.core.peerTransportParameters
         self.connectionMetadata.activeConnectionIDLimit = peerParameters?.intValue(.activeConnectionIDLimit) ?? 2
+        self.localCIDs.activeConnectionIDLimit = box.core.peerActiveConnectionIDLimit
+        // The peer's connection ID of the handshake, with the server's stateless reset token.
+        if self.remoteCIDs.isEmpty,
+            let handshakeEntry = box.core.connectionIDs.peer.first(where: { $0.sequenceNumber == 0 })
+        {
+            if let token = handshakeEntry.token {
+                try? self.remoteCIDs.insert(
+                    sequenceNumber: 0,
+                    connectionID: handshakeEntry.connectionID,
+                    token: token,
+                    used: true
+                )
+            } else {
+                try? self.remoteCIDs.insertInitialConnectionID(handshakeEntry.connectionID)
+            }
+        }
         self.remoteMaxDatagramFrameSize = min(
             box.core.peerMaxDatagramFrameSize,
             Int(TransportParameters.maxDatagramFrameSize)
@@ -682,6 +727,27 @@ extension QUICConnection {
         self.coreTimerID = nil
         self.coreBox = nil
         self.currentPath = nil
+    }
+
+    /// Acts on what the application asks for, from `handleApplicationEvent`.
+    func coreHandleApplicationEvent(_ event: QUICApplicationEvent, in eventContext: inout NetworkContext.EventContext) {
+        switch event {
+        case .announceNewInboundConnectionID(let connectionID, let statelessResetToken):
+            self.log.info("Announcing new CID \(connectionID) to the peer")
+            if self.coreBox?.core.issueConnectionID(connectionID, statelessResetToken: statelessResetToken) != true {
+                self.log.error("Could not announce CID \(connectionID)")
+            }
+        case .retireOutboundConnectionID(let connectionID):
+            self.log.info("Retire outbound CID \(connectionID) to the peer")
+            _ = self.coreBox?.core.retirePeerConnectionID(connectionID)
+        case .updateMaximumBidirectionalStreams(let maximumStreams):
+            self.coreRaiseLocalMaxStreams(maximumStreams, bidirectional: true, in: &eventContext)
+            return
+        case .updateMaximumUnidirectionalStreams(let maximumStreams):
+            self.coreRaiseLocalMaxStreams(maximumStreams, bidirectional: false, in: &eventContext)
+            return
+        }
+        self.coreAfterUpdate(in: &eventContext)
     }
 
     // MARK: Streams

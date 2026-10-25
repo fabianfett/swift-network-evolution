@@ -275,8 +275,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         serverOptions.modifyConnectionOptions { $0.initialSourceConnectionID = QUICConnectionID(10) }
         serverOptions.modifyConnectionOptions { $0.initialStatelessResetToken = QUICStatelessResetToken() }
         serverOptions.modifyConnectionOptions { $0.disableAutomaticNewConnectionIDs = true }
-        // The core doesn't issue connection IDs yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             serverOptions: serverOptions,
             extraServerCIDs: [
                 (QUICConnectionID(10), QUICStatelessResetToken()),

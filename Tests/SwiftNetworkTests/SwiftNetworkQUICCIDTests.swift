@@ -69,8 +69,7 @@ final class SwiftNetworkQUICCIDTests: NetTestCase {
         var expectedConnectionID: QUICConnectionID?
         var expectedStatelessResetToken: QUICStatelessResetToken?
 
-        // The core doesn't issue or retire connection IDs yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait for retired outbound connection ID event")
                 harness.context.async {

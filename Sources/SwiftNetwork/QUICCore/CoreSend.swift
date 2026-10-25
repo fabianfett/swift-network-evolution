@@ -128,7 +128,8 @@ extension QUICConnectionCore {
         return self.handshakeDonePending || self.keepAlivePending || self.maxDataPending
             || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || !self.pendingPathResponses.isEmpty
-            || !self.datagramsToSend.isEmpty || self.hasSendableStreams || self.hasInjectedFrames
+            || !self.datagramsToSend.isEmpty || self.hasConnectionIDFramesToSend || self.hasSendableStreams
+            || self.hasInjectedFrames
     }
 
     private var hasInjectedFrames: Bool {
@@ -479,6 +480,7 @@ extension QUICConnectionCore {
             }
         }
 
+        self.writeConnectionIDFrames(into: &writer, limit: limit, frames: &frames, isAckEliciting: &isAckEliciting)
         self.writeDatagramFrames(into: &writer, limit: limit, frames: &frames, isAckEliciting: &isAckEliciting)
 
         // Stream frames, round robin.

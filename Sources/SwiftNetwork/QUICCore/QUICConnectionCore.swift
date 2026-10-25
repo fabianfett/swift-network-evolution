@@ -53,6 +53,11 @@ public struct QUICConnectionCore: ~Copyable {
         /// length; `nil` refuses them.
         public var maxDatagramFrameSize: UInt64?
         public var activeConnectionIDLimit: UInt64 = 2
+        /// Whether the core issues connection IDs of its own after the handshake, up to
+        /// `maxIssuedConnectionIDs` and the peer's limit. Otherwise ``issueConnectionID(_:statelessResetToken:)``
+        /// does, and the driver routes them.
+        public var automaticallyIssueConnectionIDs = false
+        public var maxIssuedConnectionIDs = 8
         /// The stateless reset token a server sends for the connection ID of its handshake.
         public var statelessResetToken: QUICStatelessResetToken?
         /// Tells the peer not to migrate, as a server whose connection IDs are empty has to.
@@ -100,6 +105,22 @@ public struct QUICConnectionCore: ~Copyable {
         case streamClosed(UInt64)
         /// DATAGRAM frames arrived; read them with ``readDatagram(_:)``.
         case datagramsReadable
+        /// This endpoint issued a connection ID; packets to it belong to the connection.
+        case newLocalConnectionID(
+            sequenceNumber: UInt64,
+            QUICConnectionID,
+            statelessResetToken: QUICStatelessResetToken
+        )
+        /// The peer retired one of this endpoint's connection IDs.
+        case retiredLocalConnectionID(QUICConnectionID)
+        /// The peer issued a connection ID this endpoint may send to.
+        case newPeerConnectionID(
+            sequenceNumber: UInt64,
+            QUICConnectionID,
+            statelessResetToken: QUICStatelessResetToken
+        )
+        /// This endpoint retired one of the peer's connection IDs.
+        case retiredPeerConnectionID(QUICConnectionID, statelessResetToken: QUICStatelessResetToken?)
         /// The connection is closed and can be released.
         case closed(CloseReason)
     }
@@ -153,8 +174,9 @@ public struct QUICConnectionCore: ~Copyable {
     /// The token a client's Initial packets carry, from the server's Retry.
     public internal(set) var initialToken: [UInt8] = []
     var receivedFirstServerPacket = false
-    /// The stateless reset tokens of the peer's connection IDs in use.
-    var peerStatelessResetTokens: [QUICStatelessResetToken] = []
+    var connectionIDs: CoreConnectionIDs
+    /// The destination connection ID of the packet whose frames are processed.
+    var currentPacketDestination: QUICConnectionID?
     /// The packets decrypted and processed so far.
     var packetsProcessed = 0
     /// The spin bit of the short headers we send.
@@ -307,6 +329,11 @@ public struct QUICConnectionCore: ~Copyable {
         self.peerConnectionID = peerConnectionID
         self.originalDestinationConnectionID = originalDestinationConnectionID
         self.retrySourceConnectionID = retrySourceConnectionID
+        self.connectionIDs = CoreConnectionIDs(
+            local: localConnectionID,
+            localToken: isServer ? configuration.statelessResetToken : nil,
+            peer: peerConnectionID
+        )
         if !isServer {
             self.version = configuration.clientInitialVersion
         }

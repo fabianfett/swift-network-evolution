@@ -331,11 +331,12 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         configuration.initialMaxData = 1000
         var pair = self.connectedPair(clientConfiguration: configuration)
         // The server sends 900 bytes the client never reads, then resets the stream.
-        let first: UInt64? = pair.withServer { server in
-            guard let id = server.openStream(bidirectional: true) else { return nil }
-            server.write([UInt8](repeating: 1, count: 900).span.bytes, to: id)
-            return id
-        } ?? nil
+        let first: UInt64? =
+            pair.withServer { server in
+                guard let id = server.openStream(bidirectional: true) else { return nil }
+                server.write([UInt8](repeating: 1, count: 900).span.bytes, to: id)
+                return id
+            } ?? nil
         let firstID = try XCTUnwrap(first)
         pair.exchange()
         pair.withServer { $0.resetStream(firstID, errorCode: 1) }
@@ -343,11 +344,12 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         XCTAssertTrue(pair.clientEvents.contains(.streamReset(firstID, errorCode: 1)), "\(pair.clientEvents)")
         // The reset bytes are as good as read, so the server may send more than the initial limit.
         let response = [UInt8](repeating: 2, count: 2000)
-        let second: UInt64? = pair.withServer { server in
-            guard let id = server.openStream(bidirectional: true) else { return nil }
-            server.write(response.span.bytes, to: id, fin: true)
-            return id
-        } ?? nil
+        let second: UInt64? =
+            pair.withServer { server in
+                guard let id = server.openStream(bidirectional: true) else { return nil }
+                server.write(response.span.bytes, to: id, fin: true)
+                return id
+            } ?? nil
         let streamID = try XCTUnwrap(second)
         var received: [UInt8] = []
         var finished = false
@@ -518,7 +520,7 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
             Frame.vle(0x17) + Frame.vle(10),  // STREAMS_BLOCKED
             Frame.vle(0x18) + Frame.vle(1) + Frame.vle(0) + [8] + [UInt8](repeating: 7, count: 8)
                 + [UInt8](repeating: 9, count: 16),  // NEW_CONNECTION_ID
-            Frame.vle(0x19) + Frame.vle(0),  // RETIRE_CONNECTION_ID
+            // RETIRE_CONNECTION_ID changes state: QUICConnectionCoreConnectionIDTests covers it.
             [0x1b] + [UInt8](repeating: 3, count: 8),  // PATH_RESPONSE
             Frame.vle(0x07) + Frame.vle(4) + [1, 2, 3, 4]  // NEW_TOKEN
         )
@@ -564,11 +566,12 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         var configuration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
         configuration.initialMaxData = 1000
         var pair = self.connectedPair(clientConfiguration: configuration)
-        let first: UInt64? = pair.withServer { server in
-            guard let id = server.openStream(bidirectional: true) else { return nil }
-            server.write([UInt8](repeating: 1, count: 100).span.bytes, to: id)
-            return id
-        } ?? nil
+        let first: UInt64? =
+            pair.withServer { server in
+                guard let id = server.openStream(bidirectional: true) else { return nil }
+                server.write([UInt8](repeating: 1, count: 100).span.bytes, to: id)
+                return id
+            } ?? nil
         let id = try XCTUnwrap(first)
         pair.exchange()
         XCTAssertTrue(pair.client.hasStream(id))
@@ -592,11 +595,12 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         XCTAssertTrue(pair.serverEvents.contains(.stopSending(id, errorCode: 5)), "\(pair.serverEvents)")
         // The discarded bytes went back to the connection window, so 900 more bytes fit.
         let response = [UInt8](repeating: 2, count: 900)
-        let second: UInt64? = pair.withServer { server in
-            guard let id = server.openStream(bidirectional: true) else { return nil }
-            server.write(response.span.bytes, to: id, fin: true)
-            return id
-        } ?? nil
+        let second: UInt64? =
+            pair.withServer { server in
+                guard let id = server.openStream(bidirectional: true) else { return nil }
+                server.write(response.span.bytes, to: id, fin: true)
+                return id
+            } ?? nil
         let secondID = try XCTUnwrap(second)
         var received = 0
         var finished = false

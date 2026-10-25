@@ -43,6 +43,7 @@ enum CoreTransportError {
     static let finalSizeError: UInt64 = 0x6
     static let frameEncodingError: UInt64 = 0x7
     static let transportParameterError: UInt64 = 0x8
+    static let connectionIDLimitError: UInt64 = 0x9
     static let protocolViolation: UInt64 = 0xa
     static let applicationError: UInt64 = 0xc
     static let cryptoBufferExceeded: UInt64 = 0xd
@@ -83,13 +84,14 @@ extension QUICConnectionCore {
     private mutating func detectStatelessReset(_ datagram: RawSpan, now: NetworkClock.Instant) {
         // A short header, at least one random byte, and the token.
         let tokenSize = QUICStatelessResetToken.size
-        guard datagram.byteCount >= 5 &+ tokenSize, !self.peerStatelessResetTokens.isEmpty,
+        let tokens = self.connectionIDs.peerStatelessResetTokens
+        guard datagram.byteCount >= 5 &+ tokenSize, !tokens.isEmpty,
             datagram.unsafeLoad(fromByteOffset: 0, as: UInt8.self) & 0x80 == 0
         else {
             return
         }
         let tail = [UInt8](copying: datagram.extracting((datagram.byteCount &- tokenSize)..<datagram.byteCount))
-        guard let token = QUICStatelessResetToken(tail), self.peerStatelessResetTokens.contains(token) else {
+        guard let token = QUICStatelessResetToken(tail), tokens.contains(token) else {
             return
         }
         self.log.info("Received a stateless reset")
@@ -153,6 +155,13 @@ extension QUICConnectionCore {
             if self.acks[space].isDuplicate(packetNumber) {
                 return packetLength
             }
+            if !packet.longHeader, let destination = packet.destinationConnectionID,
+                !self.shortHeaderPacketArrived(for: destination)
+            {
+                self.log.debug("Dropping a packet for an unknown connection ID")
+                return packetLength
+            }
+            self.currentPacketDestination = packet.destinationConnectionID
             if let packetKeyPhase = packet.keyState, !packet.longHeader {
                 self.onKeyPhaseReceived(packetKeyPhase, packetNumber: packetNumber)
             }
@@ -168,7 +177,7 @@ extension QUICConnectionCore {
             {
                 // The server picked its own connection ID; use it from now on.
                 self.receivedFirstServerPacket = true
-                self.peerConnectionID = sourceConnectionID
+                self.handshakePeerConnectionIDChanged(sourceConnectionID)
             }
             let isAckEliciting = self.processFrames(bytes.bytes, in: space, now: now)
             self.packetsProcessed &+= 1
@@ -257,7 +266,7 @@ extension QUICConnectionCore {
         }
         self.log.info("Following a Retry with a token of \(token.count) bytes")
         self.retrySourceConnectionID = sourceConnectionID
-        self.peerConnectionID = sourceConnectionID
+        self.handshakePeerConnectionIDChanged(sourceConnectionID)
         self.initialToken = token
         self.protector.deriveInitialSecrets(destinationCID: sourceConnectionID)
         self.restartInitial()
@@ -448,14 +457,29 @@ extension QUICConnectionCore {
         case 0x16, 0x17:  // STREAMS_BLOCKED
             return reader.vle() != nil
         case 0x18:  // NEW_CONNECTION_ID
-            guard reader.vle() != nil, reader.vle() != nil, let length = reader.uint8(),
-                length >= 1, length <= 20, reader.skip(Int(length)), reader.skip(16)
+            guard let sequenceNumber = reader.vle(), let retirePriorTo = reader.vle(), let length = reader.uint8(),
+                length >= 1, length <= 20, let connectionIDBytes = reader.array(Int(length)),
+                let tokenBytes = reader.array(QUICStatelessResetToken.size),
+                let connectionID = QUICConnectionID(connectionIDBytes), let token = QUICStatelessResetToken(tokenBytes)
             else {
                 return false
             }
+            self.processNewConnectionID(
+                sequenceNumber: sequenceNumber,
+                retirePriorTo: retirePriorTo,
+                connectionID: connectionID,
+                token: token,
+                now: now
+            )
             return true
         case 0x19:  // RETIRE_CONNECTION_ID
-            return reader.vle() != nil
+            guard let sequenceNumber = reader.vle() else { return false }
+            self.processRetireConnectionID(
+                sequenceNumber: sequenceNumber,
+                packetDestination: self.currentPacketDestination,
+                now: now
+            )
+            return true
         case 0x1a:  // PATH_CHALLENGE
             guard let data = reader.uint64() else { return false }
             self.pendingPathResponses.append(data)
@@ -659,8 +683,9 @@ extension QUICConnectionCore {
                 self.streams.maxStreamsUnidirectionalPending = true
             case .handshakeDone:
                 self.handshakeDonePending = true
-            case .dataBlocked, .streamDataBlocked, .newConnectionID, .retireConnectionID, .pathResponse, .ping,
-                .keepAlive, .datagram:
+            case .newConnectionID, .retireConnectionID:
+                self.connectionIDFrameLost(frame)
+            case .dataBlocked, .streamDataBlocked, .pathResponse, .ping, .keepAlive, .datagram:
                 break
             }
         }
@@ -939,6 +964,7 @@ extension QUICConnectionCore {
                 self.state = .established
                 self.events.append(.connected)
                 self.rearmKeepAlive(now: now)
+                self.issueConnectionIDsIfNeeded()
                 if self.isServer {
                     // The server confirms the handshake as soon as it completes.
                     self.handshakeDonePending = true
@@ -978,7 +1004,9 @@ extension QUICConnectionCore {
         self.peerTransportParameters = parameters
         if !self.isServer, !fromEarlyData, let token = parameters[.statelessResetToken]?.statelessResetToken {
             // The token of the connection ID the server used in its handshake.
-            self.peerStatelessResetTokens = [token]
+            if let index = self.connectionIDs.peer.firstIndex(where: { $0.sequenceNumber == 0 }) {
+                self.connectionIDs.peer[index].token = token
+            }
         }
         self.sendMaxData = UInt64(parameters.intValue(.initialMaxData))
         self.streams.peerMaxStreamsBidirectional = UInt64(parameters.intValue(.initialMaxStreamsBidirectional))

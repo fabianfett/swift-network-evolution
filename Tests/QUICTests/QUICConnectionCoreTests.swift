@@ -39,7 +39,8 @@ struct LockstepPair: ~Copyable {
 
     init(
         clientConfiguration: QUICConnectionCore.Configuration? = nil,
-        serverConfiguration: QUICConnectionCore.Configuration? = nil
+        serverConfiguration: QUICConnectionCore.Configuration? = nil,
+        clientConnectionIDLength: Int = 8
     ) {
         let serverKey = P256.Signing.PrivateKey()
         var clientTLS = SwiftTLSProtocol.Options()
@@ -57,7 +58,7 @@ struct LockstepPair: ~Copyable {
         self.serverConfiguration = serverConfiguration
         self.client = QUICConnectionCore(
             clientWith: clientConfiguration,
-            localConnectionID: QUICConnectionID(8),
+            localConnectionID: QUICConnectionID(clientConnectionIDLength),
             destinationConnectionID: QUICConnectionID(8),
             now: self.now
         )
