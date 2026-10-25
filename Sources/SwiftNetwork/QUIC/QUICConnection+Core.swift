@@ -86,16 +86,11 @@ extension QUICConnection {
             return false
         }
         #endif
-        if let tlsOptions {
-            if tlsOptions.enableEarlyData {
-                return false
-            }
-            #if EXPORT_SWIFTTLS
-            if tlsOptions.tlsOptions.asyncVerifier != nil {
-                return false
-            }
-            #endif
+        #if EXPORT_SWIFTTLS
+        if let tlsOptions, tlsOptions.tlsOptions.asyncVerifier != nil {
+            return false
         }
+        #endif
         return true
     }
 
@@ -152,6 +147,7 @@ extension QUICConnection {
             configuration.maxIdleTimeout = options.idleTimeout
             configuration.maxUnacknowledgedKeepAlives = Int(options.keepaliveCount)
             configuration.automaticallyIssueConnectionIDs = !options.disableAutomaticNewConnectionIDs
+            configuration.resendRejectedEarlyData = options.resendRejectedEarlyDataAutomatically
             configuration.maxUDPPayloadSize = UInt64(
                 min(
                     max(Int(options.maxUDPPayloadSize), Int(TransportParameters.minUDPPayloadSize)),
@@ -485,6 +481,23 @@ extension QUICConnection {
                 self.log.error("Validating \(id) failed")
             case .activePathChanged(let id):
                 self.coreActivePathChanged(to: id, in: &eventContext)
+            case .transportParametersForResumption(let bytes):
+                // The application remembers them for 0-RTT on a later connection.
+                self.deliverNetworkProtocolEvent(
+                    flow: .allFlows,
+                    event: .init(quicEvent: .receivedRemoteTransportParameters(transportParameters: bytes)),
+                    in: &eventContext
+                )
+            case .earlyDataRejected:
+                // The core emptied the streams' send buffers, unless it sends their data again; the
+                // application writes again.
+                if !box.core.configuration.resendRejectedEarlyData {
+                    self.deliverNetworkProtocolEvent(
+                        flow: .allFlows,
+                        event: .init(quicEvent: .earlyDataRejected),
+                        in: &eventContext
+                    )
+                }
             case .closed(let reason):
                 self.coreReportClose(reason, in: &eventContext)
                 self.coreFinish(in: &eventContext)
@@ -946,9 +959,10 @@ extension QUICConnection {
         } else {
             self.stats.increment(.outboundBidirectionalStreams)
         }
-        // A stream opened while connected is ready right away, and `connect(flow:)` reports it.
-        // Otherwise it waits for the handshake, or for the peer to allow more streams.
-        if self.state == .connected, let box = self.coreBox, !box.core.isTerminating,
+        // A stream opened while connected, or while the client sends 0-RTT, is ready right away,
+        // and `connect(flow:)` reports it. Otherwise it waits for the handshake, or for the peer to
+        // allow more streams.
+        if let box = self.coreBox, self.coreCanOpenStreams(box), !box.core.isTerminating,
             self.pendingStreams(unidirectional: isUnidirectional).isEmpty,
             let id = box.core.openStream(bidirectional: !isUnidirectional), let streamID = QUICStreamID(id)
         {
@@ -974,9 +988,15 @@ extension QUICConnection {
         self.withMutableQUICStreams(unidirectional: stream.unidirectional) { $0.incrementActiveStreams() }
     }
 
+    /// Whether streams get their IDs now: once connected, or in 0-RTT with the limits the client
+    /// remembered.
+    private func coreCanOpenStreams(_ box: QUICConnectionCoreBox) -> Bool {
+        self.state == .connected || box.core.canSendEarlyData
+    }
+
     /// Gives pending streams their IDs while the peer's stream limits allow it, oldest first.
     private func coreOpenPendingStreams(in eventContext: inout NetworkContext.EventContext) {
-        guard self.state == .connected, let box = self.coreBox, !box.core.isTerminating else { return }
+        guard let box = self.coreBox, self.coreCanOpenStreams(box), !box.core.isTerminating else { return }
         for unidirectional in [false, true] {
             while let stream = self.pendingStreams(unidirectional: unidirectional).first {
                 guard let id = box.core.openStream(bidirectional: !unidirectional), let streamID = QUICStreamID(id)

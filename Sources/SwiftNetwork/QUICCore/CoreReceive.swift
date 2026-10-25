@@ -189,6 +189,7 @@ extension QUICConnectionCore {
                 self.receivedFirstServerPacket = true
                 self.handshakePeerConnectionIDChanged(sourceConnectionID)
             }
+            self.packetIsEarlyData = packet.keyState == .earlyData
             let isAckEliciting = self.processFrames(bytes.bytes, in: space, now: now)
             self.packetsProcessed &+= 1
             if self.isClosed { return packetLength }
@@ -367,6 +368,15 @@ extension QUICConnectionCore {
                     CoreTransportError.protocolViolation,
                     frameType: frameType,
                     reason: "Frame not allowed in \(space)",
+                    now: now
+                )
+                return isAckEliciting
+            }
+            if self.packetIsEarlyData && !Self.isAllowedInEarlyData(frameType) {
+                self.closeWithError(
+                    CoreTransportError.protocolViolation,
+                    frameType: frameType,
+                    reason: "Frame not allowed in 0-RTT",
                     now: now
                 )
                 return isAckEliciting
@@ -682,6 +692,11 @@ extension QUICConnectionCore {
     mutating func onPacketLost(_ packet: CoreSentPacket, in space: PacketNumberSpace) {
         self.statistics.increment(.txLostPackets)
         self.statistics.increment(.txLostBytes, by: packet.size)
+        self.requeueFrames(of: packet, in: space)
+    }
+
+    /// Queues what a packet that didn't arrive carried, to send again.
+    mutating func requeueFrames(of packet: CoreSentPacket, in space: PacketNumberSpace) {
         for frame in packet.frames {
             switch frame {
             case .ack:
@@ -985,14 +1000,32 @@ extension QUICConnectionCore {
                     secret: SymmetricKey(data: secret),
                     isWrite: isWrite
                 )
+                if self.isServer && !isWrite && level == .earlyData {
+                    // A server reads 0-RTT packets only if it accepted them; the handshake
+                    // doesn't report it otherwise.
+                    self.earlyDataResolved(accepted: true, now: now)
+                }
             case .peerTransportParameters(let bytes, let earlyData):
-                guard !earlyData || self.peerTransportParameters == nil else { continue }
+                // The handshake reports them again with each message.
+                guard earlyData ? self.peerTransportParameters == nil : !self.receivedPeerTransportParameters
+                else { continue }
+                if !earlyData { self.receivedPeerTransportParameters = true }
                 self.setPeerTransportParameters(bytes, fromEarlyData: earlyData, now: now)
-            case .earlyDataAccepted:
-                break
+            case .earlyDataAccepted(let accepted):
+                self.earlyDataResolved(accepted: accepted, now: now)
             case .sessionTickets:
                 break
             case .complete:
+                if !self.isServer && self.earlyData == .accepted {
+                    // A client is done with 0-RTT once it has 1-RTT keys (RFC 9001 Section 4.9.3).
+                    self.protector.drop(keyState: .earlyData)
+                    if let parameters = self.peerTransportParameters,
+                        let violation = self.earlyDataLimitViolation(parameters)
+                    {
+                        self.closeWithError(CoreTransportError.protocolViolation, reason: violation, now: now)
+                        return
+                    }
+                }
                 self.state = .established
                 self.events.append(.connected)
                 self.rearmKeepAlive(now: now)
@@ -1034,6 +1067,11 @@ extension QUICConnectionCore {
             return
         }
         self.peerTransportParameters = parameters
+        if fromEarlyData {
+            self.rememberEarlyDataTransportParameters(parameters)
+        } else if !self.isServer && self.configuration.tlsOptions.enableEarlyData {
+            self.events.append(.transportParametersForResumption(bytes))
+        }
         if !self.isServer, !fromEarlyData, let token = parameters[.statelessResetToken]?.statelessResetToken {
             // The token of the connection ID the server used in its handshake.
             if let index = self.connectionIDs.peer.firstIndex(where: { $0.sequenceNumber == 0 }) {
@@ -1053,12 +1091,15 @@ extension QUICConnectionCore {
         }
         // max_ack_delay is a duration; `intValue` traps on it.
         self.recovery.maxAckDelay = parameters[.maxAckDelay]?.duration ?? .milliseconds(25)
-        // Streams opened before the parameters arrived get their limits now.
-        for (id, var stream) in self.streams.streams where stream.canSend && stream.sendLimit == 0 {
-            stream.sendLimit =
+        // Streams opened before the parameters arrived, or in 0-RTT with the remembered ones, get
+        // their limits now.
+        for (id, var stream) in self.streams.streams where stream.canSend {
+            let limit =
                 CoreStreamMap.isBidirectional(id)
                 ? UInt64(parameters.intValue(.initialMaxStreamDataBidirectionalRemote))
                 : UInt64(parameters.intValue(.initialMaxStreamDataUnidirectional))
+            guard limit > stream.sendLimit else { continue }
+            stream.sendLimit = limit
             self.streams.streams[id] = stream
         }
     }

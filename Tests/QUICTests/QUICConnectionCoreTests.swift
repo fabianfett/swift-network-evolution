@@ -40,8 +40,11 @@ struct LockstepPair: ~Copyable {
     init(
         clientConfiguration: QUICConnectionCore.Configuration? = nil,
         serverConfiguration: QUICConnectionCore.Configuration? = nil,
-        clientConnectionIDLength: Int = 8
+        clientConnectionIDLength: Int = 8,
+        clientTLSOptions: SwiftTLSProtocol.Options? = nil,
+        serverTLSOptions: SwiftTLSProtocol.Options? = nil
     ) {
+        // Without TLS options of their own, both sides use a raw public key.
         let serverKey = P256.Signing.PrivateKey()
         var clientTLS = SwiftTLSProtocol.Options()
         clientTLS.applicationProtocols = ["qsm-test"]
@@ -50,6 +53,8 @@ struct LockstepPair: ~Copyable {
         var serverTLS = SwiftTLSProtocol.Options()
         serverTLS.applicationProtocols = ["qsm-test"]
         serverTLS.rawPrivateKey = [UInt8](serverKey.rawRepresentation)
+        if let clientTLSOptions { clientTLS = clientTLSOptions }
+        if let serverTLSOptions { serverTLS = serverTLSOptions }
 
         var clientConfiguration = clientConfiguration ?? QUICConnectionCore.Configuration(tlsOptions: clientTLS)
         clientConfiguration.tlsOptions = clientTLS

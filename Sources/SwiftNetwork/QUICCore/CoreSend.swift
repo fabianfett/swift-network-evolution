@@ -148,7 +148,9 @@ extension QUICConnectionCore {
     private func wantsToSend(in space: PacketNumberSpace, congestionLimited: Bool) -> Bool {
         let index = Int(space.rawValue)
         guard !self.spaceDiscarded[index] else { return false }
-        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
+        let keyState: PacketKeyState =
+            space == .initial
+            ? .initial : (space == .handshake ? .handshake : (self.sendsEarlyData ? .earlyData : self.keyPhase))
         guard self.protector.sealKeyReady(for: keyState) else { return false }
         if self.acks[space].ackNeeded && self.acks[space].hasAckToSend {
             return true
@@ -179,7 +181,7 @@ extension QUICConnectionCore {
     }
 
     var hasApplicationFramesToSend: Bool {
-        guard self.handshake.isComplete else { return false }
+        guard self.handshake.isComplete else { return self.canSendEarlyData && self.hasEarlyDataFramesToSend }
         return self.handshakeDonePending || self.keepAlivePending || self.maxDataPending
             || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || self.pingPending
@@ -188,7 +190,12 @@ extension QUICConnectionCore {
             || self.hasInjectedFrames
     }
 
-    private var hasInjectedFrames: Bool {
+    /// Whether 1-RTT data goes out in 0-RTT packets, as the client has no 1-RTT keys yet.
+    var sendsEarlyData: Bool {
+        self.canSendEarlyData && !self.protector.sealKeyReady(for: self.keyPhase)
+    }
+
+    var hasInjectedFrames: Bool {
         #if DEBUG
         return !self.injectedFrames.isEmpty
         #else
@@ -196,7 +203,7 @@ extension QUICConnectionCore {
         #endif
     }
 
-    private var hasSendableStreams: Bool {
+    var hasSendableStreams: Bool {
         for id in self.streams.sendQueue {
             guard let stream = self.streams.streams[id] else { continue }
             if stream.resetPending || stream.stopSendingPending || stream.maxStreamDataPending {
@@ -244,11 +251,14 @@ extension QUICConnectionCore {
         probing: CorePathID? = nil,
         now: NetworkClock.Instant
     ) -> Int? {
-        let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
+        let isEarlyData = space == .applicationData && probing == nil && self.sendsEarlyData
+        let keyState: PacketKeyState =
+            space == .initial
+            ? .initial : (space == .handshake ? .handshake : (isEarlyData ? .earlyData : self.keyPhase))
         // A probe goes to the connection ID of its path.
         let destination = probing.flatMap { self.peerConnectionID(on: $0) } ?? self.peerConnectionID
         var padDatagramTo = padDatagramTo
-        let isLongHeader = space != .applicationData
+        let isLongHeader = space != .applicationData || isEarlyData
         let packetNumber = self.protector.getPacketNumber(for: space)
         let largestAcknowledged = self.recovery.spaces[Int(space.rawValue)].largestAcknowledged
         guard
@@ -273,7 +283,7 @@ extension QUICConnectionCore {
             var writer = CoreWriter(buffer._mutatingExtracting(offset..<(offset &+ maximumLength)))
             // Header.
             if isLongHeader {
-                let type: UInt8 = space == .initial ? 0x00 : 0x02
+                let type: UInt8 = space == .initial ? 0x00 : (isEarlyData ? 0x01 : 0x02)
                 var ok = writer.uint8(0xc0 | (type << 4) | encodedPacketNumber.headerFieldSize)
                 ok = ok && writer.uint32(self.version)
                 ok = ok && writer.uint8(UInt8(self.peerConnectionID.length))
@@ -326,7 +336,7 @@ extension QUICConnectionCore {
                 )
             }
             // ACK.
-            if probing == nil && self.acks[space].hasAckToSend {
+            if probing == nil && !isEarlyData && self.acks[space].hasAckToSend {
                 let ackLength = self.acks[space].ackFrameLength(now: now, ackDelayExponent: 3)
                 // An ACK that isn't due yet stays out when the next datagram needs the room: a
                 // datagram as large as fits a packet would otherwise never go out.
@@ -375,7 +385,7 @@ extension QUICConnectionCore {
                     }
                 }
 
-                if space == .applicationData && self.handshake.isComplete
+                if space == .applicationData && (self.handshake.isComplete || isEarlyData)
                     && (!congestionLimited || mayExceedCongestionWindow)
                 {
                     if self.writeApplicationFrames(
@@ -383,6 +393,7 @@ extension QUICConnectionCore {
                         limit: frameLimit,
                         frames: &frames,
                         isAckEliciting: &isAckEliciting,
+                        earlyData: isEarlyData,
                         now: now
                     ) {
                         // PATH_CHALLENGE and PATH_RESPONSE need a datagram of 1200 bytes.
@@ -494,12 +505,13 @@ extension QUICConnectionCore {
     }
 
     /// Writes the 1-RTT frames due. Returns whether PATH_CHALLENGE or PATH_RESPONSE was among
-    /// them.
+    /// them. A 0-RTT packet carries only what the application sends (RFC 9000 Section 12.4).
     private mutating func writeApplicationFrames(
         into writer: inout CoreWriter,
         limit: Int,
         frames: inout [CoreSentFrame],
         isAckEliciting: inout Bool,
+        earlyData: Bool,
         now: NetworkClock.Instant
     ) -> Bool {
         #if DEBUG
@@ -510,20 +522,22 @@ extension QUICConnectionCore {
             isAckEliciting = true
         }
         #endif
-        if self.keepAlivePending && writer.offset < limit {
+        if self.keepAlivePending && !earlyData && writer.offset < limit {
             _ = writer.uint8(0x01)
             self.keepAlivePending = false
             frames.append(.keepAlive)
             self.statistics.increment(.keepAliveFramesSent)
             isAckEliciting = true
         }
-        if self.handshakeDonePending && writer.offset < limit {
+        if self.handshakeDonePending && !earlyData && writer.offset < limit {
             _ = writer.uint8(0x1e)
             self.handshakeDonePending = false
             frames.append(.handshakeDone)
             isAckEliciting = true
         }
-        let wrotePathFrames = self.writePathFrames(
+        let wrotePathFrames =
+            !earlyData
+            && self.writePathFrames(
             for: self.activePath,
             into: &writer,
             limit: limit,
@@ -531,7 +545,7 @@ extension QUICConnectionCore {
             isAckEliciting: &isAckEliciting,
             now: now
         )
-        if self.pingPending && writer.offset < limit {
+        if self.pingPending && !earlyData && writer.offset < limit {
             _ = writer.uint8(0x01)
             self.pingPending = false
             frames.append(.ping)
@@ -561,7 +575,9 @@ extension QUICConnectionCore {
             }
         }
 
-        self.writeConnectionIDFrames(into: &writer, limit: limit, frames: &frames, isAckEliciting: &isAckEliciting)
+        if !earlyData {
+            self.writeConnectionIDFrames(into: &writer, limit: limit, frames: &frames, isAckEliciting: &isAckEliciting)
+        }
         self.writeDatagramFrames(into: &writer, limit: limit, frames: &frames, isAckEliciting: &isAckEliciting)
 
         // Stream frames, round robin.

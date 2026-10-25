@@ -277,6 +277,8 @@ final class SwiftNetworkQUICEarlyDataTests: NetTestCase {
         let storage = TestNetworkProtocolStorage(context: context)
 
         var pairedPathsArray = [PairedUDPIPPaths]()
+        var instances: [QUICConnection] = []
+        var clientStreamReadyBeforeHandshake = false
 
         var earlyDataRejected = false
         var remoteTransportParameters: [UInt8]? = nil
@@ -298,6 +300,7 @@ final class SwiftNetworkQUICEarlyDataTests: NetTestCase {
             let clientPath = PathProperties(parameters: clientParameters)
             let (clientQUICStreamListener, _, clientQUICMultipath) = storage.createTestQUICInstance()
             clientQUICInstance = clientQUICStreamListener.identifier
+            instances += storage.quicInstance(for: clientQUICStreamListener.base).map { [$0] } ?? []
 
             let clientQUICOptions: ProtocolOptions<QUICProtocol>
             clientQUICOptions = self.createQUICTestOptions(
@@ -357,6 +360,7 @@ final class SwiftNetworkQUICEarlyDataTests: NetTestCase {
             let serverPath = PathProperties(parameters: serverParameters)
             let (serverQUICStreamListener, _, serverQUICMultipath) = storage.createTestQUICInstance()
             serverQUICInstance = serverQUICStreamListener.identifier
+            instances += storage.quicInstance(for: serverQUICStreamListener.base).map { [$0] } ?? []
 
             let serverQUICOptions = self.createQUICTestOptions(server: true, enableEarlyData: acceptEarlyData)
             serverQUICOptions.setLogID(prefix: "L", parent: "1", protocolLogIDNumber: 1)
@@ -424,12 +428,15 @@ final class SwiftNetworkQUICEarlyDataTests: NetTestCase {
 
             serverUpperHarness.start { connected in
                 serverConnected = true
-                XCTAssertTrue(connected, "QUIC server failed to become connected")
+                // A client that fails closes before it finishes the handshake.
+                XCTAssertTrue(connected || expectFailure, "QUIC server failed to become connected")
                 expectation.fulfill()
             }
 
             clientUpperHarness.start { connected in
                 clientConnected = true
+                // With 0-RTT the stream is ready before the handshake completes.
+                clientStreamReadyBeforeHandshake = instances.first.map { $0.state != .connected } ?? false
                 XCTAssertTrue(connected, "QUIC client failed to become connected")
             }
 
@@ -495,6 +502,29 @@ final class SwiftNetworkQUICEarlyDataTests: NetTestCase {
 
         let stopExpectation = XCTestExpectation()
         context.async {
+            // 0-RTT runs on QUICConnectionCore.
+            XCTAssertEqual(instances.count, 2)
+            if QUICConnectionDriver.environmentOverride == nil {
+                for instance in instances {
+                    XCTAssertTrue(instance.usesCore, "driver")
+                }
+                let attemptsEarlyData = resumedTransportParameters != nil
+                XCTAssertEqual(clientStreamReadyBeforeHandshake, attemptsEarlyData, "stream ready in 0-RTT")
+                if !expectFailure, instances.count == 2 {
+                    // The client always offers early data, but only sends it with the remembered
+                    // transport parameters.
+                    XCTAssertEqual(
+                        instances[0].coreBox?.core.isEarlyDataAccepted,
+                        attemptsEarlyData && acceptEarlyData,
+                        "client early data accepted"
+                    )
+                    XCTAssertEqual(
+                        instances[1].coreBox?.core.isEarlyDataAccepted,
+                        acceptEarlyData,
+                        "server early data accepted"
+                    )
+                }
+            }
             clientUpperHarness?.stop()
             serverUpperHarness?.stop()
 

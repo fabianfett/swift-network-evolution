@@ -74,6 +74,10 @@ public struct QUICConnectionCore: ~Copyable {
         /// How long this endpoint delays acknowledgements, sent as `max_ack_delay` unless it is
         /// the default 25 ms.
         public var maxAckDelay: NetworkDuration = .milliseconds(25)
+        /// Whether a client sends the data of its 0-RTT packets again when the server rejects
+        /// them. Otherwise its streams start over empty, and ``Event/earlyDataRejected`` tells
+        /// the application to write again.
+        public var resendRejectedEarlyData = false
 
         #if DEBUG
         /// Changes the transport parameters this endpoint sends, so tests can send what a broken
@@ -127,6 +131,11 @@ public struct QUICConnectionCore: ~Copyable {
         case pathFailed(CorePathID)
         /// Packets go out on the path now: this endpoint migrated, or the peer did.
         case activePathChanged(CorePathID)
+        /// The server rejected this client's 0-RTT packets (RFC 9001 Section 4.6.2).
+        case earlyDataRejected
+        /// The server's transport parameters, which a client remembers for 0-RTT on a later
+        /// connection. Only a client with early data enabled gets them.
+        case transportParametersForResumption([UInt8])
         /// The connection is closed and can be released.
         case closed(CloseReason)
     }
@@ -254,6 +263,14 @@ public struct QUICConnectionCore: ~Copyable {
     var packetIsProbing = false
     /// A PING is due, so the peer sees a non-probing packet on a new path.
     var pingPending = false
+    var earlyData = CoreEarlyDataState.none
+    /// The transport parameters a client sent its 0-RTT packets with.
+    var rememberedTransportParameters: TransportParameters?
+    /// Whether the peer's transport parameters of this connection arrived, rather than the ones
+    /// remembered for 0-RTT.
+    var receivedPeerTransportParameters = false
+    /// Whether the packet being processed is a 0-RTT packet.
+    var packetIsEarlyData = false
     /// DATAGRAM payloads to send, oldest first. They are never retransmitted.
     var datagramsToSend = Deque<[UInt8]>()
     /// DATAGRAM payloads received and not read yet.
