@@ -388,7 +388,7 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
                     var span = copy.mutableSpan
                     server.receive(&span, now: now)
                 }
-                return server.pendingPathResponses
+                return server.paths[.initial]?.pendingResponses ?? []
             } ?? []
         // A processed duplicate would be answered twice.
         XCTAssertEqual(pending.count, 1)
@@ -451,7 +451,7 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
             pair.withServer { server in
                 var span = datagram.mutableSpan
                 server.receive(&span, now: now)
-                return server.pendingPathResponses
+                return server.paths[.initial]?.pendingResponses ?? []
             } ?? []
         XCTAssertEqual(pending, [0x0505_0505_0505_0505])
         XCTAssertNil(pair.server?.closeReason)
@@ -541,11 +541,11 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
                     var span = datagram.mutableSpan
                     server.receive(&span, now: now)
                 }
-                XCTAssertEqual(server.pendingPathResponses, [UInt64(0x0102_0304_0506_0708)])
+                XCTAssertEqual(server.paths[.initial]?.pendingResponses, [UInt64(0x0102_0304_0506_0708)])
                 return LockstepPair.drain(&server, now: now)
             } ?? []
         XCTAssertFalse(answer.isEmpty)
-        XCTAssertEqual(pair.server?.pendingPathResponses, [])
+        XCTAssertEqual(pair.server?.paths[.initial]?.pendingResponses, [])
         XCTAssertNil(pair.server?.closeReason)
     }
 

@@ -54,6 +54,16 @@ enum CoreTransportError {
 extension QUICConnectionCore {
     /// Processes one received UDP datagram. Decrypts in place.
     public mutating func receive(_ datagram: inout MutableSpan<UInt8>, now: NetworkClock.Instant) {
+        self.receive(&datagram, on: self.activePath, now: now)
+    }
+
+    /// Processes one received UDP datagram that arrived on `path`. Decrypts in place.
+    public mutating func receive(_ datagram: inout MutableSpan<UInt8>, on path: CorePathID, now: NetworkClock.Instant) {
+        if self.paths[path] == nil {
+            self.paths[path] = CorePath(id: path, isValidated: false)
+        }
+        self.paths[path]!.bytesReceived &+= datagram.count
+        self.receivingPath = path
         switch self.state {
         case .closed, .draining:
             return
@@ -182,6 +192,9 @@ extension QUICConnectionCore {
             let isAckEliciting = self.processFrames(bytes.bytes, in: space, now: now)
             self.packetsProcessed &+= 1
             if self.isClosed { return packetLength }
+            if space == .applicationData && !self.packetIsProbing && !self.isClosingOrDraining {
+                self.nonProbingPacketArrived(on: self.receivingPath, packetNumber: packetNumber, now: now)
+            }
             self.acks[space].onPacketReceived(
                 packetNumber,
                 isAckEliciting: isAckEliciting,
@@ -332,6 +345,7 @@ extension QUICConnectionCore {
     {
         var reader = CoreReader(payload)
         var isAckEliciting = false
+        self.packetIsProbing = true
         if payload.byteCount == 0 {
             self.closeWithError(CoreTransportError.protocolViolation, reason: "Packet without frames", now: now)
             return false
@@ -343,6 +357,10 @@ extension QUICConnectionCore {
             }
             if frameType != 0x00 && frameType != 0x02 && frameType != 0x03 && frameType != 0x1c && frameType != 0x1d {
                 isAckEliciting = true
+            }
+            // PATH_CHALLENGE, PATH_RESPONSE, NEW_CONNECTION_ID and PADDING are probing frames.
+            if frameType != 0x00 && frameType != 0x18 && frameType != 0x1a && frameType != 0x1b {
+                self.packetIsProbing = false
             }
             if !self.isAllowed(frameType, in: space) {
                 self.closeWithError(
@@ -482,10 +500,24 @@ extension QUICConnectionCore {
             return true
         case 0x1a:  // PATH_CHALLENGE
             guard let data = reader.uint64() else { return false }
-            self.pendingPathResponses.append(data)
+            // Answered on the path it arrived on (RFC 9000 Section 8.2.2), which this endpoint
+            // validates in turn.
+            let path = self.receivingPath
+            self.paths[path]?.pendingResponses.append(data)
+            if let count = self.paths[path]?.pendingResponses.count, count > CorePath.maximumPendingResponses {
+                self.paths[path]?.pendingResponses.removeFirst()
+            }
+            if path != self.activePath {
+                _ = self.assignPeerConnectionID(to: path)
+            }
+            if self.paths[path]?.isValidated == false {
+                self.startValidation(of: path)
+            }
             return true
         case 0x1b:  // PATH_RESPONSE
-            return reader.uint64() != nil
+            guard let data = reader.uint64() else { return false }
+            self.pathResponseReceived(data, now: now)
+            return true
         case 0x1c, 0x1d:  // CONNECTION_CLOSE
             guard let code = reader.vle() else { return false }
             if frameType == 0x1c {
@@ -641,7 +673,7 @@ extension QUICConnectionCore {
                 self.statistics.increment(.keepAliveFramesAcknowledged)
             case .handshakeDone, .maxData, .maxStreamData, .maxStreamsBidirectional, .maxStreamsUnidirectional,
                 .stopSending, .dataBlocked, .streamDataBlocked, .newConnectionID, .retireConnectionID, .pathResponse,
-                .ping, .datagram:
+                .pathChallenge, .ping, .datagram:
                 break
             }
         }
@@ -685,7 +717,7 @@ extension QUICConnectionCore {
                 self.handshakeDonePending = true
             case .newConnectionID, .retireConnectionID:
                 self.connectionIDFrameLost(frame)
-            case .dataBlocked, .streamDataBlocked, .pathResponse, .ping, .keepAlive, .datagram:
+            case .dataBlocked, .streamDataBlocked, .pathResponse, .pathChallenge, .ping, .keepAlive, .datagram:
                 break
             }
         }

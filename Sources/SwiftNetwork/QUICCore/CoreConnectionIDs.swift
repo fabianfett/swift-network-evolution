@@ -206,6 +206,12 @@ extension QUICConnectionCore {
                 }
             }
             self.connectionIDs.peer = kept
+            for (id, path) in self.paths {
+                if let sequenceNumber = path.peerConnectionIDSequenceNumber, sequenceNumber < retirePriorTo {
+                    // The path picks another one before it sends again.
+                    self.paths[id]?.peerConnectionIDSequenceNumber = nil
+                }
+            }
         }
         if sequenceNumber < self.connectionIDs.retirePriorTo {
             // Already retired by an earlier Retire Prior To: retire it right away.
@@ -297,9 +303,14 @@ extension QUICConnectionCore {
         guard self.connectionIDs.usedLocalSequenceNumbers.insert(entry.sequenceNumber).inserted else {
             return true
         }
-        if let unused = self.connectionIDs.peer.first(where: {
-            $0.sequenceNumber > self.connectionIDs.currentPeerSequenceNumber
-        }) {
+        // A packet on another path is a migration; that path gets a connection ID of its own.
+        let usedByPaths = Set(self.paths.values.compactMap(\.peerConnectionIDSequenceNumber))
+        if self.receivingPath == self.activePath,
+            let unused = self.connectionIDs.peer.first(where: {
+                $0.sequenceNumber > self.connectionIDs.currentPeerSequenceNumber
+                    && !usedByPaths.contains($0.sequenceNumber)
+            })
+        {
             self.switchPeerConnectionID(to: unused)
         }
         self.issueConnectionIDsIfNeeded()

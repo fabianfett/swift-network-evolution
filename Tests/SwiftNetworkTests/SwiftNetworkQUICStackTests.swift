@@ -608,8 +608,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
     func testQUICStackHandshakeMigration() {
         let ipv4Client = Endpoint(address: IPv4Address(SwiftNetworkQUICStackTests.localIPv4Address)!, port: 1234)
         let ipv4Server = Endpoint(address: IPv4Address(SwiftNetworkQUICStackTests.localIPv4Address)!, port: 8080)
-        // The core doesn't migrate yet.
-        quicStackHandshake(clientEndpoint: ipv4Client, serverEndpoint: ipv4Server, migrateCount: 2, driver: .legacy)
+        quicStackHandshake(clientEndpoint: ipv4Client, serverEndpoint: ipv4Server, migrateCount: 2)
     }
 
     func testQUICStackHandshakeMigrationWithData() {
@@ -619,9 +618,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
             clientEndpoint: ipv4Client,
             serverEndpoint: ipv4Server,
             migrateCount: 2,
-            dataToSend: Array("Hello World!".utf8),
-            // The core doesn't migrate yet.
-            driver: .legacy
+            dataToSend: Array("Hello World!".utf8)
         )
     }
 
@@ -632,9 +629,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
             clientEndpoint: ipv4Client,
             serverEndpoint: ipv4Server,
             migrateCount: 4,
-            dataToSend: Array("Hello World!".utf8),
-            // The core doesn't migrate yet.
-            driver: .legacy
+            dataToSend: Array("Hello World!".utf8)
         )
     }
 
@@ -695,12 +690,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
             )
             pairedPathsArray.append(initialPaths)
 
-            // The core doesn't migrate yet.
-            let clientQUICOptions = self.createQUICTestOptions(
-                server: false,
-                sourceConnectionIDLength: 8,
-                driver: .legacy
-            )
+            let clientQUICOptions = self.createQUICTestOptions(server: false, sourceConnectionIDLength: 8)
             clientQUICOptions.setLogID(prefix: "C", parent: "pathEvents", protocolLogIDNumber: 1)
             let (clientQUICStreamListener, _, clientQUICMultipath) = storage.createTestQUICInstance()
             clientQUICMultipathLinkage = clientQUICMultipath
@@ -746,7 +736,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
             var serverParameters = Parameters()
             serverParameters.isServer = true
             let serverPath = PathProperties(parameters: serverParameters)
-            let serverQUICOptions = self.createQUICTestOptions(server: true, driver: .legacy)
+            let serverQUICOptions = self.createQUICTestOptions(server: true)
             serverQUICOptions.setLogID(prefix: "L", parent: "pathEvents", protocolLogIDNumber: 1)
             let (serverQUICStreamListener, _, serverQUICMultipath) = storage.createTestQUICInstance()
             serverQUICMultipathLinkage = serverQUICMultipath

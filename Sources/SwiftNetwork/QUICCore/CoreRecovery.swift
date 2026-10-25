@@ -40,6 +40,7 @@ enum CoreSentFrame {
     case pathResponse
     case handshakeDone
     case ping
+    case pathChallenge
     /// The PING of a keepalive.
     case keepAlive
     case datagram
@@ -404,6 +405,13 @@ struct CoreRecovery {
     }
 
     // MARK: Congestion control
+
+    /// Starts the congestion controller over, for a new path (RFC 9000 Section 9.4).
+    mutating func resetCongestionControl() {
+        self.congestionWindow = Self.initialWindow(maxDatagramSize: self.maxDatagramSize)
+        self.slowStartThreshold = .max
+        self.congestionRecoveryStartTime = nil
+    }
 
     private mutating func onPacketAcknowledgedCongestionControl(_ packet: CoreSentPacket) {
         if let recoveryStart = self.congestionRecoveryStartTime, packet.timeSent <= recoveryStart {

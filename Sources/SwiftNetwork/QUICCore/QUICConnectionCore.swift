@@ -121,6 +121,12 @@ public struct QUICConnectionCore: ~Copyable {
         )
         /// This endpoint retired one of the peer's connection IDs.
         case retiredPeerConnectionID(QUICConnectionID, statelessResetToken: QUICStatelessResetToken?)
+        /// A PATH_RESPONSE validated the path.
+        case pathValidated(CorePathID)
+        /// The path didn't answer PATH_CHALLENGE.
+        case pathFailed(CorePathID)
+        /// Packets go out on the path now: this endpoint migrated, or the peer did.
+        case activePathChanged(CorePathID)
         /// The connection is closed and can be released.
         case closed(CloseReason)
     }
@@ -238,8 +244,16 @@ public struct QUICConnectionCore: ~Copyable {
     /// Why the connection is closing, draining or closed; `nil` while it is open.
     public internal(set) var closeReason: CloseReason?
     var events = Deque<Event>()
-    /// PATH_CHALLENGE data to answer with PATH_RESPONSE.
-    var pendingPathResponses: [UInt64] = []
+    /// The network paths, by the driver's ID.
+    var paths: [CorePathID: CorePath] = [.initial: CorePath(id: .initial, isValidated: true)]
+    var activePath = CorePathID.initial
+    /// The path of the datagram being processed.
+    var receivingPath = CorePathID.initial
+    var largestNonProbingPacketNumber: UInt64?
+    /// Whether the packet being processed carried only probing frames (RFC 9000 Section 9.1).
+    var packetIsProbing = false
+    /// A PING is due, so the peer sees a non-probing packet on a new path.
+    var pingPending = false
     /// DATAGRAM payloads to send, oldest first. They are never retransmitted.
     var datagramsToSend = Deque<[UInt8]>()
     /// DATAGRAM payloads received and not read yet.
@@ -434,6 +448,7 @@ public struct QUICConnectionCore: ~Copyable {
         }
         consider(self.idleDeadline)
         consider(self.keepAliveDeadline)
+        consider(self.nextPathDeadline)
         consider(self.lossDetectionDeadline?.deadline)
         for space in PacketNumberSpace.allCases where !self.spaceDiscarded[Int(space.rawValue)] {
             consider(self.acks[space].ackDeadline)
@@ -479,6 +494,7 @@ public struct QUICConnectionCore: ~Copyable {
             self.keepAliveTimerFired(now: now)
             if self.isClosingOrDraining { return }
         }
+        self.handlePathTimeouts(now: now)
         for space in PacketNumberSpace.allCases {
             if let ackDeadline = self.acks[space].ackDeadline, now >= ackDeadline {
                 self.acks[space].ackNeeded = true

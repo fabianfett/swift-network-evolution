@@ -21,9 +21,58 @@ extension QUICConnectionCore {
     static let tagLength = 16
     static let minimumInitialDatagramSize = 1200
 
-    /// Writes the next datagram to send into `buffer`. Returns its length, or `nil` if there is
-    /// nothing to send right now.
+    /// Writes the next datagram to send on the active path into `buffer`. Returns its length, or
+    /// `nil` if there is nothing to send right now.
     public mutating func send(into buffer: inout MutableSpan<UInt8>, now: NetworkClock.Instant) -> Int? {
+        self.send(into: &buffer, on: self.activePath, now: now)
+    }
+
+    /// Writes the next datagram to send on `path` into `buffer`. On a path other than the active
+    /// one, that is only PATH_CHALLENGE and PATH_RESPONSE; ``pathWithProbeToSend`` says where.
+    public mutating func send(
+        into buffer: inout MutableSpan<UInt8>,
+        on path: CorePathID,
+        now: NetworkClock.Instant
+    ) -> Int? {
+        guard path == self.activePath else {
+            return self.sendProbe(into: &buffer, on: path, now: now)
+        }
+        guard let length = self.sendOnActivePath(into: &buffer, now: now) else { return nil }
+        self.paths[path]?.bytesSent &+= length
+        return length
+    }
+
+    private mutating func sendProbe(
+        into buffer: inout MutableSpan<UInt8>,
+        on path: CorePathID,
+        now: NetworkClock.Instant
+    ) -> Int? {
+        guard case .established = self.state, self.paths[path]?.hasProbingFramesToSend == true,
+            self.assignPeerConnectionID(to: path), self.peerConnectionID(on: path) != nil
+        else {
+            return nil
+        }
+        let limit = min(buffer.count, self.configuration.maxDatagramSize, self.amplificationBudget(on: path))
+        guard limit > 64 else { return nil }
+        guard
+            let length = self.writePacket(
+                in: .applicationData,
+                into: &buffer,
+                at: 0,
+                maximumLength: limit,
+                padDatagramTo: min(Self.minimumInitialDatagramSize, limit),
+                congestionLimited: false,
+                probing: path,
+                now: now
+            )
+        else {
+            return nil
+        }
+        self.paths[path]?.bytesSent &+= length
+        return length
+    }
+
+    private mutating func sendOnActivePath(into buffer: inout MutableSpan<UInt8>, now: NetworkClock.Instant) -> Int? {
         switch self.state {
         case .closed, .draining:
             return nil
@@ -37,6 +86,12 @@ extension QUICConnectionCore {
         if self.isServer && !self.addressValidated {
             // Anti-amplification: at most three times what the client sent.
             let budget = 3 &* self.bytesReceived &- self.bytesSent
+            guard budget > 0 else { return nil }
+            limit = min(limit, budget)
+        }
+        if self.activePath != .initial {
+            // The same holds on a path the client moved to, until it is validated.
+            let budget = self.amplificationBudget(on: self.activePath)
             guard budget > 0 else { return nil }
             limit = min(limit, budget)
         }
@@ -127,7 +182,8 @@ extension QUICConnectionCore {
         guard self.handshake.isComplete else { return false }
         return self.handshakeDonePending || self.keepAlivePending || self.maxDataPending
             || self.streams.maxStreamsBidirectionalPending
-            || self.streams.maxStreamsUnidirectionalPending || !self.pendingPathResponses.isEmpty
+            || self.streams.maxStreamsUnidirectionalPending || self.pingPending
+            || self.paths[self.activePath]?.hasProbingFramesToSend == true
             || !self.datagramsToSend.isEmpty || self.hasConnectionIDFramesToSend || self.hasSendableStreams
             || self.hasInjectedFrames
     }
@@ -185,9 +241,13 @@ extension QUICConnectionCore {
         maximumLength: Int,
         padDatagramTo: Int?,
         congestionLimited: Bool,
+        probing: CorePathID? = nil,
         now: NetworkClock.Instant
     ) -> Int? {
         let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
+        // A probe goes to the connection ID of its path.
+        let destination = probing.flatMap { self.peerConnectionID(on: $0) } ?? self.peerConnectionID
+        var padDatagramTo = padDatagramTo
         let isLongHeader = space != .applicationData
         let packetNumber = self.protector.getPacketNumber(for: space)
         let largestAcknowledged = self.recovery.spaces[Int(space.rawValue)].largestAcknowledged
@@ -242,11 +302,7 @@ extension QUICConnectionCore {
             } else {
                 let spin: UInt8 = self.spinValue ? 0x20 : 0
                 guard writer.uint8(0x40 | spin | self.keyPhaseBit | encodedPacketNumber.headerFieldSize),
-                    writer.bytes(
-                        self.peerConnectionID.connectionIDStorage.span.bytes.extracting(
-                            0..<self.peerConnectionID.length
-                        )
-                    )
+                    writer.bytes(destination.connectionIDStorage.span.bytes.extracting(0..<destination.length))
                 else {
                     return nil
                 }
@@ -258,8 +314,19 @@ extension QUICConnectionCore {
             let frameLimit = maximumLength &- Self.tagLength
             guard frameLimit > payloadStart else { return nil }
 
+            if let probing {
+                // A probe carries only the path's frames; `sendProbe` pads it.
+                _ = self.writePathFrames(
+                    for: probing,
+                    into: &writer,
+                    limit: frameLimit,
+                    frames: &frames,
+                    isAckEliciting: &isAckEliciting,
+                    now: now
+                )
+            }
             // ACK.
-            if self.acks[space].hasAckToSend {
+            if probing == nil && self.acks[space].hasAckToSend {
                 let ackLength = self.acks[space].ackFrameLength(now: now, ackDelayExponent: 3)
                 // An ACK that isn't due yet stays out when the next datagram needs the room: a
                 // datagram as large as fits a packet would otherwise never go out.
@@ -278,7 +345,7 @@ extension QUICConnectionCore {
 
             let mayExceedCongestionWindow =
                 self.probesPending[Int(space.rawValue)] > 0 || (space == .applicationData && self.keepAlivePending)
-            if !congestionLimited || mayExceedCongestionWindow || space != .applicationData {
+            if probing == nil && (!congestionLimited || mayExceedCongestionWindow || space != .applicationData) {
                 // CRYPTO.
                 while true {
                     let available = frameLimit &- writer.offset &- 1 &- 8 &- 2
@@ -311,12 +378,16 @@ extension QUICConnectionCore {
                 if space == .applicationData && self.handshake.isComplete
                     && (!congestionLimited || mayExceedCongestionWindow)
                 {
-                    self.writeApplicationFrames(
+                    if self.writeApplicationFrames(
                         into: &writer,
                         limit: frameLimit,
                         frames: &frames,
-                        isAckEliciting: &isAckEliciting
-                    )
+                        isAckEliciting: &isAckEliciting,
+                        now: now
+                    ) {
+                        // PATH_CHALLENGE and PATH_RESPONSE need a datagram of 1200 bytes.
+                        padDatagramTo = max(padDatagramTo ?? 0, Self.minimumInitialDatagramSize)
+                    }
                 }
 
                 // A probe must be ack-eliciting.
@@ -372,7 +443,7 @@ extension QUICConnectionCore {
             )
         } else {
             packet = Packet(
-                destinationConnectionID: self.peerConnectionID,
+                destinationConnectionID: destination,
                 headerLength: UInt16(headerLength),
                 spin: self.spinValue
             )
@@ -422,12 +493,15 @@ extension QUICConnectionCore {
         return true
     }
 
+    /// Writes the 1-RTT frames due. Returns whether PATH_CHALLENGE or PATH_RESPONSE was among
+    /// them.
     private mutating func writeApplicationFrames(
         into writer: inout CoreWriter,
         limit: Int,
         frames: inout [CoreSentFrame],
-        isAckEliciting: inout Bool
-    ) {
+        isAckEliciting: inout Bool,
+        now: NetworkClock.Instant
+    ) -> Bool {
         #if DEBUG
         while let frame = self.injectedFrames.first, writer.offset &+ frame.count <= limit {
             _ = writer.bytes(frame.span.bytes)
@@ -449,11 +523,18 @@ extension QUICConnectionCore {
             frames.append(.handshakeDone)
             isAckEliciting = true
         }
-        while let data = self.pendingPathResponses.first, writer.remaining >= 9 && writer.offset &+ 9 <= limit {
-            _ = writer.uint8(0x1b)
-            _ = writer.uint64(data)
-            self.pendingPathResponses.removeFirst()
-            frames.append(.pathResponse)
+        let wrotePathFrames = self.writePathFrames(
+            for: self.activePath,
+            into: &writer,
+            limit: limit,
+            frames: &frames,
+            isAckEliciting: &isAckEliciting,
+            now: now
+        )
+        if self.pingPending && writer.offset < limit {
+            _ = writer.uint8(0x01)
+            self.pingPending = false
+            frames.append(.ping)
             isAckEliciting = true
         }
         if self.maxDataPending && writer.offset &+ 9 <= limit {
@@ -514,6 +595,7 @@ extension QUICConnectionCore {
         for id in deferred {
             self.streams.enqueueForSending(id)
         }
+        return wrotePathFrames
     }
 
     /// Writes queued DATAGRAM frames, oldest first, as long as they fit. One that can never fit

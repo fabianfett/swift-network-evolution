@@ -234,14 +234,19 @@ extension QUICConnection {
             if !path.isRouteEstablished {
                 path.changeState(to: .routeEstablished)
             }
-            if isServer, path != currentPath, !path.isValidated {
+            // The core validates a path once a packet arrives on it.
+            if isServer, path != currentPath, !path.isValidated, !self.usesCore {
                 path.beginValidation(in: &eventContext)
                 sendFrames(on: path, in: &eventContext)
                 migration.resetTimer(now: self.now, connection: self, in: &eventContext)
             }
             break
         case .unavailable:
-            retireOutboundCID(forPathGoingAway: path)
+            if self.usesCore {
+                self.coreForgetPath(path)
+            } else {
+                retireOutboundCID(forPathGoingAway: path)
+            }
             path.changeState(to: .routeUnavailable)
             break
         }
@@ -251,6 +256,7 @@ extension QUICConnection {
                 guard var path = multiplexingPaths[id], path.state == .routeUnavailable, path !== currentPath else {
                     return
                 }
+                self.coreForgetPath(path)
                 path.destroy(in: &eventContext)
                 multiplexingPaths.removeValue(forKey: id)
             }
@@ -284,6 +290,10 @@ extension QUICConnection {
 
         // This is a new primary path. Migrate to it if we are the client.
         if !isServer, path != currentPath, isPrimary, path.isRouteEstablished {
+            if self.usesCore {
+                self.coreMigrate(to: path, in: &eventContext)
+                return
+            }
             migration.migrate(to: path, connection: self, in: &eventContext)
             // Send packets if necessary
             sendFrames(on: path, in: &eventContext)

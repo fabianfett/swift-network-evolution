@@ -207,6 +207,9 @@ extension QUICConnection {
             now: self.now
         )
         self.coreBox = QUICConnectionCoreBox(core)
+        if let currentPath = self.currentPath {
+            self.corePathIDs = [currentPath.pathIdentifier: .initial]
+        }
         if self.keepaliveDuration != .zero {
             self.coreBox?.core.setKeepAliveInterval(self.keepaliveDuration, now: self.now)
         }
@@ -309,6 +312,7 @@ extension QUICConnection {
             now: self.now
         )
         self.coreBox = QUICConnectionCoreBox(core)
+        self.corePathIDs = [path.pathIdentifier: .initial]
         if self.keepaliveDuration != .zero {
             self.coreBox?.core.setKeepAliveInterval(self.keepaliveDuration, now: self.now)
         }
@@ -353,8 +357,9 @@ extension QUICConnection {
                     }
                 }
                 if let box = self.coreBox {
+                    let corePath = self.corePathID(for: path)
                     _ = frame.withUnclaimedMutableSpan { span in
-                        box.core.receive(&span, now: now)
+                        box.core.receive(&span, on: corePath, now: now)
                     }
                 }
                 frame.finalize(success: true)
@@ -466,6 +471,20 @@ extension QUICConnection {
                     event: .init(quicEvent: .retiredOutboundConnectionID(connectionID, statelessResetToken: token)),
                     in: &eventContext
                 )
+            case .pathValidated(let id):
+                guard let path = self.coreQUICPath(for: id) else { continue }
+                self.coreSynchronizePath(path, id, in: &eventContext)
+                if let pathInfo = Self.corePathInfo(path) {
+                    self.deliverNetworkProtocolEvent(
+                        flow: .allFlows,
+                        event: .init(quicEvent: .pathValidated(pathInfo)),
+                        in: &eventContext
+                    )
+                }
+            case .pathFailed(let id):
+                self.log.error("Validating \(id) failed")
+            case .activePathChanged(let id):
+                self.coreActivePathChanged(to: id, in: &eventContext)
             case .closed(let reason):
                 self.coreReportClose(reason, in: &eventContext)
                 self.coreFinish(in: &eventContext)
@@ -486,8 +505,16 @@ extension QUICConnection {
         let datagramSize = max(path.mss, Constants.initialMSS)
         var totalBytes = 0
         var totalPackets = 0
+        var probesBlocked = false
         let now = self.now
         while true {
+            if !probesBlocked, let probePath = box.core.pathWithProbeToSend {
+                // PATH_CHALLENGE and PATH_RESPONSE for another path go first.
+                if !self.coreSendProbe(on: probePath, in: &eventContext) {
+                    probesBlocked = true
+                }
+                continue
+            }
             guard
                 var datagrams = try? self.getDatagramsToSend(
                     path: path.pathIdentifier,
@@ -500,9 +527,10 @@ extension QUICConnection {
                 // `handleOutboundRoomAvailableEvent` sends again.
                 break
             }
+            let activePath = box.core.activePathID
             let written =
                 datagram.withUnclaimedMutableSpan { span in
-                    box.core.send(into: &span, now: now)
+                    box.core.send(into: &span, on: activePath, now: now)
                 } ?? nil
             guard let written, written > 0, datagram.collapse(to: written) else {
                 datagram.finalize(success: false)
@@ -521,6 +549,141 @@ extension QUICConnection {
             connectionStatistics: &self.stats
         )
         path.serviceLowerSendQueue(in: &eventContext)
+    }
+
+    /// Sends one probe on a path other than the current one. Returns `false` if it can't go out.
+    private func coreSendProbe(on id: CorePathID, in eventContext: inout NetworkContext.EventContext) -> Bool {
+        guard let box = self.coreBox, var path = self.coreQUICPath(for: id) else {
+            // A path the framework doesn't have any more.
+            self.coreBox?.core.forgetPath(id)
+            return self.coreBox != nil
+        }
+        guard
+            var datagrams = try? self.getDatagramsToSend(
+                path: path.pathIdentifier,
+                maximumDatagramCount: 1,
+                minimumDatagramSize: Constants.initialMSS,
+                in: &eventContext
+            ),
+            var datagram = datagrams.popFirst()
+        else {
+            return false
+        }
+        let now = self.now
+        let written =
+            datagram.withUnclaimedMutableSpan { span in
+                box.core.send(into: &span, on: id, now: now)
+            } ?? nil
+        guard let written, written > 0, datagram.collapse(to: written) else {
+            datagram.finalize(success: false)
+            return false
+        }
+        self.coreSynchronizePath(path, id, in: &eventContext)
+        QUICSignpost.outbound(id: self.signpostID, length: written)
+        path.enqueueOutboundDatagram(datagram)
+        self.recordTxPackets(
+            totalTxBytes: written,
+            totalPackets: 1,
+            pathStatistics: &path.pathStatistics,
+            connectionStatistics: &self.stats
+        )
+        path.serviceLowerSendQueue(in: &eventContext)
+        return true
+    }
+
+    // MARK: Paths
+
+    /// The core's name for `path`, which a path gets when the core first hears of it.
+    func corePathID(for path: QUICPath) -> CorePathID {
+        if let id = self.corePathIDs[path.pathIdentifier] { return id }
+        let id = CorePathID(self.coreNextPathID)
+        self.coreNextPathID &+= 1
+        self.corePathIDs[path.pathIdentifier] = id
+        return id
+    }
+
+    private func coreQUICPath(for id: CorePathID) -> QUICPath? {
+        guard let pathIdentifier = self.corePathIDs.first(where: { $0.value == id })?.key else { return nil }
+        return self.multiplexingPaths[pathIdentifier]
+    }
+
+    private static func corePathInfo(_ path: QUICPath) -> QUICPathInfo? {
+        guard let localEndpoint = path.localEndpoint, let remoteEndpoint = path.remoteEndpoint,
+            case .address(let localAddress) = localEndpoint.type,
+            case .address(let remoteAddress) = remoteEndpoint.type
+        else {
+            return nil
+        }
+        return QUICPathInfo(isValidated: path.isValidated, remote: remoteAddress, local: localAddress)
+    }
+
+    /// Mirrors the core's connection ID and validation of a path to the `QUICPath`, whose state
+    /// the framework reads.
+    private func coreSynchronizePath(
+        _ path: QUICPath,
+        _ id: CorePathID,
+        in eventContext: inout NetworkContext.EventContext
+    ) {
+        guard let box = self.coreBox else { return }
+        if let connectionID = box.core.peerConnectionID(on: id), connectionID != path.dcid {
+            path.assignDCID(connectionID, in: &eventContext)
+        }
+        if path.state == .cidAssigned {
+            path.changeState(to: .probing)
+        }
+        if box.core.isPathValidated(id) && path.state == .probing {
+            path.changeState(to: .validated)
+        }
+    }
+
+    /// The client moves to the path the system prefers (RFC 9000 Section 9).
+    func coreMigrate(to path: QUICPath, in eventContext: inout NetworkContext.EventContext) {
+        guard let box = self.coreBox else { return }
+        let id = self.corePathID(for: path)
+        guard box.core.migrate(to: id, now: self.now) else {
+            self.log.error("Cannot migrate to path \(path.pathIdentifier)")
+            return
+        }
+        self.log.notice("Migrating to path \(path.pathIdentifier)")
+        self.coreAfterUpdate(in: &eventContext)
+    }
+
+    /// Lets the core know a path is gone.
+    func coreForgetPath(_ path: QUICPath) {
+        guard self.usesCore, let id = self.corePathIDs[path.pathIdentifier], id != self.coreBox?.core.activePathID
+        else {
+            return
+        }
+        self.coreBox?.core.forgetPath(id)
+        self.corePathIDs.removeValue(forKey: path.pathIdentifier)
+    }
+
+    /// The core sends on another path now; the one it left is torn down.
+    private func coreActivePathChanged(to id: CorePathID, in eventContext: inout NetworkContext.EventContext) {
+        guard let path = self.coreQUICPath(for: id) else {
+            self.log.fault("The core moved to \(id), which has no path")
+            return
+        }
+        let oldPath = self.currentPath
+        self.log.notice("Migrated to path \(path.pathIdentifier)")
+        self.currentPath = path
+        self.coreSynchronizePath(path, id, in: &eventContext)
+        path.spinValue = self.initialSpinValue
+        if let pathInfo = Self.corePathInfo(path) {
+            self.deliverNetworkProtocolEvent(
+                flow: .allFlows,
+                event: .init(quicEvent: .pathCurrent(pathInfo)),
+                in: &eventContext
+            )
+        }
+        guard var oldPath, oldPath != path else { return }
+        self.log.notice("Tearing down old path \(oldPath.pathIdentifier) after migration")
+        self.coreForgetPath(oldPath)
+        if oldPath.state.isValidStateChange(to: .routeUnavailable) {
+            oldPath.changeState(to: .routeUnavailable)
+        }
+        oldPath.destroy(in: &eventContext)
+        self.multiplexingPaths.removeValue(forKey: oldPath.pathIdentifier)
     }
 
     /// The statistics the core keeps; `QUICConnection` counts datagrams and flows itself.
@@ -727,6 +890,7 @@ extension QUICConnection {
         self.coreTimerID = nil
         self.coreBox = nil
         self.currentPath = nil
+        self.corePathIDs.removeAll()
     }
 
     /// Acts on what the application asks for, from `handleApplicationEvent`.
