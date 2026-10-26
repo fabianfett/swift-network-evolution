@@ -16,12 +16,12 @@
 
 #if !NETWORK_NO_SWIFT_QUIC
 
-/// The protocol state of one QUIC stream: send and receive buffers, flow control, and flags.
+/// The protocol state of one QUIC stream: send and receive states, error codes, and flags.
 @available(Network 0.1.0, *)
 struct QUICStreamProtocolState: ~Copyable {
     // Field ordering is important because it makes sure we are not taking extra hits for padding:
-    // the one byte and two byte fields fill the tail of `send`, so the stream instance stays within
-    // a 512 byte allocation.
+    // the small fields go after the 8 byte ones, so the stream instance stays within a 256 byte
+    // allocation.
 
     // Using optional values here throws the padding off so use .max and vend back optional values
     private var finalSizeStorage: UInt64 = .max
@@ -30,12 +30,7 @@ struct QUICStreamProtocolState: ~Copyable {
     // QUICStreamID.maxValid is 2^62-1 and will reject anything above it so we use this to denote nil
     private var streamIDStorage: UInt64 = .max
 
-    var flowControlState = FlowControlState(isStream: true)
-    var flowControlStreamState = FlowControlStreamState()
-
     var send = QUICSendState()
-
-    var listMembership: StreamListMembership = .none
 
     struct Flags: OptionSet {
         init(rawValue: Self.RawValue) {

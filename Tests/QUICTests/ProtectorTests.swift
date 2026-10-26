@@ -42,6 +42,31 @@ import CryptoKit
 import Crypto
 #endif
 
+// `Protector` seals and opens packets in place in a span. The test vectors come as `Frame`s.
+@available(Network 0.1.0, *)
+extension Protector {
+    fileprivate mutating func seal(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+        guard var buffer = frame.mutableSpan else {
+            throw QUICError.protector(SecFramerError.sealingFailed)
+        }
+        try self.seal(&packet, buffer: &buffer)
+    }
+
+    fileprivate func openHeader(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+        guard var buffer = frame.mutableSpan else {
+            throw QUICError.protector(SecFramerError.openFailed)
+        }
+        try self.openHeader(&packet, buffer: &buffer)
+    }
+
+    fileprivate func open(_ packet: inout Packet, frame: inout Frame) throws(QUICError) {
+        guard var buffer = frame.mutableSpan else {
+            throw QUICError.protector(SecFramerError.openFailed)
+        }
+        try self.open(&packet, buffer: &buffer)
+    }
+}
+
 @available(Network 0.1.0, *)
 extension InlineArray where Element: Equatable {
     fileprivate func equalTo(_ rhs: Self) -> Bool {

@@ -172,7 +172,7 @@ extension QUICConnection {
         }
         configuration.maxDatagramSize = self.initialMSS
         configuration.initialDatagramSize = self.initialMSS
-        // As `PMTUDState.start`: the interface's MTU, else the path's.
+        // PMTUD is capped by the interface's MTU, else the path's.
         let interfaceMTU = self.currentPath?.interface?.mtu ?? 0
         configuration.interfaceMTU = interfaceMTU != 0 ? interfaceMTU : self.pathPropertiesMTU
         configuration.ipUDPHeaderSize =

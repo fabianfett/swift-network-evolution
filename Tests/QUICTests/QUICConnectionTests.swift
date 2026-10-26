@@ -41,8 +41,8 @@ final class QUICConnectionTests: XCTestCase {
     }
 
     /// A call nested inside a pinned scope must leave the outer readings in place; otherwise the
-    /// pin is gone when the nested call returns, `getSendTime` reads the two clocks separately,
-    /// and `Pacer` derives the offset between the clock domains from a mismatched pair.
+    /// pin is gone when the nested call returns, and paced departure times derive the offset
+    /// between the clock domains from a mismatched pair.
     func testANestedCallLeavesTheOuterReadingsInPlace() {
         connection.context.onQueue {
             self.connection.withPinnedClock {

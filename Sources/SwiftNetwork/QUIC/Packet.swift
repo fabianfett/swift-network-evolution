@@ -34,83 +34,6 @@ internal import os
 #endif
 
 @available(Network 0.1.0, *)
-struct SentPacketRecord: ~Copyable {
-    var transmittedItems: TransmittedItems = TransmittedItems()
-
-    var number: PacketNumber {
-        identifier.number
-    }
-    var numberSpace: PacketNumberSpace {
-        identifier.space
-    }
-
-    var ecn: IPProtocol.ECN = .nonECT
-    var ectMarked: Bool {
-        (ecn == .ect0 || ecn == .ect1)
-    }
-    var totalLength = 0
-    var sentPath: MultiplexingPathIdentifier = .none
-    var identifier: PacketIdentifier = .init(space: .initial, number: 0)
-
-    struct Flags: OptionSet {
-        init(rawValue: Self.RawValue) {
-            self.rawValue = rawValue
-        }
-        var rawValue: UInt8
-        static let isAckEliciting = Flags(rawValue: 1 << 0)
-        static let isInFlightEligible = Flags(rawValue: 1 << 1)
-        static let largerPacket = Flags(rawValue: 1 << 2)
-        static let isECNValidationPacket = Flags(rawValue: 1 << 3)
-    }
-    private var flags = Flags()
-    var isAckEliciting: Bool {
-        get { flags.contains(.isAckEliciting) }
-        set {
-            if newValue {
-                flags.insert(.isAckEliciting)
-            } else {
-                flags.remove(.isAckEliciting)
-            }
-        }
-    }
-    var isInFlightEligible: Bool {
-        get { flags.contains(.isInFlightEligible) }
-        set {
-            if newValue {
-                flags.insert(.isInFlightEligible)
-            } else {
-                flags.remove(.isInFlightEligible)
-            }
-        }
-    }
-    var largerPacket: Bool {
-        get { flags.contains(.largerPacket) }
-        set {
-            if newValue {
-                flags.insert(.largerPacket)
-            } else {
-                flags.remove(.largerPacket)
-            }
-        }
-    }
-    var isECNValidationPacket: Bool {
-        get { flags.contains(.isECNValidationPacket) }
-        set {
-            if newValue {
-                flags.insert(.isECNValidationPacket)
-            } else {
-                flags.remove(.isECNValidationPacket)
-            }
-        }
-    }
-
-    mutating func inheritFrom(packet: borrowing Packet) {
-        self.identifier = packet.identifier
-        self.totalLength = packet.totalLength
-    }
-}
-
-@available(Network 0.1.0, *)
 struct Packet: ~Copyable {
     static let longHeaderBaseSize = 5
     static let shortHeaderBaseSize = 1
@@ -173,9 +96,6 @@ struct Packet: ~Copyable {
     var numberSpace: PacketNumberSpace {
         identifier.space
     }
-
-    // Temporary storage used for logging, only set when datapath logs or QLog is enabled
-    var shorthandFrames: [QUICShorthandFrame]?
 
     private(set) var token: [UInt8]?
     var tokenLength: Int {

@@ -63,37 +63,5 @@ public final class QUICDatagramFlow: MultiplexedDatagramFlow<QUICConnection, Bas
         }
         return (associatedStreamID / 4)
     }
-
-    func updateUsableDatagramFrameSize(
-        connection: QUICConnection,
-        path: QUICPath
-    ) {
-        guard let dcid = path.dcid else { return }
-        let shortHeaderUnusablePayloadSize =
-            (Int(connection.protector.getTagSize(for: connection.keyState)) + Packet.shortHeaderBaseSize
-                + dcid.length + 4)
-        var usableUDPPayloadSize = min(connection.remoteMaximumUDPPayloadSize, path.mss)
-        guard usableUDPPayloadSize > shortHeaderUnusablePayloadSize else { return }
-        usableUDPPayloadSize -= shortHeaderUnusablePayloadSize
-
-        let maximumDatagramFrameHeaderSize =
-            FrameType.datagram().rawValue.variableLengthSize
-            + usableUDPPayloadSize.variableLengthSize
-        var usableDatagramFrameSize = min(
-            connection.remoteMaxDatagramFrameSize,
-            usableUDPPayloadSize
-        )
-        guard usableDatagramFrameSize > maximumDatagramFrameHeaderSize else { return }
-        usableDatagramFrameSize -= maximumDatagramFrameHeaderSize
-
-        if let flowID {
-            let encodedFlowIDLength = flowID.variableLengthSize
-            guard usableDatagramFrameSize > encodedFlowIDLength else { return }
-            usableDatagramFrameSize -= encodedFlowIDLength
-        }
-
-        self.usableDatagramSize = usableDatagramFrameSize
-        log.debug("Usable datagram frame size set to \(usableDatagramFrameSize)")
-    }
 }
 #endif

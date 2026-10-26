@@ -112,21 +112,6 @@ enum QUICPathState: CustomStringConvertible, CaseIterable {
     }
 }
 
-@available(Network 0.1.0, *)
-struct PendingChallenge {
-    let data = UInt64.random(in: 0..<UInt64.max)
-
-    // Time filled in when challenge actually sent
-    let sentTime: NetworkClock.Instant
-}
-
-@available(Network 0.1.0, *)
-struct BandwidthDelayProduct {
-    var currentBDP: Int = 0
-    var count: Int = 0
-    var timestamp: NetworkClock.Instant = .zero
-}
-
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
 public final class QUICPath: MultiplexingDatagramPath<
@@ -134,12 +119,6 @@ public final class QUICPath: MultiplexingDatagramPath<
     BaseOutboundDatagramLinkage
 >, Equatable, PrefixedLoggable
 {
-    // Initial probe interval for resending PATH_CHALLENGE is 250 ms
-    // Further probes will follow exponential backoff.
-    static let initialProbeInterval: NetworkDuration = .milliseconds(250)
-
-    static let slowInitialProbeInterval: NetworkDuration = .seconds(1)
-
     /// The path's protocol state; the class adds the framework path around it.
     var protocolState: QUICPathProtocolState
 
@@ -166,53 +145,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         set { protocolState.scid = newValue }
     }
 
-    var pendingInboundChallenges: [UInt64] {  // Received challenges requiring a response
-        get { protocolState.pendingInboundChallenges }
-        _modify { yield &protocolState.pendingInboundChallenges }
-    }
-
-    var pendingOutboundChallenges: [PendingChallenge] {  // Sent challenges waiting for a response
-        get { protocolState.pendingOutboundChallenges }
-        _modify { yield &protocolState.pendingOutboundChallenges }
-    }
-    static let maximumPendingChallenges: Int = 6
-    private(set) var challengesSent: Int {
-        get { protocolState.challengesSent }
-        set { protocolState.challengesSent = newValue }
-    }
-    private(set) var lastChallengeSentTime: NetworkClock.Instant {
-        get { protocolState.lastChallengeSentTime }
-        set { protocolState.lastChallengeSentTime = newValue }
-    }
-    private(set) var nextChallengeDuration: NetworkDuration {
-        get { protocolState.nextChallengeDuration }
-        set { protocolState.nextChallengeDuration = newValue }
-    }
-
-    // RTT, congestion control and pacer are kept out of `protocolState`: congestion control reads
-    // the RTT and the pacer of the path it is mutated on.
-    var rtt: RTT
-
-    var bdp: BandwidthDelayProduct {
-        get { protocolState.bdp }
-        _modify { yield &protocolState.bdp }
-    }
-
-    private var congestionControl: CongestionControl
-
-    var pacer: Pacer
-
-    // Kept out of `protocolState`: PMTUD sends its probes through the connection, which reads the
-    // rest of the path while the PMTUD state is being mutated.
-    var pmtudState = PMTUDState()
-    var recoveryState: Recovery.PathState {
-        _read { yield protocolState.recoveryState }
-        _modify { yield &protocolState.recoveryState }
-    }
-    var ecnState: ECNPathState? {
-        _read { yield protocolState.ecnState }
-        _modify { yield &protocolState.ecnState }
-    }
     var pathStatistics: Statistics {
         _read { yield protocolState.pathStatistics }
         _modify { yield &protocolState.pathStatistics }
@@ -240,10 +172,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         set { protocolState.flags = newValue }
     }
 
-    var pacePackets: Bool {
-        get { flags.contains(.pacePackets) }
-        set { if newValue { flags.insert(.pacePackets) } else { flags.remove(.pacePackets) } }
-    }
     var isInitialPath: Bool {
         get { flags.contains(.isInitialPath) }
         set { if newValue { flags.insert(.isInitialPath) } else { flags.remove(.isInitialPath) } }
@@ -256,35 +184,14 @@ public final class QUICPath: MultiplexingDatagramPath<
         get { flags.contains(.spinValue) }
         set { if newValue { flags.insert(.spinValue) } else { flags.remove(.spinValue) } }
     }
-    var useSlowProbeInterval: Bool {
-        get { flags.contains(.useSlowProbeInterval) }
-        set { if newValue { flags.insert(.useSlowProbeInterval) } else { flags.remove(.useSlowProbeInterval) } }
-    }
     var isPreferredAddress: Bool {
         get { flags.contains(.isPreferredAddress) }
         set { if newValue { flags.insert(.isPreferredAddress) } else { flags.remove(.isPreferredAddress) } }
     }
 
-    // Pending validation, should migrate once validated
-    var migrationPending: Bool {
-        get { flags.contains(.migrationPending) }
-        set { if newValue { flags.insert(.migrationPending) } else { flags.remove(.migrationPending) } }
-    }
-    var isLossy: Bool {
-        get { flags.contains(.isLossy) }
-        set { if newValue { flags.insert(.isLossy) } else { flags.remove(.isLossy) } }
-    }
     var hasPreAssignedCIDs: Bool {
         get { flags.contains(.hasPreAssignedCIDs) }
         set { if newValue { flags.insert(.hasPreAssignedCIDs) } else { flags.remove(.hasPreAssignedCIDs) } }
-    }
-    var isFlowControlled: Bool {
-        get { flags.contains(.isFlowControlled) }
-        set { if newValue { flags.insert(.isFlowControlled) } else { flags.remove(.isFlowControlled) } }
-    }
-    var l4sEnabled: Bool {
-        get { flags.contains(.l4sEnabled) }
-        set { if newValue { flags.insert(.l4sEnabled) } else { flags.remove(.l4sEnabled) } }
     }
     var reportedIdleEvent: Bool {
         get { flags.contains(.reportedIdleEvent) }
@@ -311,16 +218,6 @@ public final class QUICPath: MultiplexingDatagramPath<
 
     var isRouteEstablished: Bool { state.isRouteEstablished }
 
-    @_optimize(speed)
-    var smoothedRTT: NetworkDuration {
-        rtt.smoothedRTT
-    }
-
-    func withECNState(_ block: (inout ECNPathState) -> Void) {
-        guard ecnState != nil else { return }
-        block(&self.ecnState!)
-    }
-
     func changeState(to newState: QUICPathState) {
         guard state.isValidStateChange(to: newState) else {
             log.fault("Invalid path transition: \(state) -> \(newState)")
@@ -342,11 +239,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         if isInitial {
             // initial paths start with fully established routes
             self.state = .routeEstablished
-        } else {
-            parentProtocol.withCurrentPath {
-                // Copy over remote max ack delay from current path
-                self.rtt.remoteMaxAckDelay = $0.rtt.remoteMaxAckDelay
-            }
         }
         self.setup()
 
@@ -386,33 +278,15 @@ public final class QUICPath: MultiplexingDatagramPath<
 
     required init(parent: QUICConnection, in eventContext: inout NetworkContext.EventContext) {
         self.protocolState = QUICPathProtocolState()
-        self.rtt = RTT(logPrefixer: parent.logPrefixer)
-        self.pacer = Pacer()
-        // Overwritten with the real mss/qlog once `setup()` runs; RX/TX aren't allowed on a
-        // path until then, so this placeholder is never observed.
-        var congestionControlState = CongestionControlState()
-        let cubic = Cubic(
-            state: &congestionControlState,
-            pacer: &self.pacer,
-            mss: 0,
-            qlog: nil,
-            logPrefixer: parent.logPrefixer
-        )
-        self.congestionControl = CongestionControl(state: congestionControlState, algorithm: .cubic(algorithm: cubic))
         super.init(parent: parent, in: &eventContext)
-    }
-
-    deinit {
-        // Ensure PMTUD timers are removed
-        pmtudState.stop(on: self)
     }
 
     private func setup() {
         self.initialMSS = parentProtocol.initialMSS
         self.maximumMSS =
-            PMTUDState.maximumMTU - (IPProtocol.ipv6HeaderLength + UDPProtocol.headerLength)
+            CorePMTUD.maximumMTU - (IPProtocol.ipv6HeaderLength + UDPProtocol.headerLength)
         self.minimumMSS =
-            PMTUDState.minimumMTU - (IPProtocol.ipv6HeaderLength + UDPProtocol.headerLength)
+            CorePMTUD.minimumMTU - (IPProtocol.ipv6HeaderLength + UDPProtocol.headerLength)
 
         self.mss = parentProtocol.initialMSS
         if !self.isInitialPath, let interface {
@@ -428,20 +302,6 @@ public final class QUICPath: MultiplexingDatagramPath<
                 }
             }
         }
-
-        self.ecnState = ECNPathState(ecn: parentProtocol.ecn)
-
-        let pacerEnabled = (pacePackets || QUICPreferences.shared.pacePackets)
-        self.pacer = Pacer(enabled: pacerEnabled)
-        var congestionControlState = CongestionControlState()
-        let cubic = Cubic(
-            state: &congestionControlState,
-            pacer: &self.pacer,
-            mss: self.initialMSS,
-            qlog: parentProtocol.qLog,
-            logPrefixer: self.log
-        )
-        self.congestionControl = CongestionControl(state: congestionControlState, algorithm: .cubic(algorithm: cubic))
 
         self.spinValue = parentProtocol.initialSpinValue
     }
@@ -479,468 +339,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         )
     }
 
-    func updateBDP(length: Int, now: NetworkClock.Instant) {
-        if bdp.timestamp == .zero {
-            bdp.timestamp = now
-        }
-
-        if now >= bdp.timestamp + rtt.smoothedRTT {
-            bdp.count += length
-            bdp.currentBDP = bdp.count
-
-            // Reset the measurement
-            bdp.count = 0
-            bdp.timestamp = .zero
-        } else {
-            bdp.count += length
-        }
-    }
-
-    func resetPacer() {
-        pacer.reset()
-    }
-
-    func resetCongestionControl() {
-        switch self.congestionControl.algorithm {
-        case .cubic:
-            var congestionControlState = CongestionControlState()
-            let cubic = Cubic(
-                state: &congestionControlState,
-                pacer: &self.pacer,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog,
-                logPrefixer: self.log
-            )
-            self.congestionControl = CongestionControl(
-                state: congestionControlState,
-                algorithm: .cubic(algorithm: cubic)
-            )
-        #if !NETWORK_EMBEDDED
-        case .ledbat:
-            var congestionControlState = CongestionControlState()
-            let ledbat = Ledbat(
-                state: &congestionControlState,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog,
-                logPrefixer: self.log
-            )
-            self.congestionControl = CongestionControl(
-                state: congestionControlState,
-                algorithm: .ledbat(algorithm: ledbat)
-            )
-        case .prague:
-            var congestionControlState = CongestionControlState()
-            let prague = Prague(
-                state: &congestionControlState,
-                pacer: &self.pacer,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog,
-                logPrefixer: self.log
-            )
-            self.congestionControl = CongestionControl(
-                state: congestionControlState,
-                algorithm: .prague(algorithm: prague)
-            )
-        #endif
-        }
-    }
-
-    func idleTimeoutCongestionControl() {
-        self.congestionControl.idleTimeout(mss: mss)
-    }
-
-    func setupL4SState(l4sEnabled: Bool?) {
-        guard let l4sEnabled else {
-            return
-        }
-        // Account for Developer / Carrier settings
-        self.l4sEnabled = l4sEnabled
-        if l4sEnabled {
-            // Setup the pacer. Prague always has pacing enabled
-            pacer = Pacer(enabled: true)
-            // Add Prague congestion control for L4S
-            self.resetPacer()
-            resetCongestionControl()
-        }
-    }
-
-    func markAsBackground(_ background: Bool) {
-        #if !NETWORK_EMBEDDED
-        // Use LEDBAT for background cases
-        switch self.congestionControl.algorithm {
-        case .cubic:
-            if !background { return }  // Nothing to do, already not background
-            let oldState = self.congestionControl.state
-            var newState = CongestionControlState()
-            var ledbat = Ledbat(
-                state: &newState,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog,
-                logPrefixer: self.log
-            )
-            ledbat.inherit(
-                from: oldState,
-                state: &newState,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog
-            )
-            self.congestionControl = CongestionControl(
-                state: newState,
-                algorithm: .ledbat(algorithm: ledbat)
-            )
-        case .ledbat:
-            if background { return }  // Nothing to do, already background
-            // Inherit from the current LEDBAT so bytes in flight (and the window) carry over.
-            let oldState = self.congestionControl.state
-            var newState = CongestionControlState()
-            var cubic = Cubic(
-                state: &newState,
-                pacer: &self.pacer,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog,
-                logPrefixer: self.log
-            )
-            cubic.inherit(
-                from: oldState,
-                state: &newState,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog
-            )
-            self.congestionControl = CongestionControl(
-                state: newState,
-                algorithm: .cubic(algorithm: cubic)
-            )
-        case .prague:
-            if !background { return }  // Nothing to do, already not background
-            let oldState = self.congestionControl.state
-            var newState = CongestionControlState()
-            var ledbat = Ledbat(
-                state: &newState,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog,
-                logPrefixer: self.log
-            )
-            ledbat.inherit(
-                from: oldState,
-                state: &newState,
-                mss: self.initialMSS,
-                qlog: parentProtocol.qLog
-            )
-            self.congestionControl = CongestionControl(
-                state: newState,
-                algorithm: .ledbat(algorithm: ledbat)
-            )
-        }
-        #endif
-    }
-
-    func handlePathChallenge(_ challenge: UInt64, in eventContext: inout NetworkContext.EventContext) {
-        log.debug("Path challenge received: \(challenge)")
-
-        // Save the challenge, to schedule a response
-        pendingInboundChallenges.append(challenge)
-
-        // Initiate probing if needed
-        beginValidation(in: &eventContext)
-    }
-
-    func beginValidation(ifNecessary: Bool = true, in eventContext: inout NetworkContext.EventContext) {
-        if case .routeEstablished = state {
-            // The route is established, but needs CID allocation
-            guard parentProtocol.assignNewDCID(to: self, in: &eventContext) else {
-                log.error("Failed to assign remote CID to path")
-                return
-            }
-        }
-
-        // Allowed to start probing in CID-Assigned (or Validated state if required)
-        if state == .cidAssigned || (!ifNecessary && state == .validated) {
-            // The path has a CID assigned. Time to start probing.
-            changeState(to: .probing)
-            pendingOutboundChallenges.removeAll()
-            challengesSent = 0
-            lastChallengeSentTime = .zero
-            nextChallengeDuration = .zero
-        }
-    }
-
-    var shouldSendPathResponses: Bool {
-        !pendingInboundChallenges.isEmpty
-    }
-
-    func shouldSendPathChallenge(now: NetworkClock.Instant) -> Bool {
-        guard case .probing = state else {
-            return false
-        }
-        if challengesSent == 0 {
-            // Still need to send first challenge
-            return true
-        }
-        return now >= lastChallengeSentTime + nextChallengeDuration
-    }
-
-    var nextChallengeTime: NetworkClock.Instant? {
-        guard case .probing = state else {
-            return nil
-        }
-        if challengesSent == 0 {
-            // Still need to send first challenge
-            return nil
-        }
-        return lastChallengeSentTime + nextChallengeDuration
-    }
-
-    func hasPendingItems(now: NetworkClock.Instant) -> Bool {
-        shouldSendPathResponses || shouldSendPathChallenge(now: now)
-    }
-
-    func addPathChallenge(
-        to pendingItems: inout PendingItems,
-        now: NetworkClock.Instant,
-        in eventContext: inout NetworkContext.EventContext
-    ) {
-        guard shouldSendPathChallenge(now: now) else { return }
-
-        guard challengesSent < QUICPath.maximumPendingChallenges else {
-            // Exceeded limit, move to unreachable, and retire the CID
-            changeState(to: .unreachable)
-            if let dcid, !hasPreAssignedCIDs {
-                if let sequenceNumber = parentProtocol.retireConnectionID(dcid, in: &eventContext) {
-                    pendingItems.addRetireConnectionID(
-                        FrameRetireConnectionID(sequence: sequenceNumber)
-                    )
-                }
-            }
-            if let localEndpoint, let remoteEndpoint,
-                case .address(let localAddress) = localEndpoint.type,
-                case .address(let remoteAddress) = remoteEndpoint.type
-            {
-                let pathInfo = QUICPathInfo(
-                    isValidated: self.isValidated,
-                    remote: remoteAddress,
-                    local: localAddress
-                )
-                parentProtocol.deliverNetworkProtocolEvent(
-                    flow: .allFlows,
-                    event: .init(quicEvent: .pathUnreachable(pathInfo)),
-                    in: &eventContext
-                )
-            }
-            return
-        }
-
-        let challenge = PendingChallenge(sentTime: now)
-        pendingOutboundChallenges.append(challenge)
-        pendingItems.addPathChallenge(FramePathChallenge(data: challenge.data))
-        lastChallengeSentTime = now
-        if useSlowProbeInterval {
-            nextChallengeDuration = QUICPath.slowInitialProbeInterval * (1 << challengesSent)
-        } else {
-            nextChallengeDuration = QUICPath.initialProbeInterval * (1 << challengesSent)
-        }
-        challengesSent += 1
-
-        parentProtocol.migration.resetTimer(now: now, connection: parentProtocol, in: &eventContext)
-    }
-
-    func addPendingItems(
-        _ pendingItems: inout PendingItems,
-        now: NetworkClock.Instant,
-        in eventContext: inout NetworkContext.EventContext
-    ) {
-        // Respond to any pending inbound challenges
-        for challenge in pendingInboundChallenges {
-            pendingItems.addPathResponse(FramePathResponse(data: challenge))
-        }
-        pendingInboundChallenges.removeAll()
-
-        // Send path challenges as needed
-        addPathChallenge(to: &pendingItems, now: now, in: &eventContext)
-    }
-
-    func handlePathChallengeResponse(
-        _ data: UInt64,
-        in eventContext: inout NetworkContext.EventContext
-    ) {
-        guard case .probing = state else { return }
-        guard
-            let pendingOutboundChallenge = pendingOutboundChallenges.first(where: {
-                $0.data == data
-            })
-        else {
-            log.info("Received path response for unknown challenge \(data)")
-            return
-        }
-        log.debug("Valid path challenge response received: \(data)")
-        let now = parentProtocol.now
-        let responseDuration = pendingOutboundChallenge.sentTime.duration(to: now)
-        pendingOutboundChallenges.removeAll()
-        challengesSent = 0
-        lastChallengeSentTime = .zero
-        changeState(to: .validated)
-        // Initialize RTT based on the PATH_RESPONSE duration so that we have a proper RTT estimate when we reset the timers.
-        rtt.processNewSample(ackDuration: responseDuration, packetAckedTime: now, ackDelay: .zero)
-        parentProtocol.migration.resetTimer(now: now, connection: parentProtocol, in: &eventContext)
-        // Notify the stack about the path becoming validated
-        if let localEndpoint, let remoteEndpoint,
-            case .address(let localAddress) = localEndpoint.type,
-            case .address(let remoteAddress) = remoteEndpoint.type
-        {
-            let pathInfo = QUICPathInfo(
-                isValidated: self.isValidated,
-                remote: remoteAddress,
-                local: localAddress
-            )
-            parentProtocol.deliverNetworkProtocolEvent(
-                flow: .allFlows,
-                event: .init(quicEvent: .pathValidated(pathInfo)),
-                in: &eventContext
-            )
-        }
-        if migrationPending {
-            migrationPending = false
-            parentProtocol.migration.migrate(to: self, connection: parentProtocol, in: &eventContext)
-        }
-    }
-
-}
-
-// Congestion Control access
-@available(Network 0.1.0, *)
-extension QUICPath {
-    @inline(always)
-    var congestionControlWindow: UInt64 {
-        congestionControl.congestionWindow
-    }
-
-    @inline(always)
-    var congestionControlAvailableCongestionWindow: UInt64 {
-        congestionControl.availableCongestionWindow
-    }
-
-    @inline(always)
-    func congestionControlCanSend(packetLength: Int) -> Bool {
-        congestionControl.canSend(packetLength: packetLength)
-    }
-
-    @inline(always)
-    func congestionControlPersistentCongestion(mss: Int, qlog: QLog? = nil) {
-        congestionControl.persistentCongestion(mss: mss, qlog: qlog)
-    }
-
-    @inline(always)
-    func congestionControlAckEnd(
-        rtt: borrowing RTT,
-        path: QUICPath?,
-        mss: Int,
-        packetsLost: Bool,
-        qlog: QLog? = nil
-    ) {
-        congestionControl.ackEnd(
-            rtt: rtt,
-            path: self,
-            mss: mss,
-            packetsLost: packetsLost,
-            now: parentProtocol.now,
-            qlog: qlog
-        )
-    }
-
-    @inline(always)
-    func congestionControlPacketsSent(bytesSent: Int, qlog: QLog? = nil) {
-        congestionControl.packetSent(bytesSent: bytesSent, qlog: qlog)
-    }
-
-    @inline(always)
-    func congestionControlPacketsAcked(bytesAcked: Int, sentTime: NetworkClock.Instant) {
-        congestionControl.packetsAcked(bytesAcked: bytesAcked, sentTime: sentTime)
-    }
-
-    @inline(always)
-    func congestionControlPacketsLost(
-        bytesLost: Int,
-        largestLostSentTime: NetworkClock.Instant,
-        mss: Int,
-        smoothedRTT: NetworkDuration
-    ) -> Bool {
-        // Loss accounting doesn't repace this path, so there is no path to hand down.
-        let unpacedPath: QUICPath? = nil
-        return congestionControl.packetsLost(
-            path: unpacedPath,
-            bytesLost: bytesLost,
-            largestLostSentTime: largestLostSentTime,
-            mss: mss,
-            smoothedRTT: smoothedRTT,
-            now: parentProtocol.now
-        )
-    }
-
-    @inline(always)
-    func congestionControlPacketDiscarded(bytesSent: Int, qlog: QLog? = nil) {
-        congestionControl.packetDiscarded(bytesSent: bytesSent, qlog: qlog)
-    }
-
-    @inline(always)
-    func congestionControlAckBegin() {
-        congestionControl.ackBegin()
-    }
-
-    @inline(always)
-    var congestionControlBytesInFlight: UInt64 {
-        congestionControl.bytesInFlight
-    }
-
-    @inline(always)
-    var congestionControlName: String {
-        congestionControl.name
-    }
-
-    @inline(always)
-    func congestionControlSpuriousRetransmit(qlog: QLog? = nil) {
-        congestionControl.spuriousRetransmit(qlog: qlog)
-    }
-
-    @inline(always)
-    func congestionControlMSSChanged(mss: Int) {
-        congestionControl.mssChanged(mss: mss)
-    }
-
-    @inline(always)
-    func congestionControlIdleTimeout(mss: Int) {
-        congestionControl.idleTimeout(mss: mss)
-    }
-
-    @inline(always)
-    func congestionControlProcessECN(
-        ceCount: Int,
-        packetsAcked: Int,
-        largestSentPN: Int64,
-        largestAckedPN: Int64,
-        largestAckedSentTime: NetworkClock.Instant,
-        mss: Int,
-        smoothedRTT: NetworkDuration,
-        qlog: QLog? = nil
-    ) {
-        // ECN accounting doesn't repace this path, so there is no path to hand down.
-        let unpacedPath: QUICPath? = nil
-        congestionControl.processECN(
-            path: unpacedPath,
-            ceCount: ceCount,
-            packetsAcked: packetsAcked,
-            largestSentPN: largestSentPN,
-            largestAckedPN: largestAckedPN,
-            largestAckedSentTime: largestAckedSentTime,
-            mss: mss,
-            smoothedRTT: smoothedRTT,
-            now: parentProtocol.now,
-            qlog: qlog
-        )
-    }
-
-    @inline(always)
-    func congestionControlFilloutDataTransferSnapshot(snapshot: inout DataTransferSnapshot) {
-        congestionControl.filloutDataTransferSnapshot(dataTransferSnapshot: &snapshot)
-    }
 }
 
 #endif

@@ -243,31 +243,11 @@ struct PacketHeader {
     var scid: String = ""
     var dcid: String = ""
 
-    init(packet: borrowing SentPacketRecord) {
-        self.packetNumber = packet.number
-        self.packetSize = UInt64(packet.totalLength)
-        self.payloadLength = 0
-    }
-
     /// The header of a packet `QUICConnectionCore` reported, which only knows its number and size.
     init(packetNumber: UInt64, size: Int) {
         self.packetNumber = PacketNumber(Int64(truncatingIfNeeded: packetNumber))
         self.packetSize = UInt64(max(0, size))
         self.payloadLength = .max
-    }
-
-    init(packet: borrowing Packet) {
-        self.packetNumber = packet.number
-        self.packetSize = UInt64(packet.totalLength)
-        self.payloadLength = UInt64(packet.payloadLength)
-        if let scid = packet.sourceConnectionID {
-            self.scil = scid.length
-            self.scid = scid.description
-        }
-        if let dcid = packet.destinationConnectionID {
-            self.dcil = dcid.length
-            self.dcid = dcid.description
-        }
     }
 
     func dumpData() -> [String: Any] {
@@ -383,122 +363,7 @@ enum Event {
 }
 
 @available(Network 0.1.0, *)
-struct EventFrame {
-    var frame: QUICShorthandFrame
-    // The ack_delay_exponent of the endpoint that sent the frame.
-    var ackDelayExponent: Int
-    init(frame: QUICShorthandFrame, ackDelayExponent: Int) {
-        self.frame = frame
-        self.ackDelayExponent = ackDelayExponent
-    }
-
-    func dumpData() -> [String: Any] {
-        var data: [String: Any] = [:]
-        switch self.frame {
-        case .padding(let frame):
-            data["frame_type"] = "padding"
-            data["payload_length"] = frame.length
-        case .ping(_):
-            data["frame_type"] = "ping"
-        case .ack(let frame):
-            data["frame_type"] = "ack"
-            // RFC 9000 Section 19.3: the ACK Delay field is decoded by multiplying it by 2 to
-            // the power of the sender's ack_delay_exponent.
-            data["ack_delay"] = frame.delay << ackDelayExponent
-            if let ecnCounter = frame.ecnCounter {
-                data["ect0"] = ecnCounter.ect0
-                data["ect1"] = ecnCounter.ect1
-                data["ce"] = ecnCounter.ce
-            }
-            data["acked_ranges"] = frame.buildAckRanges()
-        case .resetStream(let frame):
-            data["frame_type"] = "reset_stream"
-            data["stream_id"] = frame.id
-            data["final_size"] = frame.finalSize
-            data["error_code"] = frame.code
-        case .stopSending(let frame):
-            data["frame_type"] = "stop_sending"
-            data["stream_id"] = frame.id
-            data["error_code"] = frame.code
-        case .crypto(let frame):
-            data["frame_type"] = "crypto"
-            data["offset"] = frame.offset
-            data["length"] = frame.length
-        case .newToken(let frame):
-            data["frame_type"] = "new_token"
-            data["length"] = frame.length
-        case .stream(let frame):
-            data["frame_type"] = "stream"
-            data["offset"] = frame.offset
-            data["stream_id"] = frame.id
-            data["length"] = frame.length
-        case .maxData(let frame):
-            data["frame_type"] = "max_data"
-            data["maximum"] = frame.max
-        case .maxStreamData(let frame):
-            data["frame_type"] = "max_stream_data"
-            data["stream_id"] = frame.id
-            data["maximum"] = frame.max
-        case .maxStreamsBidirectional(let frame):
-            data["frame_type"] = "max_streams"
-            data["stream_type"] = "bidirectional"
-            data["maximum"] = frame.max
-        case .maxStreamsUnidirectional(let frame):
-            data["frame_type"] = "max_streams"
-            data["stream_type"] = "unidirectional"
-            data["maximum"] = frame.max
-        case .dataBlocked(let frame):
-            data["frame_type"] = "data_blocked"
-            data["limit"] = frame.limit
-        case .streamDataBlocked(let frame):
-            data["frame_type"] = "stream_data_blocked"
-            data["stream_id"] = frame.id
-            data["limit"] = frame.limit
-        case .streamsBlockedBidirectional(let frame):
-            data["frame_type"] = "streams_blocked"
-            data["stream_type"] = "bidirectional"
-            data["limit"] = frame.limit
-        case .streamsBlockedUnidirectional(let frame):
-            data["frame_type"] = "streams_blocked"
-            data["stream_type"] = "unidirectional"
-            data["limit"] = frame.limit
-        case .newConnectionID(let frame):
-            data["frame_type"] = "new_connection_id"
-            data["sequence_number"] = frame.sequence
-            data["retire_prior_to"] = frame.retirePriorToSequence
-            data["length"] = frame.connectionID.length
-            data["connection_id"] = frame.connectionID.description
-        case .retireConnectionID(let frame):
-            data["frame_type"] = "retire_connection_id"
-            data["sequence_number"] = frame.sequence
-        case .pathChallenge:
-            data["frame_type"] = "path_challenge"
-        case .pathResponse:
-            data["frame_type"] = "path_response"
-        case .connectionClose(let frame):
-            data["frame_type"] = "connection_close"
-            data["error_space"] = "transport"
-            data["raw_error_code"] = frame.errorCode
-            data["reason"] = frame.reason
-        case .applicationClose(let frame):
-            data["frame_type"] = "connection_close"
-            data["error_space"] = "application"
-            data["raw_error_code"] = frame.errorCode
-            data["reason"] = frame.reason
-        case .handshakeDone(_):
-            data["frame_type"] = "handshake_done"
-        case .datagram(let frame):
-            data["frame_type"] = "datagram"
-            data["length"] = frame.length
-            data["flow_id"] = frame.flowID
-        }
-        return data
-    }
-}
-
-@available(Network 0.1.0, *)
 struct EventFrames {
-    var frames: [EventFrame] = []
     /// The frames of a packet `QUICConnectionCore` reported, which only names their types.
     var frameTypes: [QUICConnectionCore.PacketEvent.FrameType] = []
 
@@ -506,18 +371,8 @@ struct EventFrames {
     init(frameTypes: [QUICConnectionCore.PacketEvent.FrameType]) {
         self.frameTypes = frameTypes
     }
-    init(packet: borrowing Packet, ackDelayExponent: Int) {
-        if let shorthandFrames = packet.shorthandFrames {
-            for shorthandFrame in shorthandFrames {
-                self.frames.append(.init(frame: shorthandFrame, ackDelayExponent: ackDelayExponent))
-            }
-        }
-    }
     func dumpData() -> [Any] {
         var data: [Any] = []
-        for frame in frames {
-            data.append(frame.dumpData())
-        }
         for frameType in frameTypes {
             data.append(["frame_type": frameType.qlogName])
         }
@@ -527,7 +382,7 @@ struct EventFrames {
 
 @available(Network 0.1.0, *)
 extension QUICConnectionCore.PacketEvent.FrameType {
-    /// The `frame_type` qlog writes, as `EventFrame` does.
+    /// The `frame_type` qlog writes.
     var qlogName: String {
         switch self {
         case .padding: return "padding"
@@ -572,37 +427,6 @@ enum PacketType: String {
         case .handshake: self = .handshake
         case .zeroRTT: self = .zeroRTT
         case .oneRTT: self = .oneRTT
-        }
-    }
-
-    @available(Network 0.1.0, *)
-    init(packet: borrowing SentPacketRecord) {
-        switch packet.identifier.space {
-        case .initial:
-            self = .initial
-        case .handshake:
-            self = .handshake
-        case .applicationData:
-            self = .oneRTT
-        }
-    }
-
-    @available(Network 0.1.0, *)
-    init(packet: borrowing Packet) {
-        if packet.versionNegotiation {
-            self = .versionNegotiation
-        } else if packet.keyState == .initial {
-            self = .initial
-        } else if packet.keyState == .handshake {
-            self = .handshake
-        } else if packet.keyState == .earlyData {
-            self = .zeroRTT
-        } else if packet.keyState == .phase0 || packet.keyState == .phase1 {
-            self = .oneRTT
-        } else if packet.retry {
-            self = .retry
-        } else {
-            self = .unknown
         }
     }
 }
@@ -703,54 +527,6 @@ final class QLog {
         }
     }
 
-    func packetSent(_ packet: borrowing Packet, ackDelayExponent: Int, timestamp: NetworkClock.Instant) {
-        let packetType = PacketType(packet: packet)
-        let packetHeader = PacketHeader(packet: packet)
-        let frameList = EventFrames(packet: packet, ackDelayExponent: ackDelayExponent)
-        let packetEvent = EventPacket(
-            packetType: packetType,
-            packetHeader: packetHeader,
-            frameList: frameList,
-            isCoalesced: nil,
-            trigger: .sentReceivedTrigger(.unknown)
-        )
-        let event = Event.packetSent(packetEvent, timestamp: calculateTimestamp(timestamp))
-        eventsList.append(event)
-    }
-
-    func packetReceived(
-        _ packet: borrowing Packet,
-        coalesced isCoalesced: Bool,
-        ackDelayExponent: Int,
-        timestamp: NetworkClock.Instant
-    ) {
-        let packetEvent = EventPacket(
-            packetType: PacketType(packet: packet),
-            packetHeader: PacketHeader(packet: packet),
-            frameList: EventFrames(packet: packet, ackDelayExponent: ackDelayExponent),
-            isCoalesced: isCoalesced,
-            trigger: .sentReceivedTrigger(.unknown)
-        )
-        let event = Event.packetReceived(packetEvent, timestamp: calculateTimestamp(timestamp))
-        eventsList.append(event)
-    }
-
-    func packetLost(
-        _ packet: borrowing SentPacketRecord,
-        trigger: QLogPacketLostTrigger?,
-        timestamp: NetworkClock.Instant
-    ) {
-        let packetEvent = EventPacket(
-            packetType: PacketType(packet: packet),
-            packetHeader: PacketHeader(packet: packet),
-            frameList: .init(),
-            isCoalesced: nil,
-            trigger: .lostTrigger(trigger)
-        )
-        let event = Event.packetLost(packetEvent, timestamp: calculateTimestamp(timestamp))
-        eventsList.append(event)
-    }
-
     /// Logs a packet `QUICConnectionCore` sent, received or declared lost.
     func packetEvent(_ packetEvent: QUICConnectionCore.PacketEvent) {
         let timestamp = self.calculateTimestamp(packetEvent.time)
@@ -788,100 +564,6 @@ final class QLog {
         }
     }
 
-    func metricsUpdated(
-        minRTT: NetworkDuration,
-        smoothedRTT: NetworkDuration,
-        latestRTT: NetworkDuration,
-        rttVariance: NetworkDuration,
-        ptoCount: UInt64 = UInt64.max,
-        congestionWindow: UInt64 = UInt64.max,
-        bytesInFlight: UInt64 = UInt64.max,
-        slowStartThresh: UInt64 = UInt64.max,
-        packetsInFlight: UInt64 = UInt64.max,
-        inRecovery: Bool?,
-        timestamp: NetworkClock.Instant
-    ) {
-        let metricEvent = EventMetrics(
-            minRTT: minRTT,
-            smoothedRTT: smoothedRTT,
-            latestRTT: latestRTT,
-            rttVariance: rttVariance,
-            ptoCount: ptoCount,
-            congestionWindow: congestionWindow,
-            bytesInFlight: bytesInFlight,
-            slowStartThresh: slowStartThresh,
-            packetsInFlight: packetsInFlight,
-            inRecovery: inRecovery
-        )
-        let event = Event.metricsUpdated(metricEvent, timestamp: calculateTimestamp(timestamp))
-        eventsList.append(event)
-    }
-
-    public func recoveryUpdated(
-        ptoCount: UInt64,
-        inRecovery: Bool?,
-        timestamp: NetworkClock.Instant
-    ) {
-        metricsUpdated(
-            minRTT: .zero,
-            smoothedRTT: .zero,
-            latestRTT: .zero,
-            rttVariance: .zero,
-            ptoCount: ptoCount,
-            congestionWindow: UInt64.max,
-            bytesInFlight: UInt64.max,
-            slowStartThresh: UInt64.max,
-            packetsInFlight: UInt64.max,
-            inRecovery: inRecovery,
-            timestamp: timestamp
-        )
-    }
-
-    public func congestionControlUpdated(
-        congestionWindow: UInt64 = UInt64.max,
-        bytesInFlight: UInt64 = UInt64.max,
-        slowStartThresh: UInt64 = UInt64.max,
-        packetsInFlight: UInt64 = UInt64.max,
-        timestamp: NetworkClock.Instant? = nil
-    ) {
-        let timestamp = timestamp ?? context.now
-        metricsUpdated(
-            minRTT: .zero,
-            smoothedRTT: .zero,
-            latestRTT: .zero,
-            rttVariance: .zero,
-            ptoCount: UInt64.max,
-            congestionWindow: congestionWindow,
-            bytesInFlight: bytesInFlight,
-            slowStartThresh: slowStartThresh,
-            packetsInFlight: packetsInFlight,
-            inRecovery: nil,
-            timestamp: timestamp
-        )
-    }
-
-    func rttUpdated(
-        minRTT: NetworkDuration,
-        smoothedRTT: NetworkDuration,
-        latestRTT: NetworkDuration,
-        rttVariance: NetworkDuration,
-        timestamp: NetworkClock.Instant
-    ) {
-        metricsUpdated(
-            minRTT: minRTT,
-            smoothedRTT: smoothedRTT,
-            latestRTT: latestRTT,
-            rttVariance: rttVariance,
-            ptoCount: UInt64.max,
-            congestionWindow: UInt64.max,
-            bytesInFlight: UInt64.max,
-            slowStartThresh: UInt64.max,
-            packetsInFlight: UInt64.max,
-            inRecovery: nil,
-            timestamp: timestamp
-        )
-    }
-
     func streamStateUpdated(
         stream: QUICStreamInstance,
         oldStreamState: QLogStreamState,
@@ -903,25 +585,6 @@ final class QLog {
             )
             eventsList.append(event)
         }
-    }
-
-    public func logCongestionStateUpdated(
-        oldState: QLogCongestionState?,
-        newState: QLogCongestionState?,
-        trigger: QLogCongestionTrigger?,
-        timestamp: NetworkClock.Instant? = nil
-    ) {
-        let timestamp = timestamp ?? context.now
-        let congestionEvent = EventCongestionStateUpdated(
-            oldCongestionState: oldState,
-            newCongestionState: newState,
-            congestionStateTrigger: trigger
-        )
-        let event = Event.congestionStateUpdated(
-            congestionEvent,
-            timestamp: calculateTimestamp(timestamp)
-        )
-        eventsList.append(event)
     }
 
     func logStreamTypeSet(

@@ -52,10 +52,6 @@ struct QUICPreferences: ~Copyable, Sendable {
     let disableKernelPacing: Bool
     let ackCompressionEnabled: Bool
     let maxPacketReorderThreshold: Int
-    let ackDefaultPacketThreshold: Int
-    let migrationVersion: Int
-    let migrationPTOThreshold: Int
-    let migrationKeepaliveThreshold: Int
     let quiclogDirectory: String
     let maxConnectivityProbes: Int
     let maxSentPacketsCapacity: Int
@@ -95,22 +91,6 @@ struct QUICPreferences: ~Copyable, Sendable {
         maxPacketReorderThreshold = QUICPreferences.findSetting(
             "max_packet_reorder_thresh",
             defaultValue: 20
-        )
-        ackDefaultPacketThreshold = QUICPreferences.findSetting(
-            "ack_default_packet_threshold",
-            defaultValue: Ack.defaultPacketThreshold
-        )
-        migrationVersion = QUICPreferences.findSetting(
-            "migration_version",
-            defaultValue: Migration.defaultMigrationVersion
-        )
-        migrationPTOThreshold = QUICPreferences.findSetting(
-            "migration_pto_threshold",
-            defaultValue: Migration.defaultPTOThreshold
-        )
-        migrationKeepaliveThreshold = QUICPreferences.findSetting(
-            "migration_keepalive_threshold",
-            defaultValue: Migration.defaultKeepaliveThreshold
         )
         maxConnectivityProbes = QUICPreferences.findSetting(
             "max_connectivity_probes",

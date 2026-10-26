@@ -307,127 +307,7 @@ struct QUICStreamIDState: ~Copyable {
     }
 }
 
-struct StreamListMembership: OptionSet {
-    init(rawValue: Self.RawValue) {
-        self.rawValue = rawValue
-    }
-    let rawValue: UInt8
-    static let none = StreamListMembership(rawValue: 1 << 0)
-    static let pendingReassemblyDequeue = StreamListMembership(rawValue: 1 << 1)
-    static let sendable = StreamListMembership(rawValue: 1 << 2)
-    static let unblockedSend = StreamListMembership(rawValue: 1 << 3)
-
-    var description: String {
-        switch self {
-        case .none: return "none"
-        case .pendingReassemblyDequeue: return "pendingReassemblyDequeue"
-        case .sendable: return "sendable"
-        case .unblockedSend: return "unblockedSend"
-        default: return "none"
-        }
-    }
-}
-
 // MARK: QUIC Stream
-
-// QUICStreamList is designed to hold a list of flow identifiers that fit different list types.
-// For example, pendingReassemblyDequeue, sendable, and unblockedSend lists.
-// Note that QUICStreamList only holds the flow identifiers that are used to lookup
-// the actual streams held in the multiplexedFlows dictionary already.
-// Also note that a flow identifier can exist in multiple lists at one time.
-//
-// Because the list stores only identifiers, it does not depend on the connection's linkage
-// families; the operations that need to resolve an identifier back to a stream are generic
-// over the families instead.
-@available(Network 0.1.0, *)
-struct QUICStreamList: ~Copyable {
-    private var list = Deque<MultiplexedFlowIdentifier>(minimumCapacity: 4)
-    private let name: StaticString
-    private let listType: StreamListMembership
-
-    static func pendingReassemblyDequeueList() -> QUICStreamList {
-        QUICStreamList(
-            listType: .pendingReassemblyDequeue,
-            name: #function
-        )
-    }
-    static func unblockedSendStreamList() -> QUICStreamList {
-        QUICStreamList(
-            listType: .unblockedSend,
-            name: #function
-        )
-    }
-
-    private init(listType: StreamListMembership, name: StaticString) {
-        self.listType = listType
-        self.name = name
-    }
-
-    var isEmpty: Bool {
-        list.isEmpty
-    }
-
-    var count: Int {
-        list.count
-    }
-
-    mutating func append(_ stream: QUICStreamInstance) {
-        guard !stream.listMembership.contains(listType) else {
-            return
-        }
-        list.append(stream.flowIdentifier)
-        stream.listMembership.insert(listType)
-    }
-
-    mutating func removeFirst(
-        connection: QUICConnection
-    ) -> QUICStreamInstance? {
-        guard !list.isEmpty else {
-            return nil
-        }
-        let streamIdentifier = list.removeFirst()
-        guard let stream = connection.flow(for: streamIdentifier) else {
-            return nil
-        }
-        stream.listMembership.remove(listType)
-        return stream
-    }
-
-    mutating func remove(_ stream: QUICStreamInstance) {
-        let name = self.name
-        guard stream.listMembership.contains(listType) else {
-            stream.log.error(
-                "Stream is not in \(name), currently in: \(stream.listMembership.description)"
-            )
-            return
-        }
-
-        let identifier = stream.flowIdentifier
-        guard let index = list.firstIndex(of: identifier) else {
-            stream.log.error("Stream is not on \(name)")
-            return
-        }
-        list.remove(at: index)
-        stream.listMembership.remove(listType)
-        stream.log.debug("Removed from \(name)")
-    }
-
-    mutating func removeAll(connection: QUICConnection) {
-        while !list.isEmpty {
-            guard let identifier = list.popLast() else {
-                break
-            }
-            if let stream = connection.flow(for: identifier) {
-                guard stream.listMembership.contains(listType) else {
-                    let name = self.name
-                    connection.log.error("Stream is not marked in \(name)")
-                    return
-                }
-                stream.listMembership.remove(listType)
-            }
-        }
-    }
-}
 
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
@@ -439,10 +319,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
 
     typealias Flags = QUICStreamProtocolState.Flags
 
-    var listMembership: StreamListMembership {
-        get { state.listMembership }
-        set { state.listMembership = newValue }
-    }
     private var flags: Flags {
         get { state.flags }
         set { state.flags = newValue }
@@ -456,14 +332,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         set { if newValue { flags.insert(.coreStreamClosed) } else { flags.remove(.coreStreamClosed) } }
     }
 
-    var flowControlState: FlowControlState {
-        _read { yield state.flowControlState }
-        _modify { yield &state.flowControlState }
-    }
-    var flowControlStreamState: FlowControlStreamState {
-        _read { yield state.flowControlStreamState }
-        _modify { yield &state.flowControlStreamState }
-    }
     var receive: QUICReceiveState {
         _read { yield state.receive }
         _modify { yield &state.receive }
@@ -620,7 +488,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
             self.streamMetadata.streamID = _streamID.value
             self.streamMetadata.streamType = _streamID.quicStreamType
         }
-        self.receive.reassemblyQueue.log = NetworkLoggerState(logPrefixer.logIDString)
     }
 
     func resetStreamID(streamID: QUICStreamID) {
@@ -642,19 +509,14 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         } else {
             log.debug("Deallocating unassigned stream")
         }
-        receive.reassemblyQueue.dequeueAll()
-        self.send.buffer.empty()
     }
 
     func teardown(in eventContext: inout NetworkContext.EventContext) {
-        receive.reassemblyQueue.dequeueAll()
         guard !self.closed else { return }
-        self.send.buffer.empty()
         parentProtocol.handleStreamClose(stream: self, error: nil, in: &eventContext)
     }
 
     func close(errorCode: NetworkError?, in eventContext: inout NetworkContext.EventContext) {
-        self.send.buffer.empty()
         parentProtocol.handleStreamClose(stream: self, error: errorCode, in: &eventContext)
     }
 
@@ -679,11 +541,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         parent.coreAfterUpdate(in: &eventContext)
     }
 
-    func emptyPendingData(connection: QUICConnection) {
-        removePendingOutboundBytesFromFlowControl(connection: connection)
-        send.buffer.empty()
-    }
-
     var isOpen: Bool {
 
         !(self.pendingStart || self.closed
@@ -692,237 +549,9 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
 
     var streamType: QUICStreamType? { self.streamID?.quicStreamType }
 
-    // Advance the lastOffset and finalSize and check
-    // for possible protocol violations (see RFC9000 Section 20.1).
-    //
-    //  FINAL_SIZE_ERROR (0x06):
-    //    (1) An endpoint received a STREAM frame containing data
-    //        that exceeded the previously established final size,
-    //    (2) An endpoint received a STREAM frame or a RESET_STREAM
-    //        frame containing a final size that was lower than
-    //        the size of stream data that was already received,
-    //    (3) An endpoint received a STREAM frame or a RESET_STREAM frame
-    //        containing a different final size to the one
-    //        already established.
-    //
-    //  FLOW_CONTROL_ERROR (0x03):
-    //    An endpoint received more data than it permitted in
-    //    its advertised data limits; see Section 4.
-    //
-    // If advancing lastOffset or finalSize
-    // causes any of the above protocol violations, the connection
-    // is closed with the appropriate error code and error message,
-    // and this function will return STREAM_OFFSET_INVALID.
-    //
-    // Otherwise, the function will return the amount by which
-    // the `lastOffset` was incremented.
-    @_optimize(speed)
-    func updateLastOffset(
-        connection: QUICConnection,
-        newLastOffset: UInt64,
-        newFinalSize: UInt64?,
-        in eventContext: inout NetworkContext.EventContext
-    ) -> UInt64? {
-        var closeReason: String?
-
-        validation: repeat {
-            // (1) Endpoint received data that exceeds the value of previously
-            // established final size.
-            if let finalSize = self.finalSize, newFinalSize == nil, finalSize < newLastOffset {
-                log.error(
-                    "[true:\(self.receive.state)] endpoint received stream offset \(newLastOffset) that exceeds final size \(finalSize)"
-                )
-                closeReason = "stream offset exceeded its final size"
-                break validation
-            }
-
-            // (2) Endpoint received data with final size that's lower
-            // than the size of the stream data that was already established
-            if self.finalSize == nil, newFinalSize != nil, newLastOffset < self.lastReceivedOffset {
-                log.error(
-                    "[false:\(self.receive.state)] endpoint received size \(newLastOffset) that's lower than size of the stream \(self.lastReceivedOffset)"
-                )
-                closeReason = "received final size lower than already received size"
-                break validation
-            }
-
-            // (3) Endpoint received frame containing a different final size
-            // to the one already established
-            if let finalSize = self.finalSize, let newFinalSize, finalSize != newFinalSize {
-                log.error(
-                    "[true:\(self.receive.state)] Endpoint received final size \(newFinalSize) different from already established \(finalSize)"
-                )
-                closeReason = "received final size different to already established final size"
-                break validation
-            }
-        } while false
-
-        if let closeReason {
-            connection.close(with: .finalSizeError, closeReason, in: &eventContext)
-            return nil
-        }
-
-        if self.finalSize == nil, let newFinalSize {
-            self.finalSize = newFinalSize
-            log.datapath("Final size set to \(newFinalSize)")
-        }
-
-        let lastOffsetDelta = updateLastReceivedOffset(
-            to: newLastOffset,
-            connection: connection,
-            in: &eventContext
-        )
-        if lastOffsetDelta != nil {
-            log.datapath(
-                "[\(self.finalSize != nil ? "true" : "false"):\(self.receive.state)] Adjusted last offset (conn \(connection.lastReceivedOffset), stream \(self.lastReceivedOffset))"
-            )
-        }
-
-        return lastOffsetDelta
-    }
-
-    // Called when read data has left stream and being delivered to application
-    func deliveredInboundBytes(consumedLength: Int, connection: QUICConnection) {
-        updateFlowControlWithInboundBytesDelivered(UInt64(consumedLength), connection: connection)
-
-        // If a RESET_STREAM has been received, the flow control state
-        // has already been updated
-        if !resetReceived {
-            // Update flow control state for total in-order bytes received
-            let reassemblyQueueInOrderOffset = UInt64(receive.reassemblyQueue.currentOffset)
-            updateFlowControlWithTotalInOrderInboundBytesRead(
-                reassemblyQueueInOrderOffset,
-                connection: connection
-            )
-        }
-
-        self.sendInboundFlowControlCreditIfNeeded(connection: connection)
-    }
-
-    // Discards every inbound byte still buffered for this stream and returns the
-    // flow control credit those bytes consumed.
-    //
-    // Called when the stream is closed with data the application never read,
-    // either still sitting in the reassembly queue or already dequeued into the
-    // upper receive queue awaiting a read. Those bytes counted against the
-    // connection's receive window when they arrived; without this the credit is
-    // never given back and the usable window shrinks permanently.
-    func discardUnreadInboundBytes(connection: QUICConnection) {
-        // Bytes handed to the upper layer but not yet read by the application.
-        // Dequeuing already advanced the reassembly queue's `currentOffset` past
-        // these, but flow control only counts them once the application reads,
-        // so they are still missing from the in-order total.
-        let pendingDelivery = UInt64(upperReceiveQueue.unclaimedLength)
-        // Contiguous bytes reassembled but not yet dequeued.
-        let pendingDequeue = UInt64(max(receive.reassemblyQueue.availableToDequeue, 0))
-
-        // Anything the reassembly queue holds beyond the contiguous run is not
-        // yet part of the in-order total, so it has no credit to return here;
-        // the RESET_STREAM and zombie final-size paths cover those gaps.
-        let discardedBytes = pendingDelivery + pendingDequeue
-        guard discardedBytes > 0 else { return }
-
-        log.datapath(
-            "Discarding \(discardedBytes) unread inbound bytes on close "
-                + "(\(pendingDelivery) awaiting read, \(pendingDequeue) awaiting dequeue)"
-        )
-
-        // Release the frames themselves before crediting, so the buffers are
-        // freed even if the connection is already tearing down.
-        upperReceiveQueue.finalizeAllFramesAsFailed()
-
-        // Advance the in-order total to cover everything the queue holds
-        // contiguously, which is what the application could have read. This adds
-        // the same delta to the connection-wide total.
-        let newInOrderTotal = UInt64(receive.reassemblyQueue.currentOffset) + pendingDequeue
-        receive.reassemblyQueue.dequeueAll()
-        updateFlowControlWithTotalInOrderInboundBytesRead(
-            newInOrderTotal,
-            connection: connection
-        )
-
-        // Both components are now part of the in-order total, so credit them as
-        // consumed to move the MAX_DATA anchor past them.
-        connection.creditDiscardedInboundBytes(discardedBytes)
-    }
-
-    @_optimize(speed)
-    func dequeueReassembledData(connection: QUICConnection) -> FrameArray? {
-        var markedFIN = markedInboundFINOnFrame
-        let result = receive.dequeueReassembled(markedFIN: &markedFIN, log: log)
-        if markedFIN {
-            markedInboundFINOnFrame = true
-        }
-        return result
-    }
-
     override public func upperReceiveQueueDrainedBytes(_ bytes: Int, in eventContext: inout NetworkContext.EventContext)
     {
-
-        let parent = parentProtocol
-        if parent.usesCore {
-            parent.coreStreamDrained(self, in: &eventContext)
-            return
-        }
-
-        // Record with flow control that bytes have been delivered, and update flow credits.
-        deliveredInboundBytes(consumedLength: bytes, connection: parent)
-
-        // This notification is delivered from the application's read, which runs after the
-        // inbound batch has already been serviced and flushed. If the read opened up the
-        // receive window, we should send the credit here.
-        if parent.applicationPendingItems.maxData
-            || parent.applicationPendingItems.maxStreamData
-        {
-            parent.sendFrames(in: &eventContext)
-        }
-
-        if let streamID {
-            QUICSignpost.dataDelivered(id: parent.signpostID, streamID: streamID.value, nbytes: bytes)
-        }
-
-        // If all data has now been read, move to the data read state
-        if receive.state != .dataRead, upperReceiveQueue.isEmpty, markedInboundFINOnFrame {
-            receive.state.change(logIDString: log.logPrefix, to: .dataRead)
-            if !self.closed, self.send.state == .dataReceived {
-                // If both directions are closed, and all data is read, close the stream
-                self.close(errorCode: nil, in: &eventContext)
-            }
-        }
-    }
-
-    static func quicSafeUnsignedDecrement(
-        value: Int,
-        decrement: Int,
-        newValueInCaseOfOverflow: Int?,
-        function: StaticString = #function
-    ) -> Int? {
-        let (newValue, overflow) = value.subtractingReportingOverflow(decrement)
-        // In C, this is done with UINT64 math, but the subtraction with Int can be negative w/o underflow
-        if overflow || newValue < 0 {
-            Logger.proto.fault(
-                "UNDERFLOW: \(value) decrement \(decrement) result \(newValueInCaseOfOverflow?.description ?? "nil")"
-            )
-            return newValueInCaseOfOverflow
-        }
-        return newValue
-    }
-
-    static func quicSafeIncrement(
-        value: Int,
-        increment: Int,
-        newValueInCaseOfOverflow: Int?,
-        function: StaticString = #function
-    ) -> Int? {
-        // In C, this is done with UINT64 math, but it makes no difference for our calculations
-        let (newValue, overflow) = value.addingReportingOverflow(increment)
-        if overflow {
-            Logger.proto.fault(
-                "OVERFLOW: \(value) increment \(increment) result \(newValueInCaseOfOverflow?.description ?? "nil")"
-            )
-            return newValueInCaseOfOverflow
-        }
-        return newValue
+        self.parentProtocol.coreStreamDrained(self, in: &eventContext)
     }
 
     func inboundStreamReady() {
@@ -939,92 +568,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
             self.receive.state.change(logIDString: logPrefix, to: .receive)
         }
         self.send.state.change(logIDString: logPrefix, to: .ready)
-    }
-
-    func outboundStreamPending(
-        connected: Bool,
-        connection: QUICConnection,
-        in eventContext: inout NetworkContext.EventContext
-    ) {
-        if connected {
-            if self.unidirectional {
-                if connection.unidirectionalStreams.remoteMaxStreams == 0 {
-                    return
-                }
-                if connection.unidirectionalStreams.previousRemoteMaxStreams != 0
-                    && connection.unidirectionalStreams.remoteMaxStreams
-                        <= connection.unidirectionalStreams.previousRemoteMaxStreams
-                {
-                    return
-                }
-                log.notice(
-                    "Reached unidirectional stream limit (STREAMS_BLOCKED): \(connection.unidirectionalStreams.remoteMaxStreams)"
-                )
-                connection.unidirectionalStreams.previousRemoteMaxStreams =
-                    connection.unidirectionalStreams.remoteMaxStreams
-                connection.sendStreamsBlockedUnidirectional()
-            } else {
-                if connection.bidirectionalStreams.remoteMaxStreams == 0 {
-                    return
-                }
-                if connection.bidirectionalStreams.previousRemoteMaxStreams != 0
-                    && connection.bidirectionalStreams.remoteMaxStreams
-                        <= connection.bidirectionalStreams.previousRemoteMaxStreams
-                {
-                    return
-                }
-                log.notice(
-                    "Reached bidirectional stream limit (STREAMS_BLOCKED): \(connection.bidirectionalStreams.remoteMaxStreams)"
-                )
-                connection.bidirectionalStreams.previousRemoteMaxStreams =
-                    connection.bidirectionalStreams.remoteMaxStreams
-                connection.sendStreamsBlockedBidirectional()
-                connection.sendFrames(in: &eventContext)
-            }
-        }
-        // Don't send this frame during 0-RTT as we'll revisit once connected.
-    }
-
-    func addStreamData(frame: consuming Frame, isLast: Bool, connection: QUICConnection) {
-        let dataLength = UInt64(frame.unclaimedLength)
-        updateFlowControlWithEnqueuedBytesToSend(dataLength, connection: connection)
-        send.enqueue(frame, isLast: isLast, logPrefix: log.logPrefix)
-    }
-
-    // To be called when 0-RTT sending is rejected
-    func resetSendStreamData() {
-        send.reset()
-        flowControlState.resetSentBytes()
-    }
-
-    var hasMoreSendDataToService: Bool {
-        send.buffer.hasMoreSendDataToService(currentSendOffset: sendOffset)
-    }
-
-    // Available view into the send buffer for building outbound stream frames
-    func availableSendData() -> (offset: UInt64, remaining: UInt64, hasLast: Bool) {
-        let offset = sendOffset
-        let (remaining, hasLast) = send.buffer.sendServiceState(currentSendOffset: offset)
-        return (offset, remaining, hasLast)
-    }
-
-    // NOTE: hasMoreDataToService is a signal that the send buffer contains the `hasLast` already
-    // so no need to determine if data is blocked.
-    func recordStreamDataSending(
-        writtenLength: UInt64,
-        isFinal: Bool,
-        hasMoreDataToService: Bool,
-        pendingItems: inout PendingItems,
-        connection: QUICConnection
-    ) {
-        send.recordSent(isFinal: isFinal, logPrefix: log.logPrefix)
-
-        updateFlowControlWithSentBytes(writtenLength, connection: connection)
-
-        if hasMoreDataToService {
-            self.reportDataBlockedIfNecessary(on: &pendingItems)
-            connection.reportDataBlockedIfNecessary(on: &pendingItems)
-        }
     }
 }
 
@@ -1046,32 +589,4 @@ extension QUICStreamInstance {
 
 // MARK: Flow Control - Limits
 
-@available(Network 0.1.0, *)
-extension QUICStreamInstance {
-
-    func setupMaxStreamData(
-        isServer: Bool,
-        remoteTransportParameters: TransportParameters?,
-        localTransportParameters: TransportParameters
-    ) {
-        let remoteMaxStreamData = QUICStreamID.computeRemoteMaxStreamData(
-            isServer: isServer,
-            remoteTransportParameters: remoteTransportParameters,
-            streamID: streamID!
-        )
-
-        let localMaxStreamData = QUICStreamID.computeLocalMaxStreamData(
-            isServer: isServer,
-            localTransportParameters: localTransportParameters,
-            streamID: streamID!
-        )
-
-        flowControlState.initializeMaxDataValues(
-            remoteMaxData: UInt64(remoteMaxStreamData),
-            localMaxData: UInt64(localMaxStreamData)
-        )
-
-        updateOutboundFlowControlCredit(connection: parentProtocol)
-    }
-}
 #endif
