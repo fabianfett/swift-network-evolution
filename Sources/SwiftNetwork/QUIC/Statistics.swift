@@ -181,8 +181,12 @@ struct Statistics: ~Copyable {
 
     /// Takes the values of `statistics` from `other`.
     mutating func copy(_ statistics: [QUICStatistic], from other: borrowing Statistics) {
+        // Through spans: subscripting `other.statisticsArray` copied the whole inline array, 784
+        // bytes, for every statistic.
+        let source = other.statisticsArray.span
+        var destination = self.statisticsArray.mutableSpan
         for statistic in statistics {
-            self.statisticsArray[statistic.rawValue] = other.statisticsArray[statistic.rawValue]
+            destination[statistic.rawValue] = source[statistic.rawValue]
         }
     }
 
