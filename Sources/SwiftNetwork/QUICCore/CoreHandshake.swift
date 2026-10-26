@@ -277,4 +277,14 @@ extension Array where Element == CoreReceiveBuffer {
     }
 }
 
+#if Fuzzing
+@available(Network 0.1.0, *)
+extension CoreHandshake {
+    /// Marks the handshake complete without TLS, for ``QUICConnectionCore/prepareForFuzzing()``.
+    mutating func completeForFuzzing() {
+        self.isComplete = true
+    }
+}
+#endif
+
 #endif

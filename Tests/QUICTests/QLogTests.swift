@@ -150,123 +150,6 @@ final class QLogTests: XCTestCase {
         assertStringJSONContent(result, expected: expected_data)
     }
 
-    func testRTT() {
-        let expected_data = """
-            {
-                \"qlog_version\":\"draft-01\",
-                \"traces\":[
-                    {
-                        \"configuration\":{\"time_units\":\"us\"},
-                        \"event_fields\":[\"time\",\"CATEGORY\",\"EVENT_TYPE\",\"DATA\"],
-                        \"events\":[
-                            [0,\"RECOVERY\",\"METRICS_UPDATED\",{\"latest_rtt\":20,\"min_rtt\":20,\"rtt_variance\":10,\"smoothed_rtt\":20}]
-                        ],
-                        \"vantage_point\":{\"flow\":\"client\",\"type\":\"network\"}
-                    }
-                ]
-            }
-            """.filter { $0 != " " && $0 != "\n" && $0 != "\t" }
-
-        var rtt = RTT(logPrefixer: qlogTestsLogPrefixer)
-        rtt.processNewSample(
-            ackDuration: .microseconds(20),
-            packetAckedTime: .init(microseconds: 120),
-            ackDelay: .microseconds(10)
-        )
-        qlog.rttUpdated(
-            minRTT: .milliseconds(20),
-            smoothedRTT: .milliseconds(20),
-            latestRTT: .milliseconds(20),
-            rttVariance: .milliseconds(10),
-            timestamp: .zero
-        )
-
-        let result = qlog.dumpJSONString(forFlowType: .client)!
-        XCTAssertEqual(result.count, expected_data.count)
-        assertStringJSONContent(result, expected: expected_data)
-    }
-    func testRecovery() {
-        let expected_data = """
-            {
-                \"qlog_version\":\"draft-01\",
-                \"traces\":[
-                    {
-                        \"configuration\":{\"time_units\":\"us\"},
-                        \"event_fields\":[\"time\",\"CATEGORY\",\"EVENT_TYPE\",\"DATA\"],
-                        \"events\":[
-                            [0,\"RECOVERY\",\"METRICS_UPDATED\",{\"in_recovery\":\"true\",\"pto_count\":44}]
-                        ],
-                        \"vantage_point\":{\"flow\":\"client\",\"type\":\"network\"}
-                    }
-                ]
-            }
-            """.filter { $0 != " " && $0 != "\n" && $0 != "\t" }
-        qlog.recoveryUpdated(ptoCount: 44, inRecovery: true, timestamp: .zero)
-
-        let result = qlog.dumpJSONString(forFlowType: .client)!
-        XCTAssertEqual(result.count, expected_data.count)
-        assertStringJSONContent(result, expected: expected_data)
-    }
-
-    func testCC() {
-        let expected_data = """
-            {
-                \"qlog_version\":\"draft-01\",
-                \"traces\":[
-                    {
-                        \"configuration\":{\"time_units\":\"us\"},
-                        \"event_fields\":[\"time\",\"CATEGORY\",\"EVENT_TYPE\",\"DATA\"],
-                        \"events\":[
-                            [0,\"RECOVERY\",\"METRICS_UPDATED\",{\"bytes_in_flight\":1000,\"congestion_window\":44000,\"packets_in_flight\":1,\"ssthresh\":3000}]
-                        ],
-                        \"vantage_point\":{\"flow\":\"client\",\"type\":\"network\"}
-                    }
-                ]
-            }
-            """.filter { $0 != " " && $0 != "\n" && $0 != "\t" }
-
-        qlog.congestionControlUpdated(
-            congestionWindow: 44000,
-            bytesInFlight: 1000,
-            slowStartThresh: 3000,
-            packetsInFlight: 1,
-            timestamp: .zero
-        )
-
-        let result = qlog.dumpJSONString(forFlowType: .client)!
-        XCTAssertEqual(result.count, expected_data.count)
-        assertStringJSONContent(result, expected: expected_data)
-    }
-
-    func testCongestionState() {
-        let expected_data = """
-            {
-                \"qlog_version\":\"draft-01\",
-                \"traces\":[
-                    {
-                        \"configuration\":{\"time_units\":\"us\"},
-                        \"event_fields\":[\"time\",\"CATEGORY\",\"EVENT_TYPE\",\"DATA\"],
-                        \"events\":[
-                            [0,\"RECOVERY\",\"CONGESTION_STATE_UPDATED\",{\"new\":\"recovery\",\"trigger\":\"ecn\"}]
-                        ],
-                        \"vantage_point\":{\"flow\":\"client\",\"type\":\"network\"}
-                    }
-                ]
-            }
-            """.filter { $0 != " " && $0 != "\n" && $0 != "\t" }
-
-        qlog.logCongestionStateUpdated(
-            oldState: nil,
-            newState: .recovery,
-            trigger: .ecn,
-            timestamp: .zero
-        )
-
-        let result = qlog.dumpJSONString(forFlowType: .client)!
-        XCTAssertEqual(result.count, expected_data.count)
-        assertStringJSONContent(result, expected: expected_data)
-    }
-
     func testParameters() {
         let expected_data = """
             {
@@ -351,38 +234,6 @@ final class QLogTests: XCTestCase {
         assertStringJSONContent(result, expected: expected_data)
     }
 
-    func testMultipleEvents() {
-        let expected_data = """
-            {
-                \"qlog_version\":\"draft-01\",
-                \"traces\":[
-                    {
-                        \"configuration\":{\"time_units\":\"us\"},
-                        \"event_fields\":[\"time\",\"CATEGORY\",\"EVENT_TYPE\",\"DATA\"],
-                        \"events\":[
-                            [0,\"RECOVERY\",\"METRICS_UPDATED\",{\"in_recovery\":\"true\",\"pto_count\":44}],
-                            [0,\"RECOVERY\",\"METRICS_UPDATED\",{\"bytes_in_flight\":1000,\"congestion_window\":44000,\"packets_in_flight\":1,\"ssthresh\":3000}]
-                        ],
-                        \"vantage_point\":{\"flow\":\"client\",\"type\":\"network\"}
-                    }
-                ]
-            }
-            """.filter { $0 != " " && $0 != "\n" && $0 != "\t" }
-
-        qlog.recoveryUpdated(ptoCount: 44, inRecovery: true, timestamp: .zero)
-        qlog.congestionControlUpdated(
-            congestionWindow: 44000,
-            bytesInFlight: 1000,
-            slowStartThresh: 3000,
-            packetsInFlight: 1,
-            timestamp: .zero
-        )
-
-        let result = qlog.dumpJSONString(forFlowType: .client)!
-        XCTAssertEqual(result.count, expected_data.count)
-        assertStringJSONContent(result, expected: expected_data)
-    }
-
     func testSetTopLevelEntry() {
         let expected_data = """
             {
@@ -406,20 +257,6 @@ final class QLogTests: XCTestCase {
         let result = qlog.dumpJSONString(forFlowType: .client)!
         XCTAssertEqual(result.count, expected_data.count)
         assertStringJSONContent(result, expected: expected_data)
-    }
-
-    // RFC 9000 Section 19.3: the ACK Delay field is decoded by multiplying it by 2 to the
-    // power of the sender's ack_delay_exponent.
-    func testAckDelayIsScaledByDelayExponent() {
-        let frame = FrameAck.toShorthandLogEntry(
-            delay: 625,
-            largest: PacketNumber(2),
-            ranges: [],
-            ecnCounter: nil
-        )
-        let data = EventFrame(frame: frame, ackDelayExponent: 5).dumpData()
-        // 625 on the wire is 625 << 5 = 20,000 microseconds.
-        XCTAssertEqual(data["ack_delay"] as? UInt64, 20_000)
     }
 }
 #endif

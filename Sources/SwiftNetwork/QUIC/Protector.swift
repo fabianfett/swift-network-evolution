@@ -1378,6 +1378,14 @@ struct Protector: ~Copyable, PrefixedLoggable {
     }
 
     mutating func trafficUpdate(previousKeyState: PacketKeyState) {
+        #if Fuzzing
+        // A fuzzer flips the key phase at will; null keys stay null, and there are no write keys.
+        if keyType(keys: readFramer[previousKeyState.rawValue]) == .null {
+            let nextKeyState: PacketKeyState = previousKeyState == .phase0 ? .phase1 : .phase0
+            installNullProtector(for: nextKeyState)
+            return
+        }
+        #endif
         trafficUpdate(previousKeyState: previousKeyState, isWrite: false)
         trafficUpdate(previousKeyState: previousKeyState, isWrite: true)
     }

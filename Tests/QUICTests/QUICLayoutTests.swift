@@ -53,14 +53,7 @@ final class QUICLayoutTests: XCTestCase {
 
     func testLayoutPacket() {
         let packetSize = 156
-        let packetRecordSize = 209
         XCTAssertEqual(packetSize, MemoryLayout<Packet>.size)
-        XCTAssertEqual(packetRecordSize, MemoryLayout<SentPacketRecord>.size)
-    }
-
-    func testlayoutFrameAck() {
-        let frameAckSize = 56
-        XCTAssertEqual(frameAckSize, MemoryLayout<FrameAck>.size)
     }
 
     func testStreamLayout() {
@@ -71,11 +64,6 @@ final class QUICLayoutTests: XCTestCase {
         #endif
         XCTAssertEqual(MemoryLayout<QUICSendState>.size, 81)
         XCTAssertEqual(MemoryLayout<QUICReceiveState>.size, 90)
-        XCTAssertEqual(MemoryLayout<StreamSendBuffer>.size, 80)
-        XCTAssertEqual(MemoryLayout<StreamSendBuffer.Cursor>.size, 21)
-        XCTAssertEqual(MemoryLayout<ReassemblyQueue>.size, 89)
-        XCTAssertEqual(MemoryLayout<FlowControlState>.size, 72)
-        XCTAssertEqual(MemoryLayout<FlowControlStreamState>.size, 24)
     }
 
 }

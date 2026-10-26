@@ -72,6 +72,19 @@ func fuzzQUICPacketsMain(
 }
 #endif
 
+/// A P-256 public key in DER, for the server the client would trust: without one, the
+/// handshake doesn't start.
+private let fuzzServerPublicKey: [UInt8] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
+    0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03,
+    0x42, 0x00, 0x04, 0xb6, 0x33, 0xa9, 0x2a, 0x5a, 0xce, 0xbb, 0x48, 0x1b,
+    0xef, 0xd4, 0xc3, 0xf2, 0xda, 0x12, 0xf9, 0x50, 0xce, 0x36, 0xcb, 0x1d,
+    0x1c, 0x79, 0x1f, 0xaf, 0x54, 0x7c, 0xf1, 0xf3, 0xcf, 0xe0, 0x8f, 0xf5,
+    0x4a, 0xb8, 0x01, 0x30, 0x9e, 0x92, 0xb6, 0xb7, 0xec, 0x61, 0x41, 0xb7,
+    0xcc, 0x8a, 0xef, 0xd6, 0x89, 0x90, 0xb6, 0x4b, 0xc2, 0x33, 0x8f, 0xbf,
+    0x12, 0x86, 0x6b, 0xec, 0x02, 0x81, 0x28,
+]
+
 @available(Network 0.1.0, *)
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzPacketParser(_ start: UnsafePointer<UInt8>, _ count: Int) -> Int32 {
@@ -88,66 +101,43 @@ public func fuzzPacketParser(_ start: UnsafePointer<UInt8>, _ count: Int) -> Int
         return 0
     }
 
-    let context = NetworkContext(identifier: "FuzzingContext")
-    let connection = QUICConnection(context: context)
+    // The bytes after the connection ID length are the connection ID that short header packets
+    // are addressed to, then the datagram.
+    var localConnectionID = QUICConnectionID(0)
+    if cidLength != 0, let connectionID = QUICConnectionID(Array(UnsafeBufferPointer(start: start, count: cidLength))) {
+        localConnectionID = connectionID
+    }
+    start += cidLength
+    count -= cidLength
 
-    context.queue.sync {
-        let path = QUICPath.makeFromExternalTest(parent: connection)
-        connection.state = .connected
-        for keyState in PacketKeyState.allCases {
-            connection.protector.installNullProtector(for: keyState)
-        }
-        // TLS is never started (the null protector stands in for it), so leave
-        // `crypto.parentConnection` unset: every `crypto.stop(in:)`, whether from
-        // `close()` mid-packet or from the teardown below, then takes its
-        // never-started path, which also hands back the TLS instance's event state.
-        if cidLength != 0 {
-            let cidBytes = Array(UnsafeBufferPointer(start: start, count: cidLength))
-            if let cid = QUICConnectionID(cidBytes) {
-                // Store the CID on the connection and path to avoid CID mismatches.
-                connection.localCIDLength = cid.length
-                path.setSCID(cid)
-            }
-            start += cidLength
-            count -= cidLength
-        }
+    let now = NetworkClock.Instant(milliseconds: 1_000)
+    // The handshake has to start, or the connection closes before the datagram arrives.
+    var tlsOptions = SwiftTLSProtocol.Options()
+    tlsOptions.applicationProtocols = ["fuzz"]
+    tlsOptions.serverName = "fuzz.local"
+    tlsOptions.trustedRawPublicKeyCertificates = [fuzzServerPublicKey]
+    var core = QUICConnectionCore(
+        clientWith: QUICConnectionCore.Configuration(tlsOptions: tlsOptions),
+        localConnectionID: localConnectionID,
+        destinationConnectionID: QUICConnectionID(8),
+        now: now
+    )
+    // The datagram is plaintext: null keys stand in for the keys of every packet number space,
+    // and the connection acts as if the handshake completed, so 1-RTT packets get to frame
+    // processing.
+    core.prepareForFuzzing()
 
-        let data = Data(bytes: start, count: count)
-        let frame = Frame(copyBuffer: data.span)
-        connection.fromExternal(frame) { eventContext, frame in
-            var frame = frame
-            var packetParser = PacketParser(logPrefixer: connection.logPrefixer)
-            connection.handleInbound(
-                frame: &frame,
-                from: path,
-                inConnectedState: true,
-                isServerConnection: false,
-                packetParser: &packetParser,
-                in: &eventContext
-            )
-        }
+    var datagram = Array(UnsafeBufferPointer(start: start, count: count))
+    var span = datagram.mutableSpan
+    core.receive(&span, now: now)
 
-        connection.fromExternal { eventContext in
-            connection.crypto.stop(in: &eventContext)
-            for (_, stream) in connection.multiplexedFlows {
-                stream.upperSendQueue.finalizeAllFramesAsFailed()
-                stream.upperReceiveQueue.finalizeAllFramesAsFailed()
-                stream.receive.reassemblyQueue.dequeueAll()
-                stream.identifier.discardPendingEventsForUpperProtocol(in: &eventContext)
-            }
-            for (_, secondaryFlow) in connection.multiplexedSecondaryFlows {
-                secondaryFlow.upperSendQueue.finalizeAllFramesAsFailed()
-                secondaryFlow.upperReceiveQueue.finalizeAllFramesAsFailed()
-                secondaryFlow.identifier.discardPendingEventsForUpperProtocol(in: &eventContext)
-            }
-            connection.multiplexedFlows.removeAll()
-            connection.multiplexedSecondaryFlows.removeAll()
-            connection.identifier.discardPendingEventsForUpperProtocol(in: &eventContext)
-        }
-        path.destroyFromExternalTest()
-        connection.fromExternal { eventContext in
-            connection.unregisterEventManager(in: &eventContext)
-        }
+    // Act on what the datagram did: the events, and the datagrams in response, such as the ACK
+    // frame for whatever packet numbers arrived.
+    while core.nextEvent() != nil {}
+    var buffer = [UInt8](repeating: 0, count: 1500)
+    for _ in 0..<16 {
+        var output = buffer.mutableSpan
+        guard core.send(into: &output, now: now) != nil else { break }
     }
 
     return 0

@@ -346,7 +346,7 @@ final class TransportParametersTests: XCTestCase {
     // MARK: - Ack delay parameters: encoding
 
     func testAckDelayUsingDefaultValue() {
-        XCTAssertTrue(TransportParameter.maxAckDelay(duration: Ack.defaultMaxDelay).usingDefaultValue)
+        XCTAssertTrue(TransportParameter.maxAckDelay(duration: AckDefaults.defaultMaxDelay).usingDefaultValue)
         XCTAssertFalse(TransportParameter.maxAckDelay(duration: .milliseconds(26)).usingDefaultValue)
         XCTAssertTrue(TransportParameter.minAckDelay(duration: .zero).usingDefaultValue)
         XCTAssertFalse(TransportParameter.minAckDelay(duration: .microseconds(1)).usingDefaultValue)
@@ -354,7 +354,7 @@ final class TransportParametersTests: XCTestCase {
 
     // Default-valued ack delay parameters are omitted from the wire.
     func testAckDelayDefaultsNotSerialized() throws {
-        transportParameters.append(.maxAckDelay(duration: Ack.defaultMaxDelay))
+        transportParameters.append(.maxAckDelay(duration: AckDefaults.defaultMaxDelay))
         transportParameters.append(.minAckDelay(duration: .zero))
         XCTAssertEqual(try transportParameters.serialize(), [])
     }
@@ -473,9 +473,9 @@ final class TransportParametersTests: XCTestCase {
 
     // Without max_ack_delay, min_ack_delay is checked against the default max_ack_delay.
     func testDeserializeMinAckDelayVersusDefaultMaxAckDelay() throws {
-        let defaultMaxMicroseconds = UInt64(Ack.defaultMaxDelay.microseconds)
+        let defaultMaxMicroseconds = UInt64(AckDefaults.defaultMaxDelay.microseconds)
         let accepted = try decode(encodedIntegerParameter(.minAckDelay, defaultMaxMicroseconds))
-        XCTAssertEqual(accepted[.minAckDelay]?.duration, Ack.defaultMaxDelay)
+        XCTAssertEqual(accepted[.minAckDelay]?.duration, AckDefaults.defaultMaxDelay)
         XCTAssertNil(accepted[.maxAckDelay])
 
         assertDecodeError(.outOfBounds, encodedIntegerParameter(.minAckDelay, defaultMaxMicroseconds + 1))
@@ -484,13 +484,13 @@ final class TransportParametersTests: XCTestCase {
     func testDeserializeMinAckDelayBounds() throws {
         // Pair with the largest valid max_ack_delay so only the min_ack_delay bound applies.
         func encode(minMicroseconds: UInt64) -> [UInt8] {
-            encodedIntegerParameter(.maxAckDelay, UInt64(Ack.maxDelay.milliseconds))
+            encodedIntegerParameter(.maxAckDelay, UInt64(AckDefaults.maxDelay.milliseconds))
                 + encodedIntegerParameter(.minAckDelay, minMicroseconds)
         }
 
-        let maximum = UInt64(Ack.maxDelay.microseconds)
+        let maximum = UInt64(AckDefaults.maxDelay.microseconds)
         let accepted = try decode(encode(minMicroseconds: maximum))
-        XCTAssertEqual(accepted[.minAckDelay]?.duration, Ack.maxDelay)
+        XCTAssertEqual(accepted[.minAckDelay]?.duration, AckDefaults.maxDelay)
 
         // Includes the largest VLE, which must not overflow NetworkDuration.
         for rawValue in [maximum + 1, (UInt64(1) << 62) - 1] {

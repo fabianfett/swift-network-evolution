@@ -144,6 +144,242 @@ final class CoreRecoveryTests: XCTestCase {
             }
         }
     }
+
+    // MARK: RTT estimation (RFC 9002 Section 5)
+
+    private static func sendPacket(
+        _ recovery: inout CoreRecovery,
+        _ packetNumber: UInt64,
+        at time: NetworkClock.Instant,
+        isAckEliciting: Bool = true,
+        in space: PacketNumberSpace = .applicationData
+    ) {
+        recovery.onPacketSent(
+            CoreSentPacket(
+                packetNumber: packetNumber,
+                timeSent: time,
+                size: 1000,
+                isAckEliciting: isAckEliciting,
+                isInFlight: true,
+                frames: isAckEliciting ? [.ping] : []
+            ),
+            in: space
+        )
+    }
+
+    /// Sends packet `packetNumber` at `sent`, and acknowledges it alone at `sent + rtt`.
+    private static func sample(
+        _ recovery: inout CoreRecovery,
+        _ packetNumber: UInt64,
+        rtt: NetworkDuration,
+        ackDelay: NetworkDuration = .zero,
+        handshakeConfirmed: Bool = true,
+        sent: NetworkClock.Instant
+    ) -> CoreRecovery.AckResult {
+        Self.sendPacket(&recovery, packetNumber, at: sent)
+        return recovery.onAckReceived(
+            ranges: [packetNumber...packetNumber],
+            ackDelay: ackDelay,
+            in: .applicationData,
+            handshakeConfirmed: handshakeConfirmed,
+            now: sent.advanced(by: rtt)
+        )
+    }
+
+    /// RFC 9002 Section 5.3: the first sample sets the smoothed RTT and half of it the variation;
+    /// Section 5.2: it is the minimum RTT.
+    func testTheFirstSampleInitializesTheEstimate() {
+        var recovery = CoreRecovery()
+        XCTAssertEqual(recovery.smoothedRTT, CoreRecovery.initialRTT)
+        // The first sample ignores the ACK delay.
+        let result = Self.sample(
+            &recovery,
+            0,
+            rtt: .milliseconds(100),
+            ackDelay: .milliseconds(10),
+            sent: NetworkClock.Instant(milliseconds: 1_000)
+        )
+        XCTAssertTrue(result.rttSampled)
+        XCTAssertEqual(recovery.latestRTT, .milliseconds(100))
+        XCTAssertEqual(recovery.smoothedRTT, .milliseconds(100))
+        XCTAssertEqual(recovery.rttVariance, .milliseconds(50))
+        XCTAssertEqual(recovery.minRTT, .milliseconds(100))
+    }
+
+    /// RFC 9002 Section 5.3: later samples are smoothed after subtracting the ACK delay, unless
+    /// that would go below the minimum RTT; after the handshake is confirmed the delay is capped
+    /// at the peer's max_ack_delay. The minimum RTT ignores the ACK delay (Section 5.2).
+    func testLaterSamplesSubtractTheAckDelayAndAreSmoothed() {
+        var recovery = CoreRecovery()
+        recovery.maxAckDelay = .milliseconds(25)
+        var now = NetworkClock.Instant(milliseconds: 1_000)
+        _ = Self.sample(&recovery, 0, rtt: .milliseconds(100), sent: now)
+
+        // 140 ms minus 20 ms of ACK delay.
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(&recovery, 1, rtt: .milliseconds(140), ackDelay: .milliseconds(20), sent: now)
+        XCTAssertEqual(recovery.latestRTT, .milliseconds(140))
+        XCTAssertEqual(recovery.minRTT, .milliseconds(100))
+        XCTAssertEqual(recovery.smoothedRTT, .microseconds(102_500))
+        XCTAssertEqual(recovery.rttVariance, .microseconds(42_500))
+
+        // Subtracting the ACK delay, capped at 25 ms, would go below the minimum RTT: the sample
+        // stays 110 ms.
+        let smoothed = recovery.smoothedRTT
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(&recovery, 2, rtt: .milliseconds(110), ackDelay: .milliseconds(50), sent: now)
+        XCTAssertEqual(recovery.smoothedRTT, (smoothed * 7) / 8 + .milliseconds(110) / 8)
+
+        // After the handshake is confirmed, 100 ms of ACK delay count as max_ack_delay.
+        var capped = CoreRecovery()
+        capped.maxAckDelay = .milliseconds(25)
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(&capped, 0, rtt: .milliseconds(100), sent: now)
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(&capped, 1, rtt: .milliseconds(225), ackDelay: .milliseconds(100), sent: now)
+        XCTAssertEqual(capped.smoothedRTT, (.milliseconds(100) * 7) / 8 + .milliseconds(200) / 8)
+
+        // Before, all of it counts.
+        var uncapped = CoreRecovery()
+        uncapped.maxAckDelay = .milliseconds(25)
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(&uncapped, 0, rtt: .milliseconds(100), sent: now)
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(
+            &uncapped,
+            1,
+            rtt: .milliseconds(225),
+            ackDelay: .milliseconds(100),
+            handshakeConfirmed: false,
+            sent: now
+        )
+        XCTAssertEqual(uncapped.smoothedRTT, (.milliseconds(100) * 7) / 8 + .milliseconds(125) / 8)
+    }
+
+    /// RFC 9002 Section 5.1: an ACK frame is an RTT sample if it newly acknowledges the largest
+    /// packet number, and at least one of the packets it newly acknowledges is ack-eliciting.
+    func testOnlyAnAckOfANewLargestWithAnAckElicitingPacketIsASample() {
+        var recovery = CoreRecovery()
+        let start = NetworkClock.Instant(milliseconds: 1_000)
+        Self.sendPacket(&recovery, 0, at: start, isAckEliciting: false)
+        var result = recovery.onAckReceived(
+            ranges: [0...0],
+            ackDelay: .zero,
+            in: .applicationData,
+            handshakeConfirmed: true,
+            now: start.advanced(by: .milliseconds(50))
+        )
+        XCTAssertFalse(result.rttSampled, "Nothing ack-eliciting was acknowledged")
+        XCTAssertEqual(result.acknowledged.count, 1)
+
+        Self.sendPacket(&recovery, 1, at: start)
+        Self.sendPacket(&recovery, 2, at: start, isAckEliciting: false)
+        result = recovery.onAckReceived(
+            ranges: [1...2],
+            ackDelay: .zero,
+            in: .applicationData,
+            handshakeConfirmed: true,
+            now: start.advanced(by: .milliseconds(80))
+        )
+        XCTAssertTrue(result.rttSampled)
+        XCTAssertEqual(recovery.latestRTT, .milliseconds(80))
+
+        // The same ACK frame again acknowledges nothing new.
+        result = recovery.onAckReceived(
+            ranges: [0...2],
+            ackDelay: .zero,
+            in: .applicationData,
+            handshakeConfirmed: true,
+            now: start.advanced(by: .milliseconds(300))
+        )
+        XCTAssertFalse(result.rttSampled)
+        XCTAssertEqual(recovery.latestRTT, .milliseconds(80))
+    }
+
+    // MARK: Probe timeout (RFC 9002 Section 6.2)
+
+    /// The PTO is smoothed_rtt + max(4 * rttvar, granularity), plus max_ack_delay in the
+    /// application data space, doubled for every PTO in a row (Section 6.2.1).
+    func testTheProbeTimeoutBacksOffExponentially() {
+        var recovery = CoreRecovery()
+        recovery.maxAckDelay = .milliseconds(25)
+        let start = NetworkClock.Instant(milliseconds: 1_000)
+        _ = Self.sample(&recovery, 0, rtt: .milliseconds(100), sent: start)
+        let pto = NetworkDuration.milliseconds(100 + 4 * 50 + 25)
+        XCTAssertEqual(recovery.probeTimeout(includingMaxAckDelay: true), pto)
+        XCTAssertEqual(recovery.probeTimeout(includingMaxAckDelay: false), pto - .milliseconds(25))
+
+        let sent = start.advanced(by: .milliseconds(200))
+        Self.sendPacket(&recovery, 1, at: sent)
+        for backoff in [1, 2, 4] {
+            let deadline = recovery.lossDetectionDeadline(
+                handshakeConfirmed: true,
+                hasHandshakeKeys: true,
+                peerAwaitingAddressValidation: false
+            )
+            XCTAssertEqual(deadline?.deadline, sent.advanced(by: pto * backoff))
+            XCTAssertEqual(deadline?.space, .applicationData)
+            guard
+                case .probe(.applicationData) = recovery.onLossDetectionTimeout(
+                    handshakeConfirmed: true,
+                    hasHandshakeKeys: true,
+                    peerAwaitingAddressValidation: false,
+                    now: sent.advanced(by: pto * backoff)
+                )
+            else {
+                return XCTFail("No probe")
+            }
+        }
+        // An acknowledgement resets the backoff.
+        _ = recovery.onAckReceived(
+            ranges: [1...1],
+            ackDelay: .zero,
+            in: .applicationData,
+            handshakeConfirmed: true,
+            now: sent.advanced(by: .seconds(5))
+        )
+        XCTAssertEqual(recovery.ptoCount, 0)
+    }
+
+    /// RFC 9002 Section 6.2.1: application data probes wait until the handshake is confirmed.
+    func testApplicationDataProbesWaitForTheConfirmedHandshake() {
+        var recovery = CoreRecovery()
+        let start = NetworkClock.Instant(milliseconds: 1_000)
+        Self.sendPacket(&recovery, 0, at: start)
+        XCTAssertNil(
+            recovery.lossDetectionDeadline(
+                handshakeConfirmed: false,
+                hasHandshakeKeys: true,
+                peerAwaitingAddressValidation: false
+            )
+        )
+        Self.sendPacket(&recovery, 0, at: start, in: .handshake)
+        XCTAssertEqual(
+            recovery.lossDetectionDeadline(
+                handshakeConfirmed: false,
+                hasHandshakeKeys: true,
+                peerAwaitingAddressValidation: false
+            )?.space,
+            .handshake
+        )
+    }
+
+    /// RFC 9002 Section 6.4: discarding the keys of a space removes its packets from the bytes in
+    /// flight and resets the backoff.
+    func testDiscardingASpaceForgetsItsPacketsInFlight() {
+        var recovery = CoreRecovery()
+        let start = NetworkClock.Instant(milliseconds: 1_000)
+        Self.sendPacket(&recovery, 0, at: start, in: .initial)
+        Self.sendPacket(&recovery, 1, at: start, in: .initial)
+        Self.sendPacket(&recovery, 0, at: start, in: .handshake)
+        recovery.ptoCount = 2
+        XCTAssertEqual(recovery.bytesInFlight, 3000)
+        recovery.discard(.initial)
+        XCTAssertEqual(recovery.bytesInFlight, 1000)
+        XCTAssertEqual(recovery.ptoCount, 0)
+        XCTAssertTrue(recovery.spaces[0].sent.isEmpty)
+        XCTAssertTrue(recovery.hasAckElicitingInFlight)
+    }
 }
 
 #endif

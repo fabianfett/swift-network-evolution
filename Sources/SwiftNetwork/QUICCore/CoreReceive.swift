@@ -477,7 +477,17 @@ extension QUICConnectionCore {
             return true
         case 0x07:  // NEW_TOKEN
             guard let length = reader.vle(), reader.skip(Int(length)) else { return false }
-            return true
+            // RFC 9000 Section 19.7: only servers send it, and never empty.
+            if self.isServer {
+                self.closeWithError(
+                    CoreTransportError.protocolViolation,
+                    frameType: frameType,
+                    reason: "NEW_TOKEN from client",
+                    now: now
+                )
+                return true
+            }
+            return length > 0
         case 0x08...0x0f:  // STREAM
             return self.processStreamFrame(frameType, reader: &reader, now: now)
         case 0x10:  // MAX_DATA
@@ -706,7 +716,8 @@ extension QUICConnectionCore {
         return true
     }
 
-    mutating func onPacketAcknowledged(_ packet: CoreSentPacket, in space: PacketNumberSpace, now: NetworkClock.Instant) {
+    mutating func onPacketAcknowledged(_ packet: CoreSentPacket, in space: PacketNumberSpace, now: NetworkClock.Instant)
+    {
         for frame in packet.frames {
             switch frame {
             case .ack(let largestAcknowledged):

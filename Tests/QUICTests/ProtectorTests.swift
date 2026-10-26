@@ -1778,11 +1778,12 @@ final class ProtectorTests: XCTestCase {
         let destinationCID = QUICConnectionID(0)
         let sourceCID = QUICConnectionID(Array(retryPacket[7..<15]))!
 
-        let retryPseudo = Packet.assemblePseudoRetry(
+        let retryPseudo = QUICPseudoRetry.assemble(
             firstByte: retryPacket[0],
-            originalDCID: originalDCID,
+            version: .v1,
             destinationCID: destinationCID,
             sourceCID: sourceCID,
+            originalDCID: originalDCID,
             token: Array(retryPacket[15..<20])
         )
         XCTAssertNoThrow(
@@ -1809,11 +1810,12 @@ final class ProtectorTests: XCTestCase {
         let destinationCID = QUICConnectionID(0)
         let sourceCID = QUICConnectionID(Array(retryPacket[7..<15]))!
 
-        let retryPseudo = Packet.assemblePseudoRetry(
+        let retryPseudo = QUICPseudoRetry.assemble(
             firstByte: retryPacket[0],
-            originalDCID: originalDCID,
+            version: .v1,
             destinationCID: destinationCID,
             sourceCID: sourceCID,
+            originalDCID: originalDCID,
             token: Array(retryPacket[15..<20])
         )
         XCTAssertThrowsError(
@@ -1848,11 +1850,12 @@ final class ProtectorTests: XCTestCase {
         let destinationCID = QUICConnectionID(0)
         let sourceCID = QUICConnectionID(Array(retryPacket[7..<15]))!
 
-        let retryPseudo = Packet.assemblePseudoRetry(
+        let retryPseudo = QUICPseudoRetry.assemble(
             firstByte: retryPacket[0],
-            originalDCID: originalDCID,
+            version: .v1,
             destinationCID: destinationCID,
             sourceCID: sourceCID,
+            originalDCID: originalDCID,
             token: Array(retryPacket[15..<20])
         )
 

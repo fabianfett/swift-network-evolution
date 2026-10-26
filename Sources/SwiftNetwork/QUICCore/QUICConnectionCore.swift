@@ -1072,6 +1072,22 @@ extension Array where Element == CoreAckTracker {
     }
 }
 
+#if Fuzzing
+@available(Network 0.1.0, *)
+extension QUICConnectionCore {
+    /// Lets a fuzzer feed plaintext packets of every packet number space to the receive path:
+    /// null keys open them, and the connection acts as if the handshake completed. Only fuzz
+    /// targets build with it.
+    mutating func prepareForFuzzing() {
+        for keyState in PacketKeyState.allCases {
+            self.protector.installNullProtector(for: keyState)
+        }
+        self.handshake.completeForFuzzing()
+        self.state = .established
+    }
+}
+#endif
+
 #endif
 
 // MARK: - Handshake state for drivers

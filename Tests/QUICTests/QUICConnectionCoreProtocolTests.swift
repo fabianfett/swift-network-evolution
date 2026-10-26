@@ -509,6 +509,42 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         self.assertClientCloses(with: TransportErrorCode.frameEncoding, &pair)
     }
 
+    /// RFC 9000 Section 12.4: a frame whose fields run past the end of the packet, or hold values
+    /// the frame doesn't allow, is a FRAME_ENCODING_ERROR.
+    func testMalformedFramesAreFrameEncodingErrors() {
+        let frames: [(String, [UInt8])] = [
+            ("CRYPTO past the packet", Frame.vle(0x06) + Frame.vle(0) + Frame.vle(1300) + [1]),
+            ("NEW_TOKEN past the packet", Frame.vle(0x07) + Frame.vle(1300) + [1]),
+            // RFC 9000 Section 19.7.
+            ("NEW_TOKEN without a token", Frame.vle(0x07) + Frame.vle(0)),
+            // RFC 9000 Section 19.15: a connection ID of 1 to 20 bytes.
+            (
+                "NEW_CONNECTION_ID of 21 bytes",
+                Frame.vle(0x18) + Frame.vle(1) + Frame.vle(0) + [21] + [UInt8](repeating: 7, count: 21)
+                    + [UInt8](repeating: 9, count: 16)
+            ),
+            (
+                "NEW_CONNECTION_ID of 0 bytes",
+                Frame.vle(0x18) + Frame.vle(1) + Frame.vle(0) + [0] + [UInt8](repeating: 9, count: 16)
+            ),
+            ("CONNECTION_CLOSE reason past the packet", Frame.vle(0x1c) + [0, 0] + Frame.vle(1300) + [1]),
+            // RFC 9000 Section 19.3.1: the first range is larger than the largest acknowledged.
+            ("ACK below packet number 0", Frame.vle(0x02) + [1, 0, 0, 2]),
+        ]
+        for (name, frame) in frames {
+            var pair = self.connectedPair()
+            pair.sendFromServer(frame)
+            XCTAssertEqual(transportErrorCode(pair.client.closeReason), TransportErrorCode.frameEncoding, name)
+        }
+    }
+
+    /// RFC 9000 Section 19.7: only servers send NEW_TOKEN.
+    func testNewTokenFromTheClientIsAProtocolViolation() {
+        var pair = self.connectedPair()
+        pair.sendFromClient(Frame.vle(0x07) + Frame.vle(4) + [1, 2, 3, 4])
+        self.assertServerCloses(with: TransportErrorCode.protocolViolation, &pair)
+    }
+
     func testFramesWithoutStateChangesAreAccepted() {
         var pair = self.connectedPair()
         pair.sendFromServer(

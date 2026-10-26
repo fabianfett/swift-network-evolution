@@ -242,6 +242,31 @@ final class QUICConnectionCoreConnectionIDTests: XCTestCase {
         XCTAssertEqual(Self.closeCode(pair.client.closeReason), CoreTransportError.connectionIDLimitError)
     }
 
+    /// RFC 9000 Section 5.1.2: an endpoint tracks at least twice its active_connection_id_limit
+    /// of retirements it hasn't sent yet, and may close with CONNECTION_ID_LIMIT_ERROR beyond.
+    func testMoreRetirementsThanTrackedIsALimitError() {
+        for (frames, isAnError) in [(4, false), (5, true)] {
+            var pair = Self.connectedPair(
+                client: Self.configuration(automatic: false, limit: 2),
+                server: Self.configuration(automatic: false)
+            )
+            guard var server = pair.server.take() else { return XCTFail("No server") }
+            // In one packet: each retires all earlier ones, before the client can send a frame.
+            for sequenceNumber in 1...UInt8(frames) {
+                server.injectedFrames.append(
+                    Self.newConnectionIDFrame(sequenceNumber: sequenceNumber, retirePriorTo: sequenceNumber)
+                )
+            }
+            pair.server = consume server
+            pair.exchange()
+            if isAnError {
+                XCTAssertEqual(Self.closeCode(pair.client.closeReason), CoreTransportError.connectionIDLimitError)
+            } else {
+                XCTAssertNil(pair.client.closeReason, "\(frames) retirements are within twice the limit")
+            }
+        }
+    }
+
     func testRetirePriorToAboveTheSequenceNumberIsAFrameEncodingError() {
         var pair = Self.connectedPair()
         guard var server = pair.server.take() else { return XCTFail("No server") }
