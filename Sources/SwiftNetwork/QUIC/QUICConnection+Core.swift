@@ -418,11 +418,11 @@ extension QUICConnection {
         self.checkConnectionIdle(in: &eventContext)
     }
 
-    /// Runs `coreAfterUpdate` after the application wrote to or read from a stream, unless an
-    /// outbound batch is open: `outboundDataBatchEnd` runs it once for the whole batch, which
-    /// spares a pass over the core's events, the statistics and the timer per stream. What the
-    /// core has to send waits for the batch end either way.
-    private func coreAfterApplicationUpdate(in eventContext: inout NetworkContext.EventContext) {
+    /// Runs `coreAfterUpdate` after the application wrote to, read from, stopped or closed a
+    /// stream, unless an outbound batch is open: `outboundDataBatchEnd` runs it once for the whole
+    /// batch, which spares a pass over the core's events, the statistics and the timer per stream.
+    /// What the core has to send waits for the batch end either way.
+    func coreAfterApplicationUpdate(in eventContext: inout NetworkContext.EventContext) {
         if self.pendOutboundData, let box = self.coreBox, !box.core.isTerminating {
             return
         }

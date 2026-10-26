@@ -831,7 +831,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         // Possibly send STOP_SENDING, RESET_STREAM or a FIN, which the core holds until it can
         // send them.
-        self.coreAfterUpdate(in: &eventContext)
+        self.coreAfterApplicationUpdate(in: &eventContext)
     }
 
     public func serviceReceivedDatagrams(

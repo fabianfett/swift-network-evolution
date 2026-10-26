@@ -1050,7 +1050,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         }
     }
 
-    /// Writes within an outbound batch leave acting on the core to the batch end, which does it once.
+    /// Writes and closing a stream within an outbound batch leave acting on the core to the batch
+    /// end, which does it once.
     func testQUICOutboundDataBatchUpdatesTheCoreOnceAtItsEnd() {
         QUICTestHarness().runQUICTestOnNewStream { harness, stream in
             let expectation = XCTestExpectation(description: "Write a batch")
@@ -1068,6 +1069,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
                     XCTAssertTrue(stream.write(Array("Hello World!".utf8)))
                 }
                 XCTAssertEqual(client.coreAfterUpdateRuns, runs, "no update per write")
+                stream.stop()
+                XCTAssertEqual(client.coreAfterUpdateRuns, runs, "no update for the close")
                 client.fromExternal { eventContext in
                     _ = client.handleApplicationEvent(.outboundDataBatchEnd, in: &eventContext)
                 }
