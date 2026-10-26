@@ -29,6 +29,8 @@
 // Not exposed in Glibc.swiftmodule
 char * SwiftNetworkLinuxShim_if_indextoname(int index, char * name);
 uint64_t SwiftNetworkLinuxShim_getFDLimit();
+// Returns an epoll instance watching `fd` for errors and hangups only, or -1 with errno set.
+int SwiftNetworkLinuxShim_epollWatchingErrors(int fd);
 
 #endif // __linux__
 #endif // SWIFTNETWORKLINIXSHIM

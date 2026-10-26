@@ -777,6 +777,48 @@ final class SwiftNetworkSocketTests: NetTestCase {
 
         harness.teardown()
     }
+
+    // Regression: a datagram to a port nobody listens on draws an ICMP port unreachable, which
+    // leaves an error pending on the connected socket. On Linux, epoll reports it as EPOLLERR
+    // alone, which libdispatch never hands the read source, so nothing took the error and
+    // libdispatch woke for it again and again, pegging a core for as long as the socket lived
+    // (a QUIC client whose handshake fails at once sends its CONNECTION_CLOSE to such a port).
+    // The error must be taken and dropped, as on Darwin, so the idle window stays idle.
+    func testUDPNoBusyLoopAfterPortUnreachable() {
+        let ready = XCTestExpectation(description: "ready")
+        let cancelled = XCTestExpectation(description: "cancelled")
+        let ports = discoverFreeLoopbackPorts(2)
+        let remote = Endpoint(address: IPv4Address.loopback, port: ports[0])
+        let conn = NetworkConnection(to: remote, using: makeUDPParams(localPort: ports[1]))
+            .onStateUpdate { _, state in
+                if case .ready = state { ready.fulfill() }
+                if case .cancelled = state { cancelled.fulfill() }
+            }
+        conn.start()
+        wait(for: [ready], timeout: 5.0)
+
+        let sent = XCTestExpectation(description: "sent to the closed port")
+        conn.send(.message(content: [0x01])) { result in
+            if case .failure(let error) = result { XCTFail("send failed: \(error)") }
+            sent.fulfill()
+        }
+        wait(for: [sent], timeout: 5.0)
+
+        // As in testTCPNoBusyLoopAfterEOF, both sleeps are load-bearing: the first lets the ICMP
+        // error arrive, the second is the measurement.
+        Thread.sleep(forTimeInterval: 0.3)
+        let before = Self.processCPUSeconds()
+        Thread.sleep(forTimeInterval: 1.0)
+        let cpu = Self.processCPUSeconds() - before
+        XCTAssertLessThan(
+            cpu,
+            0.3,
+            "socket appears to busy-loop on an ICMP error (consumed \(cpu)s CPU while idle)"
+        )
+
+        conn.cancel()
+        wait(for: [cancelled], timeout: 5.0)
+    }
 }
 
 #endif

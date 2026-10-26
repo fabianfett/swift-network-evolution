@@ -19,8 +19,11 @@
 #endif
 
 #include <SwiftNetworkLinuxShim.h>
+#include <errno.h>
 #include <net/if.h>
+#include <sys/epoll.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 char * SwiftNetworkLinuxShim_if_indextoname(int index, char * name)
 {
@@ -38,6 +41,23 @@ uint64_t SwiftNetworkLinuxShim_getFDLimit()
         return (uint64_t)existing_limit.rlim_cur;
     }
     return 0;
+}
+
+int SwiftNetworkLinuxShim_epollWatchingErrors(int fd)
+{
+    int epollFD = epoll_create1(EPOLL_CLOEXEC);
+    if (epollFD < 0) {
+        return -1;
+    }
+    // No requested events: epoll reports EPOLLERR and EPOLLHUP regardless.
+    struct epoll_event event = { .events = 0 };
+    if (epoll_ctl(epollFD, EPOLL_CTL_ADD, fd, &event) != 0) {
+        int savedErrno = errno;
+        close(epollFD);
+        errno = savedErrno;
+        return -1;
+    }
+    return epollFD;
 }
 
 #endif

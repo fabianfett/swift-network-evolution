@@ -17,12 +17,14 @@
 #if canImport(Glibc)
 import Glibc
 internal import Logging
+internal import SwiftNetworkLinuxShim
 #elseif canImport(Android)
 import Android
 internal import Logging
 #elseif canImport(Musl)
 import Musl
 internal import Logging
+internal import SwiftNetworkLinuxShim
 #elseif canImport(os)
 internal import os
 #endif
@@ -92,6 +94,9 @@ public final class SocketDatagramProtocol: BottomDatagramProtocol {
 
         setupReadSource()
         setupWriteSource()
+        #if os(Linux)
+        self.setupErrorSource()
+        #endif
     }
 
     public func teardown() {
@@ -106,6 +111,9 @@ public final class SocketDatagramProtocol: BottomDatagramProtocol {
         dispatchReadSource?.cancel()
         dispatchReadSource = nil
         cancelWriteSource()
+        #if os(Linux)
+        self.cancelErrorSource()
+        #endif
         socket = nil
         incomingFrames.finalizeAllFramesAsFailed()
         pendingOutputFrames.finalizeAllFramesAsFailed()
@@ -299,6 +307,58 @@ public final class SocketDatagramProtocol: BottomDatagramProtocol {
             }
         }
     }
+
+    // MARK: - Error source
+
+    #if os(Linux)
+    // An ICMP error for the connected socket, such as port unreachable for a peer that is gone,
+    // stays pending on the socket, and epoll reports it as EPOLLERR without EPOLLIN.
+    // libdispatch's epoll backend hands a read source only EPOLLIN and EPOLLHUP, so the read
+    // handler never runs to take the error with recv(2): libdispatch re-arms the descriptor and
+    // wakes for the same EPOLLERR again, pegging a core until the socket closes. On Darwin,
+    // kqueue fires the read source and the read in handleSocketReadEvent takes the error.
+    //
+    // A private epoll instance holds the socket with no requested events, which leaves only the
+    // EPOLLERR and EPOLLHUP epoll always reports, and is readable while the socket has one. A
+    // read source on the instance reads SO_ERROR, which clears the error, and drops it as the
+    // read handler does on Darwin.
+    private var errorSource: (any DispatchSourceRead)? = nil
+
+    private func setupErrorSource() {
+        guard let socket = self.socket else { return }
+        let epollFD = socket.withFileDescriptor { SwiftNetworkLinuxShim_epollWatchingErrors($0) }
+        guard epollFD >= 0 else {
+            self.log.error("Failed to watch the socket for errors: \(errno)")
+            return
+        }
+        let source = DispatchSource.makeReadSource(fileDescriptor: epollFD, queue: self.context.queue)
+        source.setEventHandler {
+            self.clearPendingSocketError()
+        }
+        // libdispatch may still watch the instance until the cancel handler runs.
+        source.setCancelHandler {
+            close(epollFD)
+        }
+        self.errorSource = source
+        source.resume()
+    }
+
+    private func cancelErrorSource() {
+        self.errorSource?.setEventHandler(handler: nil)
+        self.errorSource?.cancel()
+        self.errorSource = nil
+    }
+
+    private func clearPendingSocketError() {
+        guard let socket = self.socket else { return }
+        var error: CInt = 0
+        var length = socklen_t(MemoryLayout<CInt>.size)
+        let result = socket.withFileDescriptor { getsockopt($0, SOL_SOCKET, SO_ERROR, &error, &length) }
+        if result == 0 && error != 0 {
+            self.log.datapath("Dropped socket error: \(error)")
+        }
+    }
+    #endif
 
     //
     // - sendDatagrams queues frames into pendingOutputFrames and calls serviceWrites
