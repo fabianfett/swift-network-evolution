@@ -57,14 +57,24 @@ internal import os
 
 @available(Network 0.1.0, *)
 final class SwiftNetworkQUICQlogTests: NetTestCase {
+    /// The qlog has the parameters and the packets of a handshake and a data transfer.
+    private static func assertLogsPackets(_ data: Data, file: StaticString = #filePath, line: UInt = #line) {
+        let json = String(decoding: data, as: UTF8.self)
+        for event in ["PARAMETERS_SET", "PACKET_SENT", "PACKET_RECEIVED"] {
+            XCTAssertTrue(json.contains(event), "no \(event) in the qlog", file: file, line: line)
+        }
+        for frame in ["\"crypto\"", "\"stream\"", "\"ack\""] {
+            XCTAssertTrue(json.contains(frame), "no \(frame) frame in the qlog", file: file, line: line)
+        }
+    }
+
     func testQUICWriteClientQlogFileOnDataTransfer() throws {
         let dataBlock: [UInt8] = Array("Hello World!".utf8)
         let title = "ClientQLog"
         let description = "ClientQLogDescription"
         // NOTE: Test not using a trailing slash at the end of the path name
         let path = "/tmp"
-        // The core doesn't write qlog yet.
-        let harness = QUICTestHarness(clientDriver: .legacy)
+        let harness = QUICTestHarness()
 
         let clientOptions = QUICProtocol.options()
         clientOptions.modifyConnectionOptions { connectionOptions in
@@ -98,6 +108,7 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
             return
         }
         XCTAssertNotNil(resultData)
+        Self.assertLogsPackets(resultData)
         unlink(finalPath)
     }
 
@@ -107,8 +118,7 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
         let description = "ServerQLogDescription"
         // NOTE: Test using a trailing slash at the end of the path name
         let path = "/tmp/"
-        // The core doesn't write qlog yet.
-        let harness = QUICTestHarness(serverDriver: .legacy)
+        let harness = QUICTestHarness()
 
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { connectionOptions in
@@ -143,6 +153,7 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
             return
         }
         XCTAssertNotNil(resultData)
+        Self.assertLogsPackets(resultData)
         unlink(finalPath)
     }
 
@@ -155,8 +166,7 @@ final class SwiftNetworkQUICQlogTests: NetTestCase {
         let path = "/tmp/"
         let finalPath = path + "qlog_server_\(title)_C1.qlog"
         unlink(finalPath)
-        // The core doesn't write qlog yet.
-        let harness = QUICTestHarness(serverDriver: .legacy)
+        let harness = QUICTestHarness()
 
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { connectionOptions in

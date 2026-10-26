@@ -34,6 +34,10 @@ import Darwin
 #endif
 #endif
 
+#if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+internal import Synchronization
+#endif
+
 /// Which implementation runs a `QUICConnection`.
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
@@ -62,11 +66,38 @@ final class QUICConnectionCoreBox {
     var core: QUICConnectionCore
     /// The deadline the timer is armed for.
     var armedDeadline: NetworkClock.Instant?
+    #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+    /// Where an asynchronous step of the handshake leaves its result, while the handshake runs.
+    var asyncResult: QUICConnectionCoreAsyncResult?
+    #endif
+    /// When the timer looks into `asyncResult` next.
+    var asyncResultPollDeadline: NetworkClock.Instant?
 
     init(_ core: consuming QUICConnectionCore) {
         self.core = core
     }
 }
+
+#if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+/// Where an asynchronous certificate verification leaves its result for the connection.
+///
+/// SwiftTLS calls the continuation on whatever thread finished the verification, and nothing
+/// there may touch the connection, which isn't `Sendable`. The continuation only holds this
+/// mailbox, so the copy SwiftTLS keeps holds no cycle either; the connection takes the result on
+/// its context.
+@available(Network 0.1.0, *)
+final class QUICConnectionCoreAsyncResult: Sendable {
+    private let result = Mutex<PendingAsyncResult?>(nil)
+
+    func deliver(_ result: PendingAsyncResult) {
+        self.result.withLock { $0 = result }
+    }
+
+    func take() -> PendingAsyncResult? {
+        self.result.withLock { $0.take() }
+    }
+}
+#endif
 
 // MARK: - Choosing the driver
 
@@ -78,19 +109,9 @@ extension QUICConnection {
         tlsOptions: SwiftTLSProtocol.Options?,
         isServer: Bool
     ) -> Bool {
-        if options.testSendingShortPackets || options.enablePacing || options.enableL4S == true {
+        if options.testSendingShortPackets || options.enableL4S == true {
             return false
         }
-        #if QlogOutput
-        if options.qlogConfiguration != nil {
-            return false
-        }
-        #endif
-        #if EXPORT_SWIFTTLS
-        if let tlsOptions, tlsOptions.tlsOptions.asyncVerifier != nil {
-            return false
-        }
-        #endif
         return true
     }
 
@@ -148,6 +169,7 @@ extension QUICConnection {
             configuration.maxUnacknowledgedKeepAlives = Int(options.keepaliveCount)
             configuration.automaticallyIssueConnectionIDs = !options.disableAutomaticNewConnectionIDs
             configuration.resendRejectedEarlyData = options.resendRejectedEarlyDataAutomatically
+            configuration.pacingEnabled = options.enablePacing || QUICPreferences.shared.pacePackets
             configuration.maxUDPPayloadSize = UInt64(
                 min(
                     max(Int(options.maxUDPPayloadSize), Int(TransportParameters.minUDPPayloadSize)),
@@ -195,6 +217,9 @@ extension QUICConnection {
             return
         }
         configuration.statelessResetToken = nil
+        #if QlogOutput
+        configuration.recordsPacketEvents = self.qLog != nil
+        #endif
         self.handshakeStartTime = self.now
         let core = QUICConnectionCore(
             clientWith: configuration,
@@ -202,7 +227,9 @@ extension QUICConnection {
             destinationConnectionID: self.originalDCID,
             now: self.now
         )
-        self.coreBox = QUICConnectionCoreBox(core)
+        let box = QUICConnectionCoreBox(core)
+        self.coreBox = box
+        self.coreInstallAsyncContinuationHandler(box)
         if let currentPath = self.currentPath {
             self.corePathIDs = [currentPath.pathIdentifier: .initial]
         }
@@ -297,6 +324,9 @@ extension QUICConnection {
         if self.initialDCID == nil {
             self.initialDCID = destinationConnectionID
         }
+        #if QlogOutput
+        configuration.recordsPacketEvents = self.qLog != nil
+        #endif
         self.negotiatedVersion = .v1
         self.handshakeStartTime = self.now
         let core = QUICConnectionCore(
@@ -307,7 +337,9 @@ extension QUICConnection {
             retrySourceConnectionID: retrySourceConnectionID,
             now: self.now
         )
-        self.coreBox = QUICConnectionCoreBox(core)
+        let box = QUICConnectionCoreBox(core)
+        self.coreBox = box
+        self.coreInstallAsyncContinuationHandler(box)
         self.corePathIDs = [path.pathIdentifier: .initial]
         if self.keepaliveDuration != .zero {
             self.coreBox?.core.setKeepAliveInterval(self.keepaliveDuration, now: self.now)
@@ -399,6 +431,7 @@ extension QUICConnection {
                 self.coreReportClose(reason, in: &eventContext)
             }
         } while self.coreUpdatePending
+        self.coreLogPackets()
         self.coreSynchronizeStatistics(in: &eventContext)
         self.coreRescheduleTimer(in: &eventContext)
         self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
@@ -520,6 +553,8 @@ extension QUICConnection {
         var totalPackets = 0
         var probesBlocked = false
         let now = self.now
+        // The core paces in the continuous clock, the kernel in the absolute one.
+        let absoluteOffset = box.core.configuration.pacingEnabled ? now.duration(to: self.nowAbsolute) : .zero
         while true {
             if !probesBlocked, let probePath = box.core.pathWithProbeToSend {
                 // PATH_CHALLENGE and PATH_RESPONSE for another path go first.
@@ -548,6 +583,12 @@ extension QUICConnection {
             guard let written, written > 0, datagram.collapse(to: written) else {
                 datagram.finalize(success: false)
                 break
+            }
+            if let departureTime = box.core.departureTime {
+                // Kernel pacing: the datagram leaves at its time, which the core never delays.
+                let absolute = departureTime.advanced(by: absoluteOffset)
+                datagram.departureTime = UInt64(clamping: absolute.time.nanoseconds)
+                self.stats.increment(.txDepartureTimestamp)
             }
             QUICSignpost.outbound(id: self.signpostID, length: written)
             totalBytes &+= written
@@ -731,7 +772,11 @@ extension QUICConnection {
 
     private func coreRescheduleTimer(in eventContext: inout NetworkContext.EventContext) {
         guard let box = self.coreBox, let timerID = self.coreTimerID else { return }
-        guard let deadline = box.core.nextDeadline else {
+        var nextDeadline = box.core.nextDeadline
+        if let pollDeadline = self.coreAsyncResultPollDeadline(box) {
+            nextDeadline = min(nextDeadline ?? pollDeadline, pollDeadline)
+        }
+        guard let deadline = nextDeadline else {
             if box.armedDeadline != nil {
                 box.armedDeadline = nil
                 self.timer.reschedule(identifier: timerID, fromNow: .zero, timerNow: self.now, in: &eventContext)
@@ -751,6 +796,10 @@ extension QUICConnection {
         // The timer runs entries up to its threshold early; they count as on time.
         let now = max(firedAt, box.armedDeadline ?? firedAt)
         box.armedDeadline = nil
+        if box.asyncResultPollDeadline.map({ now >= $0 }) == true {
+            box.asyncResultPollDeadline = nil
+            self.coreResumeHandshakeIfReady(box, now: now)
+        }
         box.core.handleTimeout(now: now)
         self.coreAfterUpdate(in: &eventContext)
     }
@@ -769,6 +818,9 @@ extension QUICConnection {
         self.initialKeysDiscarded = true
         self.isHandshakeConfirmed = box.core.isHandshakeConfirmed || self.isServer
         let peerParameters = box.core.peerTransportParameters
+        if let peerParameters {
+            self.logTransportParameters(owner: .remote, transportParameters: peerParameters)
+        }
         self.connectionMetadata.activeConnectionIDLimit = peerParameters?.intValue(.activeConnectionIDLimit) ?? 2
         self.localCIDs.activeConnectionIDLimit = box.core.peerActiveConnectionIDLimit
         // The peer's connection ID of the handshake, with the server's stateless reset token.
@@ -894,16 +946,87 @@ extension QUICConnection {
         self.unsetMetadataHandlers(on: retiredMetadata)
     }
 
-    /// Releases the core once it is closed.
+    /// Releases the core once it is closed: after the closing or draining period, so the qlog
+    /// covers it, as legacy writes it after its draining timer.
     private func coreFinish(in eventContext: inout NetworkContext.EventContext) {
         if self.state == .closing {
             self.state.change(to: .draining, logIDString: self.logPrefixer.logIDString)
         }
+        self.coreLogPackets()
+        #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+        if let box = self.coreBox, box.asyncResult != nil {
+            box.core.setAsyncContinuationHandler(nil)
+            box.asyncResult = nil
+        }
+        #endif
         self.timer.stop(in: &eventContext)
         self.coreTimerID = nil
         self.coreBox = nil
         self.currentPath = nil
         self.corePathIDs.removeAll()
+        self.writeQLog(in: &eventContext)
+    }
+
+    /// Writes the packets the core sent, received and lost to the qlog.
+    private func coreLogPackets() {
+        #if QlogOutput
+        guard let qLog = self.qLog, let box = self.coreBox else { return }
+        while let packetEvent = box.core.nextPacketEvent() {
+            qLog.packetEvent(packetEvent)
+        }
+        #endif
+    }
+
+    // MARK: Asynchronous handshake steps
+
+    /// How often the connection looks for the result of an asynchronous handshake step.
+    static let coreAsyncResultPollInterval = NetworkDuration.milliseconds(1)
+
+    /// Lets an asynchronous certificate verification continue the handshake. SwiftTLS hands the
+    /// result to a mailbox, which the connection checks on its timer until the handshake
+    /// completes: the continuation runs off the context and can't reach the connection.
+    private func coreInstallAsyncContinuationHandler(_ box: QUICConnectionCoreBox) {
+        #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+        guard let tlsOptions = self.coreConfiguration?.tlsOptions, tlsOptions.tlsOptions.asyncVerifier != nil else {
+            return
+        }
+        let mailbox = QUICConnectionCoreAsyncResult()
+        box.asyncResult = mailbox
+        box.core.setAsyncContinuationHandler { result in
+            mailbox.deliver(result)
+        }
+        #endif
+    }
+
+    /// Continues the handshake with the result of an asynchronous step, if it arrived.
+    private func coreResumeHandshakeIfReady(_ box: QUICConnectionCoreBox, now: NetworkClock.Instant) {
+        #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+        if let result = box.asyncResult?.take() {
+            box.core.resumeHandshake(with: result, now: now)
+        }
+        #endif
+    }
+
+    /// When the timer looks for the result of an asynchronous step next; `nil` once the handshake
+    /// can't wait for one any more.
+    private func coreAsyncResultPollDeadline(_ box: QUICConnectionCoreBox) -> NetworkClock.Instant? {
+        #if canImport(SwiftTLS) && SWIFTTLS_CERTIFICATE_VERIFICATION && canImport(Synchronization)
+        guard box.asyncResult != nil else { return nil }
+        guard !box.core.isHandshakeComplete, !box.core.isTerminating else {
+            box.core.setAsyncContinuationHandler(nil)
+            box.asyncResult = nil
+            box.asyncResultPollDeadline = nil
+            return nil
+        }
+        if let deadline = box.asyncResultPollDeadline {
+            return deadline
+        }
+        let deadline = self.now.advanced(by: Self.coreAsyncResultPollInterval)
+        box.asyncResultPollDeadline = deadline
+        return deadline
+        #else
+        return nil
+        #endif
     }
 
     /// Acts on what the application asks for, from `handleApplicationEvent`.

@@ -481,6 +481,7 @@ class QUICTestHarness {
                 matchedError,
                 "Failed to get expected error \(expectHandshakeError), received \(receivedError.debugDescription)"
             )
+            self.assertDrivers()
 
             stop()
 

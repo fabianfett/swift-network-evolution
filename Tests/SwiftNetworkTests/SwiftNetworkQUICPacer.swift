@@ -60,8 +60,7 @@ final class SwiftNetworkQUICPacer: NetTestCase {
     func testQUICClientPacingMarkedPackets() throws {
         let clientOptions = QUICProtocol.options()
         clientOptions.modifyConnectionOptions { $0.enablePacing = true }
-        // The core doesn't pace yet.
-        QUICTestHarness(clientDriver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             blockSize: 10240,
             blockCount: 4,
             clientOptions: clientOptions,
@@ -82,8 +81,7 @@ final class SwiftNetworkQUICPacer: NetTestCase {
     func testQUICServerPacingMarkedPackets() throws {
         let serverOptions = QUICProtocol.options()
         serverOptions.modifyConnectionOptions { $0.enablePacing = true }
-        // The core doesn't pace yet.
-        QUICTestHarness(serverDriver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             blockSize: 10240,
             blockCount: 4,
             serverOptions: serverOptions,

@@ -35,11 +35,26 @@ extension QUICConnectionCore {
         now: NetworkClock.Instant
     ) -> Int? {
         guard path == self.activePath else {
+            if self.recovery.pacer != nil {
+                // The pacer belongs to the active path.
+                self.departureTime = nil
+            }
             return self.sendProbe(into: &buffer, on: path, now: now)
         }
         guard let length = self.sendOnActivePath(into: &buffer, now: now) else { return nil }
         self.paths[path]?.bytesSent &+= length
+        if self.recovery.pacer != nil {
+            self.departureTime = self.pacedDepartureTime(ofDatagram: length, now: now)
+        }
         return length
+    }
+
+    /// When a datagram leaves: paced once the connection is established, right away before, and
+    /// for its CONNECTION_CLOSE.
+    private mutating func pacedDepartureTime(ofDatagram length: Int, now: NetworkClock.Instant) -> NetworkClock.Instant?
+    {
+        guard case .established = self.state, self.handshake.isComplete else { return nil }
+        return self.recovery.pacer?.departureTime(ofDatagram: length, now: now)
     }
 
     private mutating func sendProbe(
@@ -473,6 +488,16 @@ extension QUICConnectionCore {
         }
 
         let isInFlight = isAckEliciting || hasPadding
+        if self.configuration.recordsPacketEvents {
+            self.recordSentPacket(
+                UInt64(packetNumber.value),
+                type: isEarlyData ? .zeroRTT : PacketEvent.PacketType(space),
+                size: totalLength,
+                frames: frames,
+                hasPadding: hasPadding,
+                now: now
+            )
+        }
         self.recovery.onPacketSent(
             CoreSentPacket(
                 packetNumber: UInt64(packetNumber.value),
@@ -736,7 +761,7 @@ extension QUICConnectionCore {
         let limit = min(buffer.count, self.configuration.maxDatagramSize)
         while let space = self.closeSpacesToSend.first {
             self.closeSpacesToSend.removeFirst()
-            if let length = self.writeClosePacket(close, in: space, into: &buffer, at: 0, maximumLength: limit) {
+            if let length = self.writeClosePacket(close, in: space, into: &buffer, at: 0, maximumLength: limit, now: now) {
                 return length
             }
         }
@@ -770,7 +795,8 @@ extension QUICConnectionCore {
         in space: PacketNumberSpace,
         into buffer: inout MutableSpan<UInt8>,
         at offset: Int,
-        maximumLength: Int
+        maximumLength: Int,
+        now: NetworkClock.Instant
     ) -> Int? {
         let keyState: PacketKeyState = space == .initial ? .initial : (space == .handshake ? .handshake : self.keyPhase)
         guard self.protector.sealKeyReady(for: keyState), maximumLength > 64 else { return nil }
@@ -871,6 +897,18 @@ extension QUICConnectionCore {
             try self.protector.seal(&packet, buffer: &sealRegion)
         } catch {
             return nil
+        }
+        if self.configuration.recordsPacketEvents {
+            self.recordPacketEvent(
+                PacketEvent(
+                    kind: .sent,
+                    packetType: PacketEvent.PacketType(space),
+                    packetNumber: UInt64(packetNumber.value),
+                    size: totalLength,
+                    frames: [.connectionClose],
+                    time: now
+                )
+            )
         }
         return totalLength
     }

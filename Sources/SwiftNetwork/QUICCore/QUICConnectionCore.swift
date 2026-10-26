@@ -78,6 +78,12 @@ public struct QUICConnectionCore: ~Copyable {
         /// them. Otherwise its streams start over empty, and ``Event/earlyDataRejected`` tells
         /// the application to write again.
         public var resendRejectedEarlyData = false
+        /// Whether the connection paces what it sends once the handshake completed: each
+        /// datagram gets a ``QUICConnectionCore/departureTime`` for the kernel (RFC 9002 Section
+        /// 7.7).
+        public var pacingEnabled = false
+        /// Whether the connection records ``PacketEvent``s, for qlog.
+        public var recordsPacketEvents = false
 
         #if DEBUG
         /// Changes the transport parameters this endpoint sends, so tests can send what a broken
@@ -200,6 +206,13 @@ public struct QUICConnectionCore: ~Copyable {
     var largestShortHeaderPacketNumber: UInt64?
     /// What happened on the connection, for the framework's statistics.
     var statistics = Statistics()
+    /// When the datagram the last ``send(into:on:now:)`` wrote should leave, if the connection
+    /// paces; `nil` when it goes out right away.
+    public internal(set) var departureTime: NetworkClock.Instant?
+    /// Packets sent, received and lost, oldest first, if the configuration records them.
+    var packetEvents = Deque<PacketEvent>()
+    /// The frame types of the packet being processed, while packet events are recorded.
+    var receivedFrameTypes: [PacketEvent.FrameType] = []
 
     var protector: Protector
     var parser: PacketParser
@@ -377,7 +390,7 @@ public struct QUICConnectionCore: ~Copyable {
         )
         self.parser = PacketParser(logPrefixer: self.log)
         self.handshake = CoreHandshake(isServer: isServer)
-        self.recovery = CoreRecovery()
+        self.recovery = CoreRecovery(pacingEnabled: configuration.pacingEnabled)
         self.streams = CoreStreamMap(
             isServer: isServer,
             localMaxStreamsBidirectional: configuration.initialMaxStreamsBidirectional,
@@ -528,7 +541,7 @@ public struct QUICConnectionCore: ~Copyable {
             switch timeout {
             case .lost(let lost, let space):
                 for packet in lost {
-                    self.onPacketLost(packet, in: space)
+                    self.onPacketLost(packet, in: space, now: now)
                 }
             case .probe(let space):
                 self.probesPending[Int(space.rawValue)] = 2

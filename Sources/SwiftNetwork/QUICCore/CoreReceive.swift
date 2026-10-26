@@ -191,6 +191,14 @@ extension QUICConnectionCore {
             }
             self.packetIsEarlyData = packet.keyState == .earlyData
             let isAckEliciting = self.processFrames(bytes.bytes, in: space, now: now)
+            if self.configuration.recordsPacketEvents {
+                self.recordReceivedPacket(
+                    packetNumber,
+                    type: self.packetIsEarlyData ? .zeroRTT : PacketEvent.PacketType(space),
+                    size: packetLength,
+                    now: now
+                )
+            }
             self.packetsProcessed &+= 1
             if self.isClosed { return packetLength }
             if space == .applicationData && !self.packetIsProbing && !self.isClosingOrDraining {
@@ -355,6 +363,9 @@ extension QUICConnectionCore {
             guard let frameType = reader.vle() else {
                 self.closeWithError(CoreTransportError.frameEncodingError, reason: "Truncated frame type", now: now)
                 return isAckEliciting
+            }
+            if self.configuration.recordsPacketEvents {
+                self.receivedFrameTypes.append(PacketEvent.FrameType(frameType: frameType))
             }
             if frameType != 0x00 && frameType != 0x02 && frameType != 0x03 && frameType != 0x1c && frameType != 0x1d {
                 isAckEliciting = true
@@ -654,7 +665,7 @@ extension QUICConnectionCore {
             self.onPacketAcknowledged(packet, in: space)
         }
         for packet in result.lost {
-            self.onPacketLost(packet, in: space)
+            self.onPacketLost(packet, in: space, now: now)
         }
         return true
     }
@@ -689,9 +700,12 @@ extension QUICConnectionCore {
         }
     }
 
-    mutating func onPacketLost(_ packet: CoreSentPacket, in space: PacketNumberSpace) {
+    mutating func onPacketLost(_ packet: CoreSentPacket, in space: PacketNumberSpace, now: NetworkClock.Instant) {
         self.statistics.increment(.txLostPackets)
         self.statistics.increment(.txLostBytes, by: packet.size)
+        if self.configuration.recordsPacketEvents {
+            self.recordPacketEvent(.lost, sent: packet, in: space, now: now)
+        }
         self.requeueFrames(of: packet, in: space)
     }
 

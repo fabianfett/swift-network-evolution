@@ -249,6 +249,13 @@ struct PacketHeader {
         self.payloadLength = 0
     }
 
+    /// The header of a packet `QUICConnectionCore` reported, which only knows its number and size.
+    init(packetNumber: UInt64, size: Int) {
+        self.packetNumber = PacketNumber(Int64(truncatingIfNeeded: packetNumber))
+        self.packetSize = UInt64(max(0, size))
+        self.payloadLength = .max
+    }
+
     init(packet: borrowing Packet) {
         self.packetNumber = packet.number
         self.packetSize = UInt64(packet.totalLength)
@@ -492,8 +499,13 @@ struct EventFrame {
 @available(Network 0.1.0, *)
 struct EventFrames {
     var frames: [EventFrame] = []
+    /// The frames of a packet `QUICConnectionCore` reported, which only names their types.
+    var frameTypes: [QUICConnectionCore.PacketEvent.FrameType] = []
 
     init() {}
+    init(frameTypes: [QUICConnectionCore.PacketEvent.FrameType]) {
+        self.frameTypes = frameTypes
+    }
     init(packet: borrowing Packet, ackDelayExponent: Int) {
         if let shorthandFrames = packet.shorthandFrames {
             for shorthandFrame in shorthandFrames {
@@ -506,7 +518,41 @@ struct EventFrames {
         for frame in frames {
             data.append(frame.dumpData())
         }
+        for frameType in frameTypes {
+            data.append(["frame_type": frameType.qlogName])
+        }
         return data
+    }
+}
+
+@available(Network 0.1.0, *)
+extension QUICConnectionCore.PacketEvent.FrameType {
+    /// The `frame_type` qlog writes, as `EventFrame` does.
+    var qlogName: String {
+        switch self {
+        case .padding: return "padding"
+        case .ping: return "ping"
+        case .ack: return "ack"
+        case .resetStream: return "reset_stream"
+        case .stopSending: return "stop_sending"
+        case .crypto: return "crypto"
+        case .newToken: return "new_token"
+        case .stream: return "stream"
+        case .maxData: return "max_data"
+        case .maxStreamData: return "max_stream_data"
+        case .maxStreams: return "max_streams"
+        case .dataBlocked: return "data_blocked"
+        case .streamDataBlocked: return "stream_data_blocked"
+        case .streamsBlocked: return "streams_blocked"
+        case .newConnectionID: return "new_connection_id"
+        case .retireConnectionID: return "retire_connection_id"
+        case .pathChallenge: return "path_challenge"
+        case .pathResponse: return "path_response"
+        case .connectionClose: return "connection_close"
+        case .handshakeDone: return "handshake_done"
+        case .datagram: return "datagram"
+        case .unknown: return "unknown"
+        }
     }
 }
 
@@ -518,6 +564,16 @@ enum PacketType: String {
     case oneRTT = "1RTT"
     case retry = "retry"
     case versionNegotiation = "version_negotiation"
+
+    @available(Network 0.1.0, *)
+    init(_ type: QUICConnectionCore.PacketEvent.PacketType) {
+        switch type {
+        case .initial: self = .initial
+        case .handshake: self = .handshake
+        case .zeroRTT: self = .zeroRTT
+        case .oneRTT: self = .oneRTT
+        }
+    }
 
     @available(Network 0.1.0, *)
     init(packet: borrowing SentPacketRecord) {
@@ -693,6 +749,43 @@ final class QLog {
         )
         let event = Event.packetLost(packetEvent, timestamp: calculateTimestamp(timestamp))
         eventsList.append(event)
+    }
+
+    /// Logs a packet `QUICConnectionCore` sent, received or declared lost.
+    func packetEvent(_ packetEvent: QUICConnectionCore.PacketEvent) {
+        let timestamp = self.calculateTimestamp(packetEvent.time)
+        let header = PacketHeader(packetNumber: packetEvent.packetNumber, size: packetEvent.size)
+        let packetType = PacketType(packetEvent.packetType)
+        let frames = EventFrames(frameTypes: packetEvent.frames)
+        switch packetEvent.kind {
+        case .sent:
+            let packet = EventPacket(
+                packetType: packetType,
+                packetHeader: header,
+                frameList: frames,
+                isCoalesced: nil,
+                trigger: .sentReceivedTrigger(.unknown)
+            )
+            self.eventsList.append(.packetSent(packet, timestamp: timestamp))
+        case .received:
+            let packet = EventPacket(
+                packetType: packetType,
+                packetHeader: header,
+                frameList: frames,
+                isCoalesced: nil,
+                trigger: .sentReceivedTrigger(.unknown)
+            )
+            self.eventsList.append(.packetReceived(packet, timestamp: timestamp))
+        case .lost:
+            let packet = EventPacket(
+                packetType: packetType,
+                packetHeader: header,
+                frameList: frames,
+                isCoalesced: nil,
+                trigger: .lostTrigger(nil)
+            )
+            self.eventsList.append(.packetLost(packet, timestamp: timestamp))
+        }
     }
 
     func metricsUpdated(

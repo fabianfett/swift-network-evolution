@@ -103,10 +103,17 @@ struct CoreRecovery {
     var bytesInFlight = 0
     var slowStartThreshold = Int.max
     var congestionRecoveryStartTime: NetworkClock.Instant?
+    /// When datagrams leave, if the connection paces; `nil` otherwise.
+    var pacer: CorePacer?
 
-    init(maxDatagramSize: Int = 1200) {
+    init(maxDatagramSize: Int = 1200, pacingEnabled: Bool = false) {
         self.maxDatagramSize = maxDatagramSize
         self.congestionWindow = Self.initialWindow(maxDatagramSize: maxDatagramSize)
+        if pacingEnabled {
+            var pacer = CorePacer()
+            pacer.reset(congestionWindow: self.congestionWindow, maxDatagramSize: maxDatagramSize)
+            self.pacer = pacer
+        }
     }
 
     static func initialWindow(maxDatagramSize: Int) -> Int {
@@ -208,6 +215,7 @@ struct CoreRecovery {
         if !result.lost.isEmpty {
             self.onPacketsLostCongestionControl(result.lost, now: now)
         }
+        self.updatePacer()
 
         // Reset the PTO backoff, unless the client is unsure the server validated its address.
         self.ptoCount = 0
@@ -387,6 +395,7 @@ struct CoreRecovery {
             let lost = self.detectLostPackets(in: space, now: now)
             if !lost.isEmpty {
                 self.onPacketsLostCongestionControl(lost, now: now)
+                self.updatePacer()
             }
             return .lost(lost, space)
         }
@@ -411,6 +420,17 @@ struct CoreRecovery {
         self.congestionWindow = Self.initialWindow(maxDatagramSize: self.maxDatagramSize)
         self.slowStartThreshold = .max
         self.congestionRecoveryStartTime = nil
+        self.pacer?.reset(congestionWindow: self.congestionWindow, maxDatagramSize: self.maxDatagramSize)
+    }
+
+    /// Paces at the rate the congestion window allows per RTT, once it changed.
+    private mutating func updatePacer() {
+        guard self.pacer != nil else { return }
+        self.pacer!.update(
+            congestionWindow: self.congestionWindow,
+            inSlowStart: self.congestionWindow < self.slowStartThreshold,
+            smoothedRTT: self.smoothedRTT
+        )
     }
 
     private mutating func onPacketAcknowledgedCongestionControl(_ packet: CoreSentPacket) {
@@ -432,6 +452,66 @@ struct CoreRecovery {
         self.congestionRecoveryStartTime = now
         self.slowStartThreshold = max(self.congestionWindow / 2, self.minimumWindow)
         self.congestionWindow = self.slowStartThreshold
+    }
+}
+
+/// Kernel pacing (RFC 9002 Section 7.7): spreads the congestion window over the RTT in bursts.
+/// It never holds a datagram back; each one gets the time it should leave at, which the driver
+/// hands to the kernel.
+@available(Network 0.1.0, *)
+struct CorePacer {
+    /// The RTT the startup rate assumes.
+    static let startupRTT = NetworkDuration.milliseconds(100)
+    /// The rate divided by this is the burst size: about a millisecond of data.
+    static let burstShift: UInt64 = 10
+
+    /// Bytes per second.
+    var rate: UInt64 = 0
+    var burstSize = 0
+    /// When the current burst leaves; `nil` before the first datagram.
+    var burstStart: NetworkClock.Instant?
+    var burstBytes = 0
+
+    /// Starts over at the startup rate: the window per 100 ms, a datagram per burst.
+    mutating func reset(congestionWindow: Int, maxDatagramSize: Int) {
+        self.rate = UInt64(congestionWindow) &* 1_000_000 / UInt64(Self.startupRTT.microseconds)
+        self.burstSize = maxDatagramSize
+    }
+
+    /// Paces the window per smoothed RTT, twice that in slow start, which RFC 9002 Section 7.7
+    /// allows so that pacing doesn't slow the window's growth.
+    mutating func update(congestionWindow: Int, inSlowStart: Bool, smoothedRTT: NetworkDuration) {
+        let microseconds = smoothedRTT.microseconds > 0 ? smoothedRTT.microseconds : Self.startupRTT.microseconds
+        let window = UInt64(max(0, congestionWindow)) &* (inSlowStart ? 2 : 1)
+        self.rate = window &* 1_000_000 / UInt64(microseconds)
+        self.burstSize = Int(truncatingIfNeeded: self.rate >> Self.burstShift)
+    }
+
+    /// When a datagram of `length` bytes leaves: with the current burst, or a burst interval
+    /// after it once the burst is full, but never before `now`.
+    mutating func departureTime(ofDatagram length: Int, now: NetworkClock.Instant) -> NetworkClock.Instant {
+        guard let burstStart = self.burstStart else {
+            self.burstStart = now
+            self.burstBytes = length
+            return now
+        }
+        guard self.burstBytes >= self.burstSize else {
+            self.burstBytes &+= length
+            return burstStart
+        }
+        let next = max(now, burstStart.advanced(by: self.interval(forBytes: self.burstBytes)))
+        self.burstStart = next
+        self.burstBytes = length
+        return next
+    }
+
+    /// How long `bytes` take at the rate, at most `Constants.maxBurstIntervalKernelPacing`.
+    func interval(forBytes bytes: Int) -> NetworkDuration {
+        let maximum = Constants.maxBurstIntervalKernelPacing
+        guard self.rate > 0 else { return maximum }
+        let nanoseconds = UInt64(max(0, bytes)) &* 1_000_000_000 / self.rate
+        guard nanoseconds < UInt64(maximum.nanoseconds) else { return maximum }
+        return .nanoseconds(Int64(nanoseconds))
     }
 }
 

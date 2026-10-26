@@ -167,6 +167,25 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
             serverOptions: serverOptions
         )
     }
+
+    // A client whose verifier accepts the server from off the context, after a while: the
+    // handshake waits for the result, then completes and carries data.
+    func testQUICHandshakeWithAsyncVerification() {
+        let clientOptions = QUICProtocol.options()
+        var tlsOptions = clientOptions.tlsOptions
+        tlsOptions.tlsOptions.asyncVerifier = AsyncVerifier(availableCertificateTypes: [.rawPublicKey]) { info in
+            guard let deliverResult = info.deliverResult else {
+                return .invalid(reason: "No way to deliver an async result")
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) {
+                deliverResult(.valid)
+            }
+            return .waiting
+        }
+        clientOptions.modifyTLSOptions { $0 = tlsOptions }
+
+        QUICTestHarness().runQUICTest(dataBlock: Array("Hello World!".utf8), clientOptions: clientOptions)
+    }
     #endif
 
     #if EXPORT_SWIFTTLS

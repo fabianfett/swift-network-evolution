@@ -1284,7 +1284,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         logTransportParameters(owner: .local, transportParameters: localTransportParameters)
     }
 
-    private func logTransportParameters(
+    func logTransportParameters(
         owner: QLogOwner?,
         transportParameters: TransportParameters
     ) {
@@ -4898,7 +4898,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         // TODO: log summary integration
     }
 
-    private func writeQLog(in eventContext: inout NetworkContext.EventContext) {
+    func writeQLog(in eventContext: inout NetworkContext.EventContext) {
         #if QlogOutput
         if let qLog {
             guard let configuration = qLog.configuration
