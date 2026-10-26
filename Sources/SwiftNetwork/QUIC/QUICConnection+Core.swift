@@ -1249,9 +1249,9 @@ extension QUICConnection {
     func coreStreamDrained(_ stream: QUICStreamInstance, in eventContext: inout NetworkContext.EventContext) {
         guard stream.upperReceiveQueue.isEmpty else { return }
         if stream.markedInboundFINOnFrame {
-            if stream.receive.state != .dataRead {
-                stream.receive.state.change(logIDString: stream.log.logPrefix, to: .dataRead)
-            }
+            // The receive state mirrors the core's, which skips the intermediate states, so this
+            // assigns rather than goes through the transition check.
+            stream.receive.state = .dataRead
             self.coreCloseStreamIfDone(stream, in: &eventContext)
         } else {
             self.coreDeliverReadableData(stream, in: &eventContext)
