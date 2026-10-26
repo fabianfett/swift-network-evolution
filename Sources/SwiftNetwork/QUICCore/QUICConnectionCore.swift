@@ -281,6 +281,9 @@ public struct QUICConnectionCore: ~Copyable {
     public internal(set) var peerTransportParameters: TransportParameters?
     var state: State = .handshaking
     public internal(set) var isHandshakeConfirmed = false
+    /// The smoothed RTT when the handshake completed; `nil` before then, or if the handshake
+    /// completed without an RTT sample.
+    public internal(set) var handshakeRTT: NetworkDuration?
     var handshakeDonePending = false
     var spaceDiscarded = [false, false, false]
     var addressValidated: Bool
@@ -334,6 +337,9 @@ public struct QUICConnectionCore: ~Copyable {
     /// Raw frames written into the next 1-RTT packets, ack-eliciting and never retransmitted. Tests
     /// use them to send what a misbehaving peer would.
     var injectedFrames: [[UInt8]] = []
+    /// Raw frames written into the next Initial and Handshake packets, by packet number space.
+    /// Tests use them to send what a peer must not send in those packets (RFC 9000 Section 12.4).
+    var injectedLongHeaderFrames: [[[UInt8]]] = [[], [], []]
     #endif
 
     var isClosed: Bool {
@@ -455,13 +461,14 @@ public struct QUICConnectionCore: ~Copyable {
         self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
 
         var tlsOptions = configuration.tlsOptions
-        tlsOptions.quicTransportParameters = self.localTransportParameters()
+        tlsOptions.quicTransportParameters = (try? self.localTransportParameters.serialize()) ?? []
         var outputs: [CoreHandshake.Output] = []
         self.handshake.start(tlsOptions: tlsOptions, outputs: &outputs)
         self.apply(outputs, now: now)
     }
 
-    private func localTransportParameters() -> [UInt8] {
+    /// The transport parameters this endpoint sends in its handshake.
+    var localTransportParameters: TransportParameters {
         var parameters = TransportParameters(logPrefixer: self.log)
         if self.isServer {
             parameters.append(.originalDCID(connectionID: self.originalDestinationConnectionID))
@@ -500,7 +507,7 @@ public struct QUICConnectionCore: ~Copyable {
         #if DEBUG
         self.configuration.transportParametersForTesting?(&parameters)
         #endif
-        return (try? parameters.serialize()) ?? []
+        return parameters
     }
 
     // MARK: Events and timers
@@ -1109,5 +1116,56 @@ extension QUICConnectionCore {
             }
         }
         return !self.hasApplicationFramesToSend
+    }
+}
+
+// MARK: - Transport state for drivers
+
+@available(Network 0.1.0, *)
+extension QUICConnectionCore {
+    /// The latest RTT sample (RFC 9002 Section 5.1); zero before the first.
+    public var latestRTT: NetworkDuration {
+        self.recovery.latestRTT
+    }
+
+    /// The smoothed RTT (RFC 9002 Section 5.3), the initial RTT before the first sample.
+    public var smoothedRTT: NetworkDuration {
+        self.recovery.smoothedRTT
+    }
+
+    /// The minimum RTT (RFC 9002 Section 5.2); zero before the first sample.
+    public var minRTT: NetworkDuration {
+        self.recovery.minRTT
+    }
+
+    /// The RTT variation (RFC 9002 Section 5.3).
+    public var rttVariance: NetworkDuration {
+        self.recovery.rttVariance
+    }
+
+    /// The congestion window in bytes (RFC 9002 Section 7).
+    public var congestionWindow: Int {
+        self.recovery.congestionWindow
+    }
+
+    /// The slow start threshold in bytes; `Int.max` until the first congestion event (RFC 9002
+    /// Section 7.3.1).
+    public var slowStartThreshold: Int {
+        self.recovery.slowStartThreshold
+    }
+
+    /// The bytes of the packets in flight (RFC 9002 Section 2).
+    public var bytesInFlight: Int {
+        self.recovery.bytesInFlight
+    }
+
+    /// Whether the connection runs L4S: Prague with ECT(1) (RFC 9330 Section 4.3).
+    public var l4sEnabled: Bool {
+        self.configuration.congestionControl == .prague && self.configuration.useECT1
+    }
+
+    /// Whether the connection has PATH_CHALLENGE or PATH_RESPONSE frames to send on `path`.
+    func hasProbingFramesToSend(on path: CorePathID) -> Bool {
+        self.paths[path]?.hasProbingFramesToSend == true
     }
 }

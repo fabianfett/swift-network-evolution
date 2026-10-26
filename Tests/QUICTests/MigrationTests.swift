@@ -48,6 +48,16 @@ final class MigrationTests: XCTestCase {
         connection.context.async {
             try? self.connection.setup(remote: nil, local: nil, parameters: nil, path: nil)
             self.connection.recovery = Recovery(isRunning: true, logPrefixer: migrationTestsLogPrefixer)
+            // `setup` no longer arms the classes' timers, as the core runs every connection.
+            self.connection.fromExternal { eventContext in
+                self.connection.migration.timerID = self.connection.timer.insert(
+                    description: "Migration",
+                    timerNow: self.connection.now,
+                    in: &eventContext
+                ) { firedAt, timerState in
+                    self.connection.migration.timerFired(at: firedAt, connection: self.connection, in: &timerState)
+                }
+            }
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 5.0)

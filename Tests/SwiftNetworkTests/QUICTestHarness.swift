@@ -96,21 +96,8 @@ class QUICTestHarness {
     /// Backing storage for every protocol instance and linkage this harness builds.
     lazy var storage = TestNetworkProtocolStorage(context: context)
 
-    /// Which implementation runs the client's and the server's connection. A test that needs
-    /// something `QUICConnectionCore` doesn't do yet asks for `.legacy`; every other handshake
-    /// checks that the core ran.
-    let clientDriver: QUICConnectionDriver
-    let serverDriver: QUICConnectionDriver
-
-    init(
-        context: NetworkContext = .init(identifier: #function),
-        driver: QUICConnectionDriver = .automatic,
-        clientDriver: QUICConnectionDriver? = nil,
-        serverDriver: QUICConnectionDriver? = nil
-    ) {
+    init(context: NetworkContext = .init(identifier: #function)) {
         self.context = context
-        self.clientDriver = clientDriver ?? driver
-        self.serverDriver = serverDriver ?? driver
         self.context.activate()
 
         clientPort = BridgeDatagramProtocol.BridgeInstance.nextGeneratedPort
@@ -153,8 +140,6 @@ class QUICTestHarness {
             }
         }
         quicOptions.modifyTLSOptions { $0 = tlsOptions }
-        let driver = server ? self.serverDriver : self.clientDriver
-        quicOptions.modifyConnectionOptions { $0.driver = driver }
 
         if datagram {
             quicOptions.modifyPerProtocolOptions { streamOptions in
@@ -481,7 +466,6 @@ class QUICTestHarness {
                 matchedError,
                 "Failed to get expected error \(expectHandshakeError), received \(receivedError.debugDescription)"
             )
-            self.assertDrivers()
 
             stop()
 
@@ -491,30 +475,10 @@ class QUICTestHarness {
         XCTAssertTrue(clientConnected, "QUIC client failed to become connected")
         XCTAssertTrue(serverConnected || !waitForServerConnected, "QUIC server failed to become connected")
         XCTAssertNotNil(state, "Result cannot be nil here for the tests to proceed")
-        self.assertDrivers()
         guard clientConnected, serverConnected || !waitForServerConnected else {
             XCTFail("This test cannot continue without both client and server being connected")
             throw NetworkError.posix(EINVAL)
         }
-    }
-
-    /// Checks that the connections run on the implementation the test asked for.
-    func assertDrivers(file: StaticString = #filePath, line: UInt = #line) {
-        guard QUICConnectionDriver.environmentOverride == nil, let state else { return }
-        XCTAssertEqual(
-            state.clientInstance.usesCore,
-            self.clientDriver != .legacy,
-            "client driver",
-            file: file,
-            line: line
-        )
-        XCTAssertEqual(
-            state.serverInstance.usesCore,
-            self.serverDriver != .legacy,
-            "server driver",
-            file: file,
-            line: line
-        )
     }
 
     /// Opens a stream and waits for it to connect. With `expectPending`, the peer's stream limit
@@ -1800,6 +1764,25 @@ class QUICTestHarness {
     ///   bytes before aborting. That is the control case: credit is returned via
     ///   the normal read path, and the loop must not stall. When `false`, the
     ///   bytes are dropped unread, which is the case under test.
+    /// Opens one client stream after the handshake and hands it to `body`, which runs on the
+    /// test's thread.
+    func runQUICTestOnNewStream(
+        _ body: (QUICTestHarness, StreamUpperHarness<TestStreamLinkageFamily>) -> Void
+    ) {
+        do {
+            try quicHandshake()
+        } catch {
+            XCTFail("Handshake failed: \(error)")
+            return
+        }
+        if let stream = createNewStream(identifier: "Stream") {
+            body(self, stream)
+        } else {
+            XCTFail("No stream")
+        }
+        stop()
+    }
+
     func runQUICDropUnreadInboundBytesLoop(
         rounds: Int = 20,
         chunkSize: Int = 4000,
@@ -1860,14 +1843,14 @@ class QUICTestHarness {
                 var diagnostics = ""
                 let diagnosticsExpectation = XCTestExpectation(description: "Collect stall state")
                 context.async {
-                    if let client = self.state?.clientInstance, let server = self.state?.serverInstance {
-                        let sendWindow =
-                            Int64(client.flowControlState.outboundMaxData) - Int64(client.sendOffset)
+                    if let client = self.state?.clientInstance.coreBox,
+                        let server = self.state?.serverInstance.coreBox
+                    {
+                        let sendWindow = Int64(client.core.sendMaxData) - Int64(client.core.sentData)
                         diagnostics =
-                            "client sent \(client.sendOffset) of \(client.flowControlState.outboundMaxData) "
+                            "client sent \(client.core.sentData) of \(client.core.sendMaxData) "
                             + "allowed (remaining send window \(sendWindow)); server advertised MAX_DATA "
-                            + "\(server.flowControlState.inboundMaxData) with largest received offset "
-                            + "\(server.lastReceivedOffset)"
+                            + "\(server.core.receiveMaxData) with \(server.core.receivedData) bytes received"
                     }
                     diagnosticsExpectation.fulfill()
                 }
@@ -1923,10 +1906,11 @@ class QUICTestHarness {
         #if canImport(SwiftNetwork)
         let finalExpectation = XCTestExpectation(description: "Final credit check")
         context.async {
-            if let client = self.state?.clientInstance {
+            if let client = self.state?.clientInstance.coreBox {
                 let totalDropped = UInt64(rounds * chunkSize)
+                // The peer's MAX_DATA (RFC 9000 Section 4.1).
                 XCTAssertGreaterThan(
-                    client.flowControlState.outboundMaxData,
+                    client.core.sendMaxData,
                     totalDropped,
                     "After dropping \(totalDropped) unread bytes, the peer's send limit must have "
                         + "advanced beyond them, otherwise the dropped bytes permanently consumed "
@@ -2318,7 +2302,9 @@ class QUICTestHarness {
             $0.initialMaxStreamsUnidirectional = 1
             $0.maximumConcurrentUnidirectionalStreams = 1
         }
-        XCTAssertNoThrow(try quicHandshake(timeout: timeout, clientOptions: clientOptions, serverOptions: serverOptions))
+        XCTAssertNoThrow(
+            try quicHandshake(timeout: timeout, clientOptions: clientOptions, serverOptions: serverOptions)
+        )
         let payload = Array("Hello World!".utf8)
 
         guard let firstStream = createNewStream(identifier: "C1", quicOptions: clientOptions) else { return }

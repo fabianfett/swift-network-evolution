@@ -228,6 +228,9 @@ extension QUICConnectionCore {
         if space != .applicationData && self.handshake.send[space].hasDataToSend {
             return true
         }
+        if self.hasInjectedLongHeaderFrames(in: space) {
+            return true
+        }
         if congestionLimited {
             return false
         }
@@ -258,6 +261,26 @@ extension QUICConnectionCore {
     var hasInjectedFrames: Bool {
         #if DEBUG
         return !self.injectedFrames.isEmpty
+        #else
+        return false
+        #endif
+    }
+
+    #if DEBUG
+    /// Writes `frame` as it is into the next packet of `space`, ack-eliciting and never
+    /// retransmitted, so tests can send what a misbehaving peer would.
+    mutating func injectFrame(_ frame: [UInt8], in space: PacketNumberSpace) {
+        if space == .applicationData {
+            self.injectedFrames.append(frame)
+        } else {
+            self.injectedLongHeaderFrames[Int(space.rawValue)].append(frame)
+        }
+    }
+    #endif
+
+    private func hasInjectedLongHeaderFrames(in space: PacketNumberSpace) -> Bool {
+        #if DEBUG
+        return space != .applicationData && !self.injectedLongHeaderFrames[Int(space.rawValue)].isEmpty
         #else
         return false
         #endif
@@ -423,6 +446,19 @@ extension QUICConnectionCore {
             let mayExceedCongestionWindow =
                 self.probesPending[Int(space.rawValue)] > 0 || (space == .applicationData && self.keepAlivePending)
             if writesFrames && (!congestionLimited || mayExceedCongestionWindow || space != .applicationData) {
+                #if DEBUG
+                if space != .applicationData {
+                    let index = Int(space.rawValue)
+                    while let frame = self.injectedLongHeaderFrames[index].first,
+                        writer.offset &+ frame.count <= frameLimit
+                    {
+                        _ = writer.bytes(frame.span.bytes)
+                        self.injectedLongHeaderFrames[index].removeFirst()
+                        frames.append(.ping)
+                        isAckEliciting = true
+                    }
+                }
+                #endif
                 // CRYPTO.
                 while true {
                     let available = frameLimit &- writer.offset &- 1 &- 8 &- 2

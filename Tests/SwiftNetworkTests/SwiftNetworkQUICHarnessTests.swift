@@ -85,13 +85,6 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     }
     #endif
 
-    func testQUICHandshakeWithShortPackets() {
-        let clientOptions = QUICProtocol.options()
-        clientOptions.modifyConnectionOptions { $0.testSendingShortPackets = true }
-        // The legacy client sends Initials in datagrams below 1200 bytes, which the core server drops (RFC 9000 Section 14.1).
-        QUICTestHarness(driver: .legacy).runQUICTest(clientOptions: clientOptions)
-    }
-
     func testQUICHandshakeWithGiantALPNList() {
         var alpnList = ["network_test"]
         for i in 0..<100 {
@@ -980,11 +973,6 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         QUICTestHarness().runQUICUnidirectionalStreamHeldUntilTheApplicationClosesIt()
     }
 
-    /// The core does what the classes do.
-    func testQUICUnidirectionalStreamHeldUntilTheApplicationClosesItLegacy() {
-        QUICTestHarness(driver: .legacy).runQUICUnidirectionalStreamHeldUntilTheApplicationClosesIt()
-    }
-
     func testQUICHelloWorldUnidirectionalServerInitiated() {
         // Make sure that the server is able to initiate a outbound unidirectional stream to the client
         QUICTestHarness().runQUICServerInitiatedUnidirectionalStreams(
@@ -1012,6 +1000,127 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         QUICTestHarness().runQUICTestUnidirectionalAndBidirectionalStreams(
             streamCount: 4,
             dataBlock: Array("Hello World!".utf8)
+        )
+    }
+
+    /// Aborting a stream sends RESET_STREAM and STOP_SENDING right away (RFC 9000 Sections 19.4
+    /// and 19.5), not with whatever the connection sends next.
+    func testQUICAbortingAStreamSendsResetStreamAndStopSendingRightAway() {
+        QUICTestHarness().runQUICTestOnNewStream { harness, stream in
+            let expectation = XCTestExpectation(description: "Abort the stream")
+            harness.context.async {
+                defer { expectation.fulfill() }
+                guard let box = harness.state?.clientInstance.coreBox else {
+                    return XCTFail("No client core")
+                }
+                XCTAssertTrue(stream.write(Array("Hello World!".utf8)))
+                let resets = box.core.statistics[.txStreamResetFrames]
+                stream.abortOutbound(error: .init(quicApplicationError: 7))
+                XCTAssertEqual(box.core.statistics[.txStreamResetFrames], resets + 1, "RESET_STREAM sent")
+                let stops = box.core.statistics[.txStreamStopSendingFrames]
+                stream.abortInbound(error: .init(quicApplicationError: 7))
+                XCTAssertEqual(box.core.statistics[.txStreamStopSendingFrames], stops + 1, "STOP_SENDING sent")
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+        }
+    }
+
+    /// What the application writes between `.outboundDataBatchStart` and `.outboundDataBatchEnd`
+    /// goes out when the batch ends.
+    func testQUICOutboundDataBatchSendsWhenItEnds() {
+        QUICTestHarness().runQUICTestOnNewStream { harness, stream in
+            let expectation = XCTestExpectation(description: "Write a batch")
+            harness.context.async {
+                defer { expectation.fulfill() }
+                guard let client = harness.state?.clientInstance, let box = client.coreBox else {
+                    return XCTFail("No client core")
+                }
+                let sent = box.core.statistics[.txStreamBytes]
+                client.fromExternal { eventContext in
+                    _ = client.handleApplicationEvent(.outboundDataBatchStart, in: &eventContext)
+                }
+                XCTAssertTrue(stream.write(Array("Hello World!".utf8)))
+                XCTAssertEqual(box.core.statistics[.txStreamBytes], sent, "held during the batch")
+                client.fromExternal { eventContext in
+                    _ = client.handleApplicationEvent(.outboundDataBatchEnd, in: &eventContext)
+                }
+                XCTAssertGreaterThan(box.core.statistics[.txStreamBytes], sent, "sent when the batch ends")
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+        }
+    }
+
+    /// A datagram flow carries as much as the datagrams the path carries once PMTUD raised them.
+    func testQUICDatagramFlowsGrowWithPMTUD() {
+        let clientOptions = QUICProtocol.options()
+        clientOptions.connectionOptions.pmtudIgnoreCost = true
+        let serverOptions = QUICProtocol.options()
+        serverOptions.connectionOptions.pmtudIgnoreCost = true
+
+        QUICTestHarness().runQUICTest(
+            datagram: true,
+            dataBlock: Array("Hello World!".utf8),
+            clientOptions: clientOptions,
+            serverOptions: serverOptions,
+            afterData: { harness in
+                let expectation = XCTestExpectation(description: "Check the datagram size")
+                harness.context.async {
+                    defer { expectation.fulfill() }
+                    guard let client = harness.state?.clientInstance, let box = client.coreBox else {
+                        return XCTFail("No client core")
+                    }
+                    XCTAssertGreaterThan(box.core.maxDatagramSize, Constants.initialMSS)
+                    var flows = 0
+                    client.applyToAllSecondaryFlows { flow in
+                        flows += 1
+                        let flowIDSize = flow.flowID?.variableLengthSize ?? 0
+                        let contextIDSize = flow.contextID?.variableLengthSize ?? 0
+                        XCTAssertEqual(
+                            flow.usableDatagramSize,
+                            box.core.maxDatagramPayloadSize - flowIDSize - contextIDSize
+                        )
+                    }
+                    XCTAssertGreaterThan(flows, 0, "no datagram flow")
+                }
+                XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+            }
+        )
+    }
+
+    /// `Timer` runs an entry up to `Timer.timerThreshold` before its deadline. The core's timeout
+    /// then counts as on time: what fell due goes out, and the timer is armed for the next
+    /// deadline, rather than firing again for the same one.
+    func testQUICCoreTimerFiredInsideTheLeewayCountsAsOnTime() {
+        QUICTestHarness().runQUICTest(
+            dataBlock: Array("Hello World!".utf8),
+            afterData: { harness in
+                let expectation = XCTestExpectation(description: "Fire the core's timer early")
+                harness.context.async {
+                    defer { expectation.fulfill() }
+                    guard let client = harness.state?.clientInstance, let box = client.coreBox else {
+                        return XCTFail("No client core")
+                    }
+                    // A delayed ACK falls due before anything else.
+                    let deadline = client.now.advanced(by: .milliseconds(20))
+                    client.fromExternal { eventContext in
+                        box.core.acks[.applicationData].ackNeeded = false
+                        box.core.acks[.applicationData].ackDeadline = deadline
+                        client.coreAfterUpdate(in: &eventContext)
+                    }
+                    XCTAssertEqual(box.core.nextDeadline, deadline)
+                    XCTAssertEqual(box.armedDeadline, deadline)
+
+                    // One microsecond early, inside the leeway.
+                    client.fromExternal { eventContext in
+                        client.timer.timerFired(at: deadline.advanced(by: .microseconds(-1)), in: &eventContext)
+                    }
+                    XCTAssertNil(box.core.acks[.applicationData].ackDeadline, "the delayed ACK fell due")
+                    XCTAssertFalse(box.core.acks[.applicationData].ackNeeded, "the ACK went out")
+                    XCTAssertNotNil(box.armedDeadline, "the timer is armed for the next deadline")
+                    XCTAssertEqual(box.armedDeadline, box.core.nextDeadline)
+                }
+                XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+            }
         )
     }
 }

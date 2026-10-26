@@ -208,10 +208,8 @@ extension QUICConnection {
         isPrimary: Bool,
         in eventContext: inout NetworkContext.EventContext
     ) {
-        guard !migration.activeMigrationDisabled || isServer else {
-            return
-        }
-
+        // The core doesn't migrate when the peer disabled active migration (RFC 9000 Section
+        // 18.2, `QUICConnectionCore.probePath`).
         log.debug("Path \(pathID.description) changed to \(event), primary: \(isPrimary)")
 
         guard let path = path(for: pathID) else {
@@ -223,7 +221,6 @@ extension QUICConnection {
             if !path.isRouteEstablished {
                 path.set(interface: nil, priority: 0, isInitial: false)
                 path.changeState(to: .routeAvailable)
-                path.pacePackets = pacingEnabled
                 if self.state == .connected {
                     log.debug("Bringing up path \(pathID.description)")
                     invokeEstablish(path: pathID, in: &eventContext)

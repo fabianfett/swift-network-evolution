@@ -291,72 +291,10 @@ final class FlowControlTests: XCTestCase {
         wait(for: [done], timeout: 5.0)
     }
 
-    // The application closes the read side while inbound bytes are still buffered
-    // and unread. Those bytes consumed receive window when they arrived, so
-    // closing must return their credit; otherwise QUIC never gets it back and the
-    // usable window shrinks for the rest of the connection.
-    func testInboundCreditReturnedWhenUnreadBytesDroppedOnClose() {
-        let byteCount = 4000
-        let window: UInt64 = 100_000
-        let context = NetworkContext(identifier: "test context")
-        context.activate()
-
-        let done = XCTestExpectation(description: "drop accounting complete")
-        context.async {
-            let connection = QUICConnection(context: context)
-            let stream = connection.fromExternal { eventContext in
-                self.makeStreamWithUnreadInboundBytes(
-                    byteCount: byteCount,
-                    window: window,
-                    connection: connection,
-                    in: &eventContext
-                )
-            }
-            XCTAssertEqual(
-                stream.upperReceiveQueue.unclaimedLength,
-                byteCount,
-                "Bytes should be pending in the upper receive queue, unread"
-            )
-            let maxDataBeforeClose = connection.flowControlState.inboundMaxData
-
-            // The application closes the read side without reading anything.
-            connection.fromExternal { _ in
-                connection.handleStopRead(for: stream)
-            }
-            stream.readClosed = true
-
-            // Closing the read side discards those buffered bytes, so their
-            // credit must be returned immediately rather than waiting for the
-            // peer's RESET_STREAM: the application is never going to read them.
-            XCTAssertEqual(
-                connection.flowControlState.totalInOrderInboundBytesRead,
-                UInt64(byteCount),
-                "Connection must account for inbound bytes dropped without being read"
-            )
-            XCTAssertEqual(
-                stream.upperReceiveQueue.unclaimedLength,
-                0,
-                "Discarded frames should be released from the upper receive queue"
-            )
-            // MAX_DATA is anchored on consumed bytes, so it must now advance past
-            // the discarded ones, handing the credit back to the peer.
-            XCTAssertGreaterThan(
-                connection.flowControlState.inboundMaxData,
-                maxDataBeforeClose,
-                "MAX_DATA must advance so the discarded bytes' credit is returned"
-            )
-            XCTAssertGreaterThan(
-                connection.flowControlState.inboundMaxData,
-                UInt64(byteCount),
-                "MAX_DATA must move past the bytes that were dropped"
-            )
-            connection.currentPath = nil
-            stream.destroyFromExternalTest()
-            connection.destroyFromExternalTest()
-            done.fulfill()
-        }
-        wait(for: [done], timeout: 5.0)
-    }
+    // testInboundCreditReturnedWhenUnreadBytesDroppedOnClose drove the classes through
+    // `handleStopRead`, which the core runs now: the core returns the credit of unread bytes the
+    // application drops, which SwiftNetworkQUICHarnessTests.testQUICDropUnreadInboundBytesReturnsFlowControlCredit
+    // and testQUICDropLargeUnreadInboundBlockReturnsFlowControlCredit check on the core's MAX_DATA.
 
     // A stream torn down before its final size is known becomes a zombie. When
     // the final size finally arrives, the bytes that were in flight but never

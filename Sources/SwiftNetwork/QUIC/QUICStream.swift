@@ -669,14 +669,14 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         self.outboundApplicationError = UInt64(error?.quicApplicationError ?? 0)
         let parent = parentProtocol
         _ = parent.handleStopWrite(for: self)
-        parent.sendFrames(in: &eventContext)
+        parent.coreAfterUpdate(in: &eventContext)
     }
 
     public func abortInbound(error: NetworkError?, in eventContext: inout NetworkContext.EventContext) {
         self.inboundApplicationError = UInt64(error?.quicApplicationError ?? 0)
         let parent = parentProtocol
         parent.handleStopRead(for: self)
-        parent.sendFrames(in: &eventContext)
+        parent.coreAfterUpdate(in: &eventContext)
     }
 
     func emptyPendingData(connection: QUICConnection) {

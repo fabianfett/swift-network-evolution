@@ -311,6 +311,44 @@ final class QUICConnectionCorePMTUDTests: XCTestCase {
         let datagrams = LockstepPair.drain(&pair.client, now: pair.now)
         XCTAssertEqual(datagrams.first?.count, 1252, "the probe goes first")
     }
+
+    /// The delayed ACK timer firing while a probe is due sends both. The probe carries only PING
+    /// and PADDING (RFC 9000 Section 14.4), so the ACK goes first, within the delay the peer
+    /// expects (RFC 9000 Section 13.2.1), and the probe right after it.
+    func testTheDelayedAckTimerSendsAProbeAndTheAck() throws {
+        var pair = Self.pair(client: Self.configuration(interval: .milliseconds(500)), linkMTU: 1300)
+        Self.searchUntilDone(&pair)
+        let baseSize = pair.client.maxDatagramSize
+        XCTAssertEqual(baseSize, 1300 - Self.headerSize)
+        // The next search is due, which leaves a probe to send.
+        pair.now = try XCTUnwrap(pair.client.paths[pair.client.activePathID]?.pmtud?.raiseDeadline)
+        pair.client.handleTimeout(now: pair.now)
+        XCTAssertEqual(pair.client.paths[pair.client.activePathID]?.pmtud?.probePending, true)
+
+        // One ack-eliciting packet from the server, which the client acknowledges with a delay.
+        guard var server = pair.server.take() else { return XCTFail("No server") }
+        let streamID = try XCTUnwrap(server.openStream(bidirectional: true))
+        XCTAssertEqual(server.write([UInt8]([0x42]).span.bytes, to: streamID), 1)
+        let toClient = LockstepPair.drain(&server, now: pair.now)
+        pair.server = consume server
+        XCTAssertEqual(toClient.count, 1)
+        for var datagram in toClient {
+            var span = datagram.mutableSpan
+            pair.client.receive(&span, on: pair.client.activePathID, ecn: .nonECT, now: pair.now)
+        }
+        let ackDeadline = try XCTUnwrap(pair.client.acks[.applicationData].ackDeadline)
+        XCTAssertFalse(pair.client.acks[.applicationData].ackNeeded)
+
+        // The delayed ACK timer fires.
+        pair.now = ackDeadline
+        pair.client.handleTimeout(now: pair.now)
+        let datagrams = LockstepPair.drain(&pair.client, now: pair.now)
+        XCTAssertEqual(datagrams.count, 2, "the ACK, then the probe: \(datagrams.map(\.count))")
+        XCTAssertLessThan(datagrams.first?.count ?? .max, 100, "the ACK goes first")
+        XCTAssertGreaterThan(datagrams.last?.count ?? 0, baseSize, "the probe follows")
+        XCTAssertFalse(pair.client.acks[.applicationData].ackNeeded, "the ACK went out")
+        XCTAssertNil(pair.client.acks[.applicationData].ackDeadline)
+    }
 }
 
 #endif

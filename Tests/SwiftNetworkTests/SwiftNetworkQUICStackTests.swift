@@ -79,8 +79,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
     func createQUICTestOptions(
         server: Bool = false,
         mutualAuthentication: Bool = false,
-        sourceConnectionIDLength: Int = 0,
-        driver: QUICConnectionDriver = .automatic
+        sourceConnectionIDLength: Int = 0
     ) -> ProtocolOptions<QUICProtocol> {
         var tlsOptions = SwiftTLSProtocol.Options()
         tlsOptions.applicationProtocols = ["network_test"]
@@ -103,7 +102,6 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
         if sourceConnectionIDLength > 0 {
             quicOptions.modifyConnectionOptions { $0.sourceConnectionIDLength = sourceConnectionIDLength }
         }
-        quicOptions.modifyConnectionOptions { $0.driver = driver }
 
         return quicOptions
     }
@@ -258,8 +256,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
         serverEndpoint: Endpoint,
         mutualAuthentication: Bool = false,
         migrateCount: Int = 0,
-        dataToSend: [UInt8]? = nil,
-        driver: QUICConnectionDriver = .automatic
+        dataToSend: [UInt8]? = nil
     ) {
         let clientParameters = Parameters()
 
@@ -300,14 +297,12 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
                 clientQUICOptions = self.createQUICTestOptions(
                     server: false,
                     mutualAuthentication: mutualAuthentication,
-                    sourceConnectionIDLength: 8,
-                    driver: driver
+                    sourceConnectionIDLength: 8
                 )
             } else {
                 clientQUICOptions = self.createQUICTestOptions(
                     server: false,
-                    mutualAuthentication: mutualAuthentication,
-                    driver: driver
+                    mutualAuthentication: mutualAuthentication
                 )
             }
             clientQUICOptions.setLogID(prefix: "C", parent: "1", protocolLogIDNumber: 1)
@@ -363,8 +358,7 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
 
             let serverQUICOptions = self.createQUICTestOptions(
                 server: true,
-                mutualAuthentication: mutualAuthentication,
-                driver: driver
+                mutualAuthentication: mutualAuthentication
             )
             serverQUICOptions.setLogID(prefix: "L", parent: "1", protocolLogIDNumber: 1)
             serverQUICOptions.setProtocolInstance(serverQUICStreamListener.identifier)
@@ -550,11 +544,6 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
         let stopExpectation = XCTestExpectation()
         context.async {
             XCTAssertEqual(instances.count, 2)
-            if QUICConnectionDriver.environmentOverride == nil {
-                for instance in instances {
-                    XCTAssertEqual(instance.usesCore, driver != .legacy, "driver")
-                }
-            }
             clientUpperHarness?.stop()
             serverUpperHarness?.stop()
 

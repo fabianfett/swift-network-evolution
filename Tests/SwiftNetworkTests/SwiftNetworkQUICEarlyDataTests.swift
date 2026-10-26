@@ -502,28 +502,22 @@ final class SwiftNetworkQUICEarlyDataTests: NetTestCase {
 
         let stopExpectation = XCTestExpectation()
         context.async {
-            // 0-RTT runs on QUICConnectionCore.
             XCTAssertEqual(instances.count, 2)
-            if QUICConnectionDriver.environmentOverride == nil {
-                for instance in instances {
-                    XCTAssertTrue(instance.usesCore, "driver")
-                }
-                let attemptsEarlyData = resumedTransportParameters != nil
-                XCTAssertEqual(clientStreamReadyBeforeHandshake, attemptsEarlyData, "stream ready in 0-RTT")
-                if !expectFailure, instances.count == 2 {
-                    // The client always offers early data, but only sends it with the remembered
-                    // transport parameters.
-                    XCTAssertEqual(
-                        instances[0].coreBox?.core.isEarlyDataAccepted,
-                        attemptsEarlyData && acceptEarlyData,
-                        "client early data accepted"
-                    )
-                    XCTAssertEqual(
-                        instances[1].coreBox?.core.isEarlyDataAccepted,
-                        acceptEarlyData,
-                        "server early data accepted"
-                    )
-                }
+            let attemptsEarlyData = resumedTransportParameters != nil
+            XCTAssertEqual(clientStreamReadyBeforeHandshake, attemptsEarlyData, "stream ready in 0-RTT")
+            if !expectFailure, instances.count == 2 {
+                // The client always offers early data, but only sends it with the remembered
+                // transport parameters.
+                XCTAssertEqual(
+                    instances[0].coreBox?.core.isEarlyDataAccepted,
+                    attemptsEarlyData && acceptEarlyData,
+                    "client early data accepted"
+                )
+                XCTAssertEqual(
+                    instances[1].coreBox?.core.isEarlyDataAccepted,
+                    acceptEarlyData,
+                    "server early data accepted"
+                )
             }
             clientUpperHarness?.stop()
             serverUpperHarness?.stop()

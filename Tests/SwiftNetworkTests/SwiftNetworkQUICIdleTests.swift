@@ -61,8 +61,7 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
         // The idle state reported to the lower protocol must account for outstanding
         // transmit obligations, not just the application's idle mark.
         // A connection that still owes the peer an ACK is not idle.
-        // Reaches into the ack and timer state of the legacy driver.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             afterHandshake: { harness in
                 // The test relies on the client still owing a delayed ACK for the echoed
@@ -73,23 +72,21 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
                 harness.context.async {
                     if let client = harness.state?.clientInstance {
                         client.fromExternal { eventContext in
-                            client.ack.maxDelay = .seconds(30)
-                            // The handshake may have already armed the timer with the default
-                            // delay, and scheduling a delayed ACK keeps an armed deadline, so
-                            // re-arm it with the extended delay.
-                            if client.ack.timerScheduled, let timerID = client.ack.timerID {
-                                client.timer.reschedule(
-                                    identifier: timerID,
-                                    fromNow: client.ack.maxDelay,
-                                    timerNow: client.now,
-                                    in: &eventContext
-                                )
+                            if let box = client.coreBox {
+                                box.core.configuration.maxAckDelay = .seconds(30)
+                                // The handshake may have already armed the timer with the default
+                                // delay, which a later packet keeps, so re-arm it with the
+                                // extended delay.
+                                if box.core.acks[.applicationData].ackDeadline != nil {
+                                    box.core.acks[.applicationData].ackDeadline = client.now.advanced(by: .seconds(30))
+                                }
                             }
+                            client.coreAfterUpdate(in: &eventContext)
                         }
                     }
                     // Keep the server's view of the client's ACK delay consistent, otherwise
                     // its PTO fires while the ACK is held and the probe forces an immediate ACK.
-                    harness.state?.serverInstance.currentPath?.rtt.remoteMaxAckDelay = .seconds(30)
+                    harness.state?.serverInstance.coreBox?.core.recovery.maxAckDelay = .seconds(30)
                     expectation.fulfill()
                 }
                 let waitResult = XCTWaiter.wait(for: [expectation], timeout: 2.0)
@@ -101,7 +98,7 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
                 harness.context.async {
                     let client = harness.state?.clientInstance
                     XCTAssertNotNil(client, "Client instance needs to be present to proceed")
-                    if let client {
+                    if let client, let box = client.coreBox {
                         XCTAssertFalse(
                             client.currentPath?.reportedIdleEvent ?? true,
                             "Client should not have reported idle before the application marks idle"
@@ -113,25 +110,28 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
 
                         // The echoed data has been received but not acknowledged yet, so
                         // a delayed ACK is still owed and the connection is not idle.
-                        XCTAssertGreaterThan(
-                            client.ack.unackedPacketCount,
-                            0,
+                        XCTAssertNotNil(
+                            box.core.acks[.applicationData].ackDeadline,
                             "Client should still owe the peer a delayed ACK"
                         )
+                        XCTAssertFalse(box.core.isQuiescent, "Client owes an ACK")
                         XCTAssertFalse(
                             client.currentPath?.reportedIdleEvent ?? true,
                             "Client should not have reported idle while an ACK is owed to the peer"
                         )
 
-                        // Once the delayed ACK has been sent there are no obligations left.
+                        // Once the delayed ACK has been sent there are no obligations left: the
+                        // delayed ACK timer fires now.
                         client.fromExternal { eventContext in
-                            client.fireDelayedAckTimer(at: .systemNow, in: &eventContext)
+                            box.core.acks[.applicationData].ackDeadline = client.now
+                            box.core.handleTimeout(now: client.now)
+                            client.coreAfterUpdate(in: &eventContext)
                         }
-                        XCTAssertEqual(
-                            client.ack.unackedPacketCount,
-                            0,
+                        XCTAssertNil(
+                            box.core.acks[.applicationData].ackDeadline,
                             "Client should not owe the peer an ACK once the delayed ACK has been sent"
                         )
+                        XCTAssertFalse(box.core.acks[.applicationData].ackNeeded, "The ACK went out")
                         XCTAssertTrue(
                             client.currentPath?.reportedIdleEvent ?? false,
                             "Client should have reported idle once the owed ACK has been sent"
@@ -144,6 +144,8 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
                             client.currentPath?.reportedIdleEvent ?? true,
                             "Client should not have reported idle after the application reuses the connection"
                         )
+                    } else {
+                        XCTFail("The client has no core")
                     }
                     expectation.fulfill()
                 }
@@ -153,67 +155,10 @@ final class SwiftNetworkQUICIdleTests: NetTestCase {
         )
     }
 
-    func testDelayedAckTimerCanSendPMTUDProbe() {
-        // Sending a delayed ACK can also send a PMTUD probe, and sending the probe reads
-        // the connection's ACK state, so the timer must not still hold that state when it
-        // sends.
-        let clientOptions = QUICProtocol.options()
-        clientOptions.connectionOptions.pmtudIgnoreCost = true
-        let serverOptions = QUICProtocol.options()
-        serverOptions.connectionOptions.pmtudIgnoreCost = true
-
-        // Reaches into the ack, timer and PMTUD state of the legacy driver.
-        QUICTestHarness(driver: .legacy).runQUICTest(
-            dataBlock: Array("Hello World!".utf8),
-            clientOptions: clientOptions,
-            serverOptions: serverOptions,
-            afterData: { harness in
-                let expectation = XCTestExpectation(description: "Wait for the delayed ACK timer to fire")
-                harness.context.async {
-                    let client = harness.state?.clientInstance
-                    XCTAssertNotNil(client, "Client instance needs to be present to proceed")
-                    if let client, let path = client.currentPath {
-                        XCTAssertGreaterThan(
-                            client.ack.unackedPacketCount,
-                            0,
-                            "Client should still owe the peer a delayed ACK"
-                        )
-
-                        // Acknowledge a probe short of the path maximum, which leaves the
-                        // next probe due on the next transmission.
-                        let ipUDPHeaderSize = path.pmtudState.currentPathMTU - path.mss
-                        client.fromExternal { eventContext in
-                            client.acknowledgedPMTUDProbe(
-                                on: path,
-                                packetNumber: client.protector.getPacketNumber(for: .applicationData),
-                                mss: 1492 - ipUDPHeaderSize,
-                                in: &eventContext
-                            )
-                        }
-                        let canSendProbe = path.pmtudState.canSendProbe(on: path, hasPendingItems: false)
-                        XCTAssertTrue(
-                            canSendProbe,
-                            "Client should have a PMTUD probe ready to send alongside the delayed ACK"
-                        )
-
-                        client.fromExternal { eventContext in
-                            client.fireDelayedAckTimer(at: .systemNow, in: &eventContext)
-                        }
-
-                        XCTAssertEqual(
-                            client.ack.unackedPacketCount,
-                            0,
-                            "Client should not owe the peer an ACK once the delayed ACK has been sent"
-                        )
-                    }
-                    expectation.fulfill()
-                }
-                let waitResult = XCTWaiter.wait(for: [expectation], timeout: 2.0)
-                XCTAssertEqual(waitResult, .completed, "Delayed ACK timer should complete")
-            },
-            clientMTU: 1550
-        )
-    }
+    // testDelayedAckTimerCanSendPMTUDProbe guarded the classes' timer against reading the ACK
+    // state it held while a PMTUD probe went out. The core owns its state, so that can't happen;
+    // QUICConnectionCorePMTUDTests.testTheDelayedAckTimerSendsAProbeAndTheAck pins what is left:
+    // the probe and the ACK both go out.
 }
 #endif
 #endif

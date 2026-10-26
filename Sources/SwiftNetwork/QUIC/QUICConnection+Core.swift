@@ -39,25 +39,18 @@ internal import Synchronization
 #endif
 
 /// Which implementation runs a `QUICConnection`.
+///
+/// Deprecated: `QUICConnectionCore` is the only driver, whatever the options say. The type and
+/// `QUICConnectionOptions.driver` only remain until the classes they chose are deleted.
 @_spi(ProtocolProvider)
 @available(Network 0.1.0, *)
 public enum QUICConnectionDriver: Equatable, Sendable {
-    /// `QUICConnectionCore` if it supports the connection's options, the classes otherwise.
+    /// `QUICConnectionCore`.
     case automatic
     /// `QUICConnectionCore`.
     case core
-    /// The classes of `QUICConnection` itself: recovery, ack, pending items and the rest.
+    /// `QUICConnectionCore` as well; the classes no longer run connections.
     case legacy
-
-    /// `SWIFTNETWORK_QUIC_DRIVER=legacy` runs every connection on the classes, to compare the two.
-    static let environmentOverride: QUICConnectionDriver? = {
-        guard let value = getenv("SWIFTNETWORK_QUIC_DRIVER") else { return nil }
-        switch String(cString: value) {
-        case "legacy": return .legacy
-        case "core": return .core
-        default: return nil
-        }
-    }()
 }
 
 /// Holds the core of a connection, which can't be stored as an optional and still be borrowed.
@@ -99,36 +92,10 @@ final class QUICConnectionCoreAsyncResult: Sendable {
 }
 #endif
 
-// MARK: - Choosing the driver
+// MARK: - Configuring the core
 
 @available(Network 0.1.0, *)
 extension QUICConnection {
-    /// Whether `QUICConnectionCore` implements everything the options ask for.
-    static func coreSupports(
-        _ options: QUICConnectionProtocol.QUICConnectionOptions,
-        tlsOptions: SwiftTLSProtocol.Options?,
-        isServer: Bool
-    ) -> Bool {
-        if options.testSendingShortPackets {
-            return false
-        }
-        return true
-    }
-
-    func chooseDriver(
-        _ options: QUICConnectionProtocol.QUICConnectionOptions,
-        tlsOptions: SwiftTLSProtocol.Options?
-    ) -> Bool {
-        switch QUICConnectionDriver.environmentOverride ?? options.driver {
-        case .legacy:
-            return false
-        case .core:
-            return true
-        case .automatic:
-            return Self.coreSupports(options, tlsOptions: tlsOptions, isServer: self.isServer)
-        }
-    }
-
     /// The configuration of the core, from the options as `setupLocalTransportParameters` reads them.
     func makeCoreConfiguration(
         quicOptions: ProtocolOptions<QUICProtocol>,
@@ -256,6 +223,7 @@ extension QUICConnection {
         )
         let box = QUICConnectionCoreBox(core)
         self.coreBox = box
+        self.logTransportParameters(owner: .local, transportParameters: box.core.localTransportParameters)
         self.coreInstallAsyncContinuationHandler(box)
         if let currentPath = self.currentPath {
             self.corePathIDs = [currentPath.pathIdentifier: .initial]
@@ -366,6 +334,7 @@ extension QUICConnection {
         )
         let box = QUICConnectionCoreBox(core)
         self.coreBox = box
+        self.logTransportParameters(owner: .local, transportParameters: box.core.localTransportParameters)
         self.coreInstallAsyncContinuationHandler(box)
         self.corePathIDs = [path.pathIdentifier: .initial]
         if self.keepaliveDuration != .zero {
@@ -746,8 +715,7 @@ extension QUICConnection {
 
     /// Lets the core know a path is gone.
     func coreForgetPath(_ path: QUICPath) {
-        guard self.usesCore, let id = self.corePathIDs[path.pathIdentifier], id != self.coreBox?.core.activePathID
-        else {
+        guard let id = self.corePathIDs[path.pathIdentifier], id != self.coreBox?.core.activePathID else {
             return
         }
         self.coreBox?.core.forgetPath(id)
@@ -1016,6 +984,10 @@ extension QUICConnection {
             box.asyncResult = nil
         }
         #endif
+        if let box = self.coreBox {
+            self.coreLastHandshakeRTT = box.core.handshakeRTT
+            self.coreLastL4SEnabled = box.core.l4sEnabled
+        }
         self.timer.stop(in: &eventContext)
         self.coreTimerID = nil
         self.coreBox = nil

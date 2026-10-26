@@ -163,18 +163,18 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
     func testQUICClientClosesOnFrameNotAllowedDuringHandshake() throws {
         // Same setup as above, so the server still sends Handshake packets. RFC 9000 §12.4: a frame
         // that is not permitted in a Handshake packet is a PROTOCOL_VIOLATION for the client
-        // Injects a frame through the pending items of the legacy driver.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             clientDrops: .init(1...Int.max),
             waitForServerConnected: false,
             afterHandshake: { harness in
                 let expectation = XCTestExpectation(description: "Wait for the client to handle the packet")
                 harness.context.async {
                     if let server = harness.state?.serverInstance {
+                        XCTAssertFalse(server.coreBox?.core.isHandshakeComplete ?? true, "server still in the handshake")
                         server.fromExternal { eventContext in
                             // HANDSHAKE_DONE is only allowed in 1-RTT packets
-                            server.withPendingItems(for: .handshake) { $0.handshakeDone = true }
-                            server.sendFrames(in: &eventContext)
+                            server.coreBox?.core.injectFrame([0x1e], in: .handshake)
+                            server.coreAfterUpdate(in: &eventContext)
                         }
                     }
                     // Queued behind the delivery of that packet. A later check would pass even without
@@ -183,6 +183,11 @@ final class SwiftNetworkQUICUngracefulCloseTests: NetTestCase {
                         XCTAssertTrue(
                             harness.state?.clientHarness.receivedDisconnected ?? false,
                             "Client did not close on a frame not allowed in a Handshake packet"
+                        )
+                        XCTAssertEqual(
+                            harness.state?.clientInstance.closeError?.code,
+                            QUICTransportError.QUICTransportErrorCode.protocolViolation.rawValue,
+                            "Client closed with PROTOCOL_VIOLATION"
                         )
                         expectation.fulfill()
                     }

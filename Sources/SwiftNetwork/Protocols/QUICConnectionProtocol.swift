@@ -205,7 +205,7 @@ public struct QUICConnectionProtocol: NetworkProtocol {
             }
         }
 
-        /// Which implementation runs the connection.
+        /// Deprecated, has no effect: `QUICConnectionCore` runs every connection.
         @_spi(ProtocolProvider) public var driver: QUICConnectionDriver = .automatic
 
         internal var _idleTimeout: NetworkDuration = .seconds(30)
@@ -428,8 +428,9 @@ public struct QUICConnectionProtocol: NetworkProtocol {
             set { if newValue { flags.insert(.enablePacing) } else { flags.remove(.enablePacing) } }
         }
 
-        // Note that this flag changes sending behavior for Long Header packets that reduces efficiency. This should
-        // be used for testing only.
+        /// Deprecated, has no effect: `QUICConnectionCore` always pads a client's Initial packets to
+        /// 1200 bytes (RFC 9000 Section 14.1). It sent one frame per long header packet with the
+        /// classes, for testing only.
         public var testSendingShortPackets: Bool {
             get { flags.contains(.testSendingShortPackets) }
             set {

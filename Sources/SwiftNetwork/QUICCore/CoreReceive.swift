@@ -1091,6 +1091,9 @@ extension QUICConnectionCore {
                     }
                 }
                 self.state = .established
+                if self.recovery.hasRTTSample {
+                    self.handshakeRTT = self.recovery.smoothedRTT
+                }
                 self.events.append(.connected)
                 self.rearmKeepAlive(now: now)
                 self.issueConnectionIDsIfNeeded()

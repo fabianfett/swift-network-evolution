@@ -225,7 +225,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     var ack: Ack
     private(set) var ecn: ECN
     var recovery: Recovery
-    private(set) var migration = Migration()
+    var migration = Migration()
     private(set) var crypto: QUICCrypto
 
     var protector: Protector
@@ -442,8 +442,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
     // MARK: Core
 
-    /// Whether `QUICConnectionCore` runs this connection, rather than the state above.
-    private(set) var usesCore = false
+    /// Whether `QUICConnectionCore` runs this connection, rather than the state above: always,
+    /// the classes no longer run connections. The branches on it go with the classes.
+    let usesCore = true
     var coreConfiguration: QUICConnectionCore.Configuration?
     /// The core, once a client started its handshake or a server got the client's first packet.
     var coreBox: QUICConnectionCoreBox?
@@ -457,6 +458,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     /// The core's name for each path; the path of the handshake is `.initial`.
     var corePathIDs: [MultiplexingPathIdentifier: CorePathID] = [:]
     var coreNextPathID = 1
+    /// What the establishment report says once the core is gone.
+    var coreLastHandshakeRTT: NetworkDuration?
+    var coreLastL4SEnabled = false
 
     func withCurrentPath(_ block: (borrowing QUICPath) -> Void) {
         guard let currentPath else { return }
@@ -517,50 +521,8 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         state.change(to: .idle, logIDString: logPrefixer.logIDString)
 
-        if let parameters, let quicOptions = quicOptions(from: parameters, for: .allFlows),
-            let protocolOptions = quicOptions.perProtocolOptions
-        {
-            self.usesCore = self.chooseDriver(protocolOptions.quicConnectionOptions, tlsOptions: quicOptions.tlsOptions)
-        }
-
         // Setup metadata callbacks
         self.setMetadataHandlers()
-
-        // `setup` runs on the attach path, which deliberately does not carry the context
-        // state, so acquire it here to register the connection's timers.
-        if !self.usesCore {
-            fromExternal { eventContext in
-                let ackTimerID = timer.insert(
-                    description: "ACK",
-                    timerNow: self.now,
-                    in: &eventContext
-                ) { firedAt, timerState in
-                    self.fireDelayedAckTimer(at: firedAt, in: &timerState)
-                }
-                self.ack = Ack(isRunning: true, timerID: ackTimerID, logPrefixer: logPrefixer)
-
-                let recoveryTimerID = timer.insert(
-                    description: "Recovery",
-                    timerNow: self.now,
-                    in: &eventContext
-                ) { firedAt, timerState in
-                    self.recovery.timerFired(at: firedAt, connection: self, in: &timerState)
-                }
-                self.recovery = Recovery(
-                    isRunning: true,
-                    timerID: recoveryTimerID,
-                    logPrefixer: logPrefixer
-                )
-
-                migration.timerID = timer.insert(
-                    description: "Migration",
-                    timerNow: self.now,
-                    in: &eventContext
-                ) { firedAt, timerState in
-                    self.migration.timerFired(at: firedAt, connection: self, in: &timerState)
-                }
-            }
-        }
 
         if let remote, case .address(let remoteAddress) = remote.type,
             case .v4 = remoteAddress.type
@@ -578,19 +540,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         {
             let quicConnectionOptions = protocolOptions.quicConnectionOptions
             self.logIDNumber = quicOptions.logIDNumber ?? 0
-            var enableECN = true
-            var enableECNEcho = true
-            var enableL4s: Bool? = nil  // Default
-            enableECN = !quicConnectionOptions.disableECN
-            enableECNEcho = !quicConnectionOptions.disableECNEcho
-            enableL4s = quicConnectionOptions.enableL4S
             if isServer {
+                // The core sends the stateless reset token of `connect` (`coreConnect`).
                 retryEnabled = quicConnectionOptions.retry
-                // Stateless Reset Token
-                let statelessResetToken = TransportParameter.statelessResetToken(
-                    statelessResetToken: QUICStatelessResetToken()
-                )
-                localTransportParameters.append(statelessResetToken)
             } else {
                 // A client can force version negotiation by setting the initial version to the negotiationPattern (0x?a?a?a?a)
                 if quicConnectionOptions.forceVersionNegotiation {
@@ -645,14 +597,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             maximumConcurrentUnidirectionalStreams =
                 quicConnectionOptions.maximumConcurrentUnidirectionalStreams
 
-            if let currentPath {
-                currentPath.pacePackets = pacingEnabled
-                currentPath.setupL4SState(l4sEnabled: enableL4s)
-                if currentPath.l4sEnabled && QUICPreferences.shared.ackCompressionEnabled {
-                    // Disable ACK compression when L4S is enabled.
-                    ack.disableAckCompression = true
-                }
-            }
             if !quicConnectionOptions.disableSpinBit {
                 // RFC9000: "Even when the spin bit is not disabled by
                 // the administrator, endpoints MUST disable their use
@@ -673,23 +617,13 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
                 spinBitEnabled = false
                 initialSpinValue = quicConnectionOptions.spinBitValue
             }
-            // Setup ECN
-            ecn = ECN(
-                echoEnabled: enableECNEcho,
-                markingEnabled: enableECN,
-                l4sEnabled: enableL4s,
-                connection: self,
-                logPrefixer: self.logPrefixer
-            )
-            setupLocalTransportParameters(quicOptions: quicOptions)
-
+            // The core sets up its transport parameters, ECN, L4S and pacing from the
+            // configuration.
             tlsOptions = quicOptions.tlsOptions
-            if self.usesCore {
-                self.coreConfiguration = self.makeCoreConfiguration(
-                    quicOptions: quicOptions,
-                    tlsOptions: quicOptions.tlsOptions
-                )
-            }
+            self.coreConfiguration = self.makeCoreConfiguration(
+                quicOptions: quicOptions,
+                tlsOptions: quicOptions.tlsOptions
+            )
         }
         #if QlogOutput
         // There are 2 ways to setup a Qlog directory, one through the configuration and one through Preferences
@@ -747,10 +681,10 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         } else {
             path.mss = newMSS
         }
-        path.congestionControlMSSChanged(mss: path.mss)
+        // The core's congestion controller follows its own datagram size.
         if path == currentPath {
             applyToAllSecondaryFlows { datagramFlow in
-                datagramFlow.updateUsableDatagramFrameSize(connection: self, path: path)
+                self.coreUpdateUsableDatagramSize(datagramFlow)
             }
         }
     }
@@ -1430,13 +1364,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             }
             scid = QUICConnectionID(scidLength)
         }
+        // A server with zero-length connection IDs can't follow a client that migrates, and
+        // tells it so (`coreAcceptFirstDatagram`, RFC 9000 Section 5.1).
         self.localCIDLength = scid.length
-
-        if isServer, localCIDLength == 0 {
-            // Cannot perform active migration with zero-length CIDs
-            migration.disableActiveMigration()
-            localTransportParameters.append(.disableActiveMigration())
-        }
 
         let statelessResetToken: QUICStatelessResetToken
         if let initialStatelessResetToken {
@@ -1448,9 +1378,8 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         // Set up the initial path
         if currentPath == nil, let initialPath = self.somePath {
-            initialPath.pacePackets = pacingEnabled
             initialPath.set(interface: self.initialInterface, priority: 0, isInitial: true)
-            log.info("Packet Pacing is \(initialPath.pacePackets ? "enabled" : "disabled")")
+            log.info("Packet Pacing is \(self.coreConfiguration?.pacingEnabled == true ? "enabled" : "disabled")")
             do {
                 try localCIDs.insertInitialConnectionID(scid, token: statelessResetToken)
             } catch {
@@ -1725,10 +1654,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             log.error("No stream for \(flowID), cannot close")
         }
 
-        if state == .connected {
-            //  Possibly send CONNECTION_CLOSE, STOP_SENDING and/or RESET_STREAM, STREAM FIN
-            sendFrames(in: &eventContext)
-        }
+        // Possibly send STOP_SENDING, RESET_STREAM or a FIN, which the core holds until it can
+        // send them.
+        self.coreAfterUpdate(in: &eventContext)
     }
 
     public func serviceReceivedDatagrams(
@@ -2858,42 +2786,29 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         snapshot.sentTransportECNCapableAckedPacketCount = UInt64(clamping: self.stats[.ecnCapablePacketsAcknowledged])
         snapshot.sentTransportECNCapableMarkedPacketCount = UInt64(clamping: self.stats[.ecnCapablePacketsMarked])
         snapshot.sentTransportECNCapableLostPacketCount = UInt64(clamping: self.stats[.ecnCapablePacketsLost])
-        if let path = currentPath {
-            snapshot.transportMinimumRTT = path.rtt.minRTT
-            snapshot.transportSmoothedRTT = path.rtt.smoothedRTT
-            snapshot.transportCurrentRTT = path.rtt.adjustedRTT
-            snapshot.transportRTTVariance = path.rtt.RTTVariance
-            path.congestionControlFilloutDataTransferSnapshot(snapshot: &snapshot)
+        // The RTT and congestion state of the active path, which the core keeps (RFC 9002
+        // Sections 5 and 7).
+        if let box = self.coreBox {
+            snapshot.transportMinimumRTT = box.core.minRTT
+            snapshot.transportSmoothedRTT = box.core.smoothedRTT
+            snapshot.transportCurrentRTT = box.core.latestRTT
+            snapshot.transportRTTVariance = box.core.rttVariance
+            snapshot.transportCongestionWindow = UInt64(clamping: box.core.congestionWindow)
+            // No congestion event yet: the threshold is infinite.
+            let slowStartThreshold = box.core.slowStartThreshold
+            snapshot.transportSlowStartThreshold =
+                slowStartThreshold == .max ? .max : UInt64(clamping: slowStartThreshold)
         }
     }
 
     public var protocolEstablishmentReport: ProtocolEstablishmentReport? {
-        var clientAccurateECNState: ClientAccurateECNState = .ecnFeatureDisabled
-        var l4sEnabled = false
-        if self.usesCore {
-            clientAccurateECNState = self.coreClientAccurateECNState
-        } else if let path = currentPath {
-            l4sEnabled = path.l4sEnabled
-            if let ecnState = path.ecnState?.state {
-                switch ecnState {
-                case .probing, .validate:
-                    clientAccurateECNState = .ecnFeatureEnabled
-                case .manglingDetected:
-                    clientAccurateECNState = .ecnNegotiationSuccessECTManglingDetected
-                case .handshakeValidationSuccess, .capable:
-                    clientAccurateECNState = .ecnNegotiationSuccess
-                case .blackholed:
-                    clientAccurateECNState = .ecnNegotiationBlackholed
-                case .unsupported:
-                    clientAccurateECNState = .ecnNotAvailable
-                default:
-                    break
-                }
-            }
-        }
+        let clientAccurateECNState = self.coreClientAccurateECNState
+        // A core that is gone keeps the values the application read before.
+        let l4sEnabled = self.coreBox?.core.l4sEnabled ?? self.coreLastL4SEnabled
+        let handshakeRTT = self.coreBox?.core.handshakeRTT ?? self.coreLastHandshakeRTT
         var protocolEstablishmentReport = ProtocolEstablishmentReport(
             handshakeDuration: handshakeDuration,
-            handshakeRTT: handshakeRTT,
+            handshakeRTT: handshakeRTT ?? .zero,
             protocolIdentifier: QUICConnectionProtocol.identifier,
             clientAccurateECNState: clientAccurateECNState
         )
@@ -6900,7 +6815,7 @@ extension QUICConnection {
             datagramFlow.applicationMarkedIdle = true
             flowsHaveEverMarkedIdle = true
         }
-        checkConnectionIdle(unackedPacketCount: self.ack.unackedPacketCount, in: &eventContext)
+        checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
     }
 
     fileprivate func handleConnectionReusedForFlow(
@@ -6912,19 +6827,12 @@ extension QUICConnection {
         } else if let datagramFlow = secondaryFlow(for: flowID) {
             datagramFlow.applicationMarkedIdle = false
         }
-        checkConnectionIdle(unackedPacketCount: self.ack.unackedPacketCount, in: &eventContext)
+        checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
     }
 
     fileprivate func connectionIsIdleForAllStreams(unackedPacketCount: Int) -> Bool {
         // Fast exit if no flow has marked idle
         guard flowsHaveEverMarkedIdle else {
-            return false
-        }
-
-        // If there are pending send items, not idle
-        if initialPendingItems.hasPendingItems || handshakePendingItems.hasPendingItems
-            || applicationPendingItems.hasPendingItems
-        {
             return false
         }
 
@@ -6947,23 +6855,9 @@ extension QUICConnection {
             return false
         }
 
-        if self.usesCore {
-            return self.coreBox?.core.isQuiescent ?? true
-        }
-
-        // Recovery has outstanding packets, not idle
-        if recovery.hasOutstandingPackets {
-            return false
-        }
-
-        // We owe the peer an ACK, either already queued or still waiting on the
-        // delayed-ACK timer. A transmission is pending either way, so not idle.
-        if unackedPacketCount > 0 {
-            return false
-        }
-
-        // Everything is idle, return true
-        return true
+        // Nothing in flight, nothing to send, and no ACK owed to the peer, either due now or
+        // waiting on the delayed-ACK timer: a transmission is pending otherwise.
+        return self.coreBox?.core.isQuiescent ?? true
     }
 
     func checkConnectionIdle(unackedPacketCount: Int, in eventContext: inout NetworkContext.EventContext) {
@@ -6976,7 +6870,11 @@ extension QUICConnection {
         }
         let isIdle = connectionIsIdleForAllStreams(unackedPacketCount: unackedPacketCount)
         for path in multiplexingPaths.values {
-            let pathIsIdle = isIdle && !path.isProbing && !path.shouldSendPathResponses
+            // A path with PATH_CHALLENGE or PATH_RESPONSE to send isn't idle either.
+            let corePathID = self.corePathIDs[path.pathIdentifier]
+            let hasProbingFrames =
+                corePathID.map { self.coreBox?.core.hasProbingFramesToSend(on: $0) ?? false } ?? false
+            let pathIsIdle = isIdle && !path.isProbing && !hasProbingFrames
             if pathIsIdle && !path.reportedIdleEvent {
                 // Need to report idle
                 path.reportedIdleEvent = true
@@ -7024,7 +6922,7 @@ extension QUICConnection {
         if event == .outboundDataBatchEnd {
             // Stop pending processing, resume sending
             pendOutboundData = false
-            sendFrames(in: &eventContext)
+            self.coreAfterUpdate(in: &eventContext)
             return .consumed
         }
 
