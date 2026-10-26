@@ -814,6 +814,11 @@ extension QUICConnection {
     private func coreConnected(in eventContext: inout NetworkContext.EventContext) {
         guard let box = self.coreBox else { return }
         self.negotiatedVersion = .v1
+        // The core runs the handshake, so the state is still where the first Initial left it;
+        // `connected` follows `handshake`.
+        if self.state != .handshake {
+            self.state.change(to: .handshake, logIDString: self.logPrefixer.logIDString)
+        }
         self.state.change(to: .connected, logIDString: self.logPrefixer.logIDString)
         self.handshakeDuration = self.handshakeStartTime.duration(to: self.now)
         let peerParameters = box.core.peerTransportParameters
