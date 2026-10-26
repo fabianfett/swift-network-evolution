@@ -531,7 +531,7 @@ extension QUICConnection {
             case .pathValidated(let id):
                 guard let path = self.coreQUICPath(for: id) else { continue }
                 self.coreSynchronizePath(path, id, in: &eventContext)
-                if let pathInfo = Self.corePathInfo(path) {
+                if let pathInfo = Self.corePathInfo(path, isValidated: true) {
                     self.deliverNetworkProtocolEvent(
                         flow: .allFlows,
                         event: .init(quicEvent: .pathValidated(pathInfo)),
@@ -700,14 +700,17 @@ extension QUICConnection {
         return self.multiplexingPaths[pathIdentifier]
     }
 
-    private static func corePathInfo(_ path: QUICPath) -> QUICPathInfo? {
+    /// What the framework's path events say about `path`. Whether it is validated comes from the
+    /// core: the `QUICPath` of an address a server followed the client to never went through the
+    /// framework's probing states.
+    private static func corePathInfo(_ path: QUICPath, isValidated: Bool) -> QUICPathInfo? {
         guard let localEndpoint = path.localEndpoint, let remoteEndpoint = path.remoteEndpoint,
             case .address(let localAddress) = localEndpoint.type,
             case .address(let remoteAddress) = remoteEndpoint.type
         else {
             return nil
         }
-        return QUICPathInfo(isValidated: path.isValidated, remote: remoteAddress, local: localAddress)
+        return QUICPathInfo(isValidated: isValidated, remote: remoteAddress, local: localAddress)
     }
 
     /// Mirrors the core's connection ID and validation of a path to the `QUICPath`, whose state
@@ -762,7 +765,7 @@ extension QUICConnection {
         self.currentPath = path
         self.coreSynchronizePath(path, id, in: &eventContext)
         path.spinValue = self.initialSpinValue
-        if let pathInfo = Self.corePathInfo(path) {
+        if let pathInfo = Self.corePathInfo(path, isValidated: self.coreBox?.core.isPathValidated(id) ?? false) {
             self.deliverNetworkProtocolEvent(
                 flow: .allFlows,
                 event: .init(quicEvent: .pathCurrent(pathInfo)),
