@@ -725,17 +725,20 @@ extension QUICConnectionCore {
             case .crypto(let offset, let length):
                 self.handshake.send[space].onAcked(offset: offset, length: length, fin: false)
             case .stream(let id, let offset, let length, let fin):
-                guard var stream = self.streams.streams.removeValue(forKey: id) else { continue }
-                let wasFullyAcknowledged = stream.send.isFullyAcknowledged
-                stream.send.onAcked(offset: offset, length: length, fin: fin)
-                if !wasFullyAcknowledged && stream.send.isFullyAcknowledged {
+                guard let index = self.streams.index(of: id) else { continue }
+                let finishedSending = self.streams.withStream(at: index) { stream in
+                    let wasFullyAcknowledged = stream.send.isFullyAcknowledged
+                    stream.send.onAcked(offset: offset, length: length, fin: fin)
+                    return !wasFullyAcknowledged && stream.send.isFullyAcknowledged
+                }
+                if finishedSending {
                     self.events.append(.streamFinishedSending(id))
                 }
-                self.storeOrRemove(stream)
+                self.finishStreamOperation(at: index)
             case .resetStream(let id):
-                guard var stream = self.streams.streams.removeValue(forKey: id) else { continue }
-                stream.resetAcknowledged = true
-                self.storeOrRemove(stream)
+                guard let index = self.streams.index(of: id) else { continue }
+                self.streams.withStream(at: index) { $0.resetAcknowledged = true }
+                self.finishStreamOperation(at: index)
             case .keepAlive:
                 self.unacknowledgedKeepAlives = 0
                 self.statistics.increment(.keepAliveFramesAcknowledged)
@@ -778,25 +781,33 @@ extension QUICConnectionCore {
             case .crypto(let offset, let length):
                 self.handshake.send[space].onLost(offset: offset, length: length, fin: false)
             case .stream(let id, let offset, let length, let fin):
-                // Mutated in place: a copy would duplicate the stream's buffers.
-                guard self.streams.streams[id]?.resetCode == nil, self.streams.streams[id] != nil else { continue }
-                self.streams.streams[id]!.send.onLost(offset: offset, length: length, fin: fin)
+                let requeued = self.streams.withStream(id) { stream in
+                    guard stream.resetCode == nil else { return false }
+                    stream.send.onLost(offset: offset, length: length, fin: fin)
+                    return true
+                }
+                guard requeued == true else { continue }
                 self.streams.enqueueForSending(id)
             case .resetStream(let id):
-                guard self.streams.streams[id] != nil else { continue }
-                self.streams.streams[id]!.resetPending = true
+                guard self.streams.withStream(id, { $0.resetPending = true }) != nil else { continue }
                 self.streams.enqueueForSending(id)
             case .stopSending(let id):
-                guard self.streams.streams[id] != nil, self.streams.streams[id]!.peerResetCode == nil else { continue }
-                self.streams.streams[id]!.stopSendingPending = true
+                let requeued = self.streams.withStream(id) { stream in
+                    guard stream.peerResetCode == nil else { return false }
+                    stream.stopSendingPending = true
+                    return true
+                }
+                guard requeued == true else { continue }
                 self.streams.enqueueForSending(id)
             case .maxData:
                 self.maxDataPending = true
             case .maxStreamData(let id):
-                guard self.streams.streams[id] != nil, self.streams.streams[id]!.receive.finalSize == nil else {
-                    continue
+                let requeued = self.streams.withStream(id) { stream in
+                    guard stream.receive.finalSize == nil else { return false }
+                    stream.maxStreamDataPending = true
+                    return true
                 }
-                self.streams.streams[id]!.maxStreamDataPending = true
+                guard requeued == true else { continue }
                 self.streams.enqueueForSending(id)
             case .maxStreamsBidirectional:
                 self.streams.maxStreamsBidirectionalPending = true
@@ -852,18 +863,21 @@ extension QUICConnectionCore {
             self.closeWithError(CoreTransportError.frameEncodingError, reason: "Stream offset too large", now: now)
             return true
         }
-        guard var stream = self.stream(forReceiving: id, now: now) else {
+        // The stream is changed in place; nothing below adds or removes streams, so `index` stays valid.
+        guard let index = self.streamIndex(forReceiving: id, now: now) else {
             return true
         }
-        guard stream.canReceive else {
+        let (canReceive, previousHighest, receiveLimit, stopSendingRequested) = self.streams.withStream(at: index) {
+            ($0.canReceive, $0.receive.highestOffset, $0.receiveLimit, $0.stopSendingCode != nil)
+        }
+        guard canReceive else {
             self.closeWithError(CoreTransportError.streamStateError, reason: "STREAM on send-only stream", now: now)
             return true
         }
-        let previousHighest = stream.receive.highestOffset
         let end = offset &+ UInt64(length)
         self.statistics.increment(.rxStreamFrames)
         self.statistics.increment(.rxStreamBytes, by: length)
-        if end > stream.receiveLimit {
+        if end > receiveLimit {
             self.closeWithError(CoreTransportError.flowControlError, reason: "Stream flow control", now: now)
             return true
         }
@@ -874,38 +888,49 @@ extension QUICConnectionCore {
                 return true
             }
         }
-        if stream.stopSendingCode != nil {
+        if stopSendingRequested {
             // We asked the peer to stop; count the bytes for flow control and drop them.
+            let discarded: UInt64
             do {
-                try stream.receive.insert(offset: offset, bytes: reader.bytes.extracting(range), fin: fin)
+                discarded = try self.streams.withStream(at: index) { stream throws(CoreReceiveBuffer.InsertError) in
+                    try stream.receive.insert(offset: offset, bytes: reader.bytes.extracting(range), fin: fin)
+                    return stream.receive.discard()
+                }
             } catch {
                 self.closeWithError(CoreTransportError.finalSizeError, reason: "Final size", now: now)
                 return true
             }
-            self.consumedData &+= stream.receive.discard()
-            self.storeOrRemove(stream)
+            self.consumedData &+= discarded
+            self.finishStreamOperation(at: index)
             return true
         }
-        let readable: Int
+        let reportReadable: Bool
         do {
-            readable = try stream.receive.insert(offset: offset, bytes: reader.bytes.extracting(range), fin: fin)
+            reportReadable = try self.streams.withStream(at: index) { stream throws(CoreReceiveBuffer.InsertError) in
+                let readable = try stream.receive.insert(
+                    offset: offset,
+                    bytes: reader.bytes.extracting(range),
+                    fin: fin
+                )
+                guard (readable > 0 || stream.receive.isComplete) && !stream.readableReported else { return false }
+                stream.readableReported = true
+                return true
+            }
         } catch {
             self.closeWithError(CoreTransportError.finalSizeError, reason: "Final size", now: now)
             return true
         }
-        if (readable > 0 || stream.receive.isComplete) && !stream.readableReported {
-            stream.readableReported = true
+        if reportReadable {
             self.events.append(.streamReadable(id))
         }
-        self.streams.streams[id] = stream
         return true
     }
 
-    /// The stream a receive-side frame refers to, opening peer streams as needed. Returns `nil`
-    /// for a closed stream, or after closing the connection on an invalid stream.
-    private mutating func stream(forReceiving id: UInt64, now: NetworkClock.Instant) -> CoreStream? {
-        if let stream = self.streams.streams[id] {
-            return stream
+    /// The position of the stream a receive-side frame refers to, opening peer streams as needed.
+    /// Returns `nil` for a closed stream, or after closing the connection on an invalid stream.
+    private mutating func streamIndex(forReceiving id: UInt64, now: NetworkClock.Instant) -> CoreStreamMap.Index? {
+        if let index = self.streams.index(of: id) {
+            return index
         }
         if self.streams.isUnopenedLocal(id) {
             self.closeWithError(CoreTransportError.streamStateError, reason: "Frame for unopened stream", now: now)
@@ -935,7 +960,7 @@ extension QUICConnectionCore {
             self.closeWithError(CoreTransportError.streamLimitError, reason: "Stream limit", now: now)
             return nil
         }
-        return self.streams.streams[id]
+        return self.streams.index(of: id)
     }
 
     private mutating func processResetStream(
@@ -946,8 +971,12 @@ extension QUICConnectionCore {
     )
         -> Bool
     {
-        guard var stream = self.stream(forReceiving: id, now: now) else { return true }
-        guard stream.canReceive else {
+        // The stream is changed in place; nothing below adds or removes streams, so `index` stays valid.
+        guard let index = self.streamIndex(forReceiving: id, now: now) else { return true }
+        let (canReceive, previousHighest, receiveLimit) = self.streams.withStream(at: index) {
+            ($0.canReceive, $0.receive.highestOffset, $0.receiveLimit)
+        }
+        guard canReceive else {
             self.closeWithError(
                 CoreTransportError.streamStateError,
                 reason: "RESET_STREAM on send-only stream",
@@ -955,15 +984,16 @@ extension QUICConnectionCore {
             )
             return true
         }
-        let previousHighest = stream.receive.highestOffset
         do {
-            try stream.receive.reset(finalSize: finalSize)
+            try self.streams.withStream(at: index) { stream throws(CoreReceiveBuffer.InsertError) in
+                try stream.receive.reset(finalSize: finalSize)
+            }
         } catch {
             self.closeWithError(CoreTransportError.finalSizeError, reason: "Final size", now: now)
             return true
         }
         // The final size counts against flow control like data would (RFC 9000 § 4.5).
-        if finalSize > stream.receiveLimit {
+        if finalSize > receiveLimit {
             self.closeWithError(CoreTransportError.flowControlError, reason: "Stream flow control", now: now)
             return true
         }
@@ -974,30 +1004,23 @@ extension QUICConnectionCore {
                 return true
             }
         }
-        let wasReset = stream.peerResetCode != nil
-        stream.peerResetCode = errorCode
-        self.consumedData &+= stream.receive.discard()
+        let (wasReset, discarded) = self.streams.withStream(at: index) { stream in
+            let wasReset = stream.peerResetCode != nil
+            stream.peerResetCode = errorCode
+            return (wasReset, stream.receive.discard())
+        }
+        self.consumedData &+= discarded
         self.updateConnectionReceiveLimit()
         if !wasReset {
             self.events.append(.streamReset(id, errorCode: errorCode))
         }
-        self.storeOrRemove(stream)
+        self.finishStreamOperation(at: index)
         return true
     }
 
     private mutating func processStopSending(id: UInt64, errorCode: UInt64, now: NetworkClock.Instant) -> Bool {
-        if self.streams.streams[id] == nil && !self.streams.isLocal(id) {
-            _ = self.stream(forReceiving: id, now: now)
-        } else if self.streams.isUnopenedLocal(id) {
-            self.closeWithError(
-                CoreTransportError.streamStateError,
-                reason: "STOP_SENDING for unopened stream",
-                now: now
-            )
-            return true
-        }
-        guard var stream = self.streams.streams[id] else { return true }
-        guard stream.canSend else {
+        guard let index = self.streamIndex(forSendFrame: id, frame: "STOP_SENDING", now: now) else { return true }
+        guard self.streams.withStream(at: index, { $0.canSend }) else {
             self.closeWithError(
                 CoreTransportError.streamStateError,
                 reason: "STOP_SENDING on receive-only stream",
@@ -1005,33 +1028,33 @@ extension QUICConnectionCore {
             )
             return true
         }
-        if stream.peerStopSendingCode == nil {
-            stream.peerStopSendingCode = errorCode
+        let (reportStopSending, answerWithReset) = self.streams.withStream(at: index) { stream in
+            let reportStopSending = stream.peerStopSendingCode == nil
+            if reportStopSending {
+                stream.peerStopSendingCode = errorCode
+            }
+            // Answer with RESET_STREAM unless everything was already sent and acknowledged.
+            let answerWithReset = stream.resetCode == nil && !stream.send.isFullyAcknowledged
+            if answerWithReset {
+                stream.resetCode = errorCode
+                stream.resetPending = true
+            }
+            return (reportStopSending, answerWithReset)
+        }
+        if reportStopSending {
             self.events.append(.stopSending(id, errorCode: errorCode))
         }
-        // Answer with RESET_STREAM unless everything was already sent and acknowledged.
-        if stream.resetCode == nil && !stream.send.isFullyAcknowledged {
-            stream.resetCode = errorCode
-            stream.resetPending = true
+        if answerWithReset {
             self.streams.enqueueForSending(id)
         }
-        self.streams.streams[id] = stream
         return true
     }
 
     private mutating func processMaxStreamData(id: UInt64, maximum: UInt64, now: NetworkClock.Instant) -> Bool {
-        if self.streams.streams[id] == nil && !self.streams.isLocal(id) {
-            _ = self.stream(forReceiving: id, now: now)
-        } else if self.streams.isUnopenedLocal(id) {
-            self.closeWithError(
-                CoreTransportError.streamStateError,
-                reason: "MAX_STREAM_DATA for unopened stream",
-                now: now
-            )
+        guard let index = self.streamIndex(forSendFrame: id, frame: "MAX_STREAM_DATA", now: now) else {
             return true
         }
-        guard var stream = self.streams.streams[id] else { return true }
-        guard stream.canSend else {
+        guard self.streams.withStream(at: index, { $0.canSend }) else {
             self.closeWithError(
                 CoreTransportError.streamStateError,
                 reason: "MAX_STREAM_DATA on receive-only stream",
@@ -1039,24 +1062,50 @@ extension QUICConnectionCore {
             )
             return true
         }
-        if maximum > stream.sendLimit {
+        let raised = self.streams.withStream(at: index) { stream -> (reportWritable: Bool, enqueue: Bool)? in
+            guard maximum > stream.sendLimit else { return nil }
             stream.sendLimit = maximum
-            if stream.writableBlocked {
-                stream.writableBlocked = false
+            let reportWritable = stream.writableBlocked
+            stream.writableBlocked = false
+            return (reportWritable, stream.hasPendingFrames)
+        }
+        if let raised {
+            if raised.reportWritable {
                 self.events.append(.streamWritable(id))
             }
-            if stream.hasPendingFrames {
+            if raised.enqueue {
                 self.streams.enqueueForSending(id)
             }
         }
-        self.streams.streams[id] = stream
         return true
     }
 
-    private mutating func reportWritableStreams() {
-        for (id, stream) in self.streams.streams where stream.hasPendingFrames {
-            self.streams.enqueueForSending(id)
+    /// The position of the stream a STOP_SENDING or MAX_STREAM_DATA frame refers to, opening
+    /// peer streams as needed. Returns `nil` for a closed stream, or after closing the connection
+    /// on an unopened local stream.
+    private mutating func streamIndex(
+        forSendFrame id: UInt64,
+        frame: StaticString,
+        now: NetworkClock.Instant
+    ) -> CoreStreamMap.Index? {
+        if let index = self.streams.index(of: id) {
+            return index
         }
+        if !self.streams.isLocal(id) {
+            return self.streamIndex(forReceiving: id, now: now)
+        }
+        if self.streams.isUnopenedLocal(id) {
+            self.closeWithError(
+                CoreTransportError.streamStateError,
+                reason: "\(frame) for unopened stream",
+                now: now
+            )
+        }
+        return nil
+    }
+
+    private mutating func reportWritableStreams() {
+        self.streams.enqueueStreamsWithPendingFrames()
     }
 
     // MARK: Handshake
@@ -1169,14 +1218,14 @@ extension QUICConnectionCore {
         self.recovery.maxAckDelay = parameters[.maxAckDelay]?.duration ?? .milliseconds(25)
         // Streams opened before the parameters arrived, or in 0-RTT with the remembered ones, get
         // their limits now.
-        for (id, var stream) in self.streams.streams where stream.canSend {
+        self.streams.forEachStream { stream in
+            guard stream.canSend else { return }
             let limit =
-                CoreStreamMap.isBidirectional(id)
+                CoreStreamMap.isBidirectional(stream.id)
                 ? UInt64(parameters.intValue(.initialMaxStreamDataBidirectionalRemote))
                 : UInt64(parameters.intValue(.initialMaxStreamDataUnidirectional))
-            guard limit > stream.sendLimit else { continue }
+            guard limit > stream.sendLimit else { return }
             stream.sendLimit = limit
-            self.streams.streams[id] = stream
         }
     }
 

@@ -98,19 +98,19 @@ extension QUICConnectionCore {
         } else {
             // The application starts its streams over (RFC 9001 Section 4.6.2).
             self.sentData = 0
-            for (id, var stream) in self.streams.streams where stream.canSend {
+            self.streams.forEachStream { stream in
+                guard stream.canSend else { return }
                 stream.send = CoreSendBuffer()
-                self.streams.streams[id] = stream
             }
         }
         // The streams get the limits of this connection, not the remembered ones.
         if let parameters = self.peerTransportParameters {
-            for (id, var stream) in self.streams.streams where stream.canSend {
+            self.streams.forEachStream { stream in
+                guard stream.canSend else { return }
                 stream.sendLimit =
-                    CoreStreamMap.isBidirectional(id)
+                    CoreStreamMap.isBidirectional(stream.id)
                     ? UInt64(parameters.intValue(.initialMaxStreamDataBidirectionalRemote))
                     : UInt64(parameters.intValue(.initialMaxStreamDataUnidirectional))
-                self.streams.streams[id] = stream
             }
         }
         self.events.append(.earlyDataRejected)

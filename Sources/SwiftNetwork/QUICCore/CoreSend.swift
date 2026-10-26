@@ -696,21 +696,29 @@ extension QUICConnectionCore {
         // Stream frames, round robin.
         var deferred: [UInt64] = []
         while writer.offset &+ 24 < limit, let id = self.streams.popSendQueue() {
-            guard var stream = self.streams.streams.removeValue(forKey: id) else { continue }
-            self.writeStreamFrames(
-                for: &stream,
+            guard let index = self.streams.index(of: id) else { continue }
+            // The stream is written in place, next to the connection's flow control and statistics.
+            Self.writeStreamFrames(
+                for: &self.streams[index],
+                sentData: &self.sentData,
+                sendMaxData: self.sendMaxData,
+                statistics: &self.statistics,
                 into: &writer,
                 limit: limit,
                 frames: &frames,
                 isAckEliciting: &isAckEliciting
             )
-            let stillPending = stream.hasPendingFrames
-            let blockedOnConnection =
-                stillPending && !stream.send.hasRetransmission && !stream.resetPending
-                && !stream.stopSendingPending && !stream.maxStreamDataPending && self.sentData >= self.sendMaxData
-                && stream.send.unsentCount > 0
-            self.storeOrRemove(stream)
-            if stillPending && self.streams.streams[id] != nil {
+            let connectionBlocked = self.sentData >= self.sendMaxData
+            let (stillPending, blockedOnConnection) = self.streams.withStream(at: index) { stream in
+                let stillPending = stream.hasPendingFrames
+                let blockedOnConnection =
+                    stillPending && !stream.send.hasRetransmission && !stream.resetPending
+                    && !stream.stopSendingPending && !stream.maxStreamDataPending && connectionBlocked
+                    && stream.send.unsentCount > 0
+                return (stillPending, blockedOnConnection)
+            }
+            let closed = self.finishStreamOperation(at: index)
+            if stillPending && !closed {
                 if blockedOnConnection {
                     deferred.append(id)
                 } else if writer.offset &+ 24 >= limit {
@@ -761,8 +769,11 @@ extension QUICConnectionCore {
         }
     }
 
-    private mutating func writeStreamFrames(
+    private static func writeStreamFrames(
         for stream: inout CoreStream,
+        sentData: inout UInt64,
+        sendMaxData: UInt64,
+        statistics: inout Statistics,
         into writer: inout CoreWriter,
         limit: Int,
         frames: inout [CoreSentFrame],
@@ -776,7 +787,7 @@ extension QUICConnectionCore {
                 stream.resetPending = false
                 stream.send.reset()
                 frames.append(.resetStream(id: id))
-                self.statistics.increment(.txStreamResetFrames)
+                statistics.increment(.txStreamResetFrames)
                 isAckEliciting = true
             }
         }
@@ -784,7 +795,7 @@ extension QUICConnectionCore {
             if writer.vle(0x05) && writer.vle(id) && writer.vle(code) {
                 stream.stopSendingPending = false
                 frames.append(.stopSending(id: id))
-                self.statistics.increment(.txStreamStopSendingFrames)
+                statistics.increment(.txStreamStopSendingFrames)
                 isAckEliciting = true
             }
         }
@@ -801,7 +812,7 @@ extension QUICConnectionCore {
             let overhead = 1 &+ CoreWriter.vleLength(id) &+ 8 &+ 2
             let available = limit &- writer.offset &- overhead
             guard available >= 0 else { return }
-            let connectionCredit = self.sendMaxData > self.sentData ? self.sendMaxData &- self.sentData : 0
+            let connectionCredit = sendMaxData > sentData ? sendMaxData &- sentData : 0
             let flowControlLimit = min(stream.sendLimit, stream.send.sendOffset &+ connectionCredit)
             guard
                 let chunk = stream.send.nextChunk(
@@ -824,13 +835,13 @@ extension QUICConnectionCore {
             let previousSendOffset = stream.send.sendOffset
             stream.send.markSent(offset: chunk.offset, length: chunk.length, fin: chunk.fin)
             let newBytes = stream.send.sendOffset &- previousSendOffset
-            self.sentData &+= newBytes
+            sentData &+= newBytes
             frames.append(.stream(id: id, offset: chunk.offset, length: chunk.length, fin: chunk.fin))
             isAckEliciting = true
-            self.statistics.increment(.txStreamFrames)
-            self.statistics.increment(.txStreamBytes, by: chunk.length)
+            statistics.increment(.txStreamFrames)
+            statistics.increment(.txStreamBytes, by: chunk.length)
             if UInt64(chunk.length) > newBytes {
-                self.statistics.increment(.txRetransmittedBytes, by: chunk.length &- Int(newBytes))
+                statistics.increment(.txRetransmittedBytes, by: chunk.length &- Int(newBytes))
             }
             if chunk.length == 0 { return }
         }

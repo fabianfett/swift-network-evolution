@@ -254,9 +254,98 @@ struct CoreStreamMap {
         return newIDs
     }
 
+    // MARK: In-place access
+    //
+    // `streams[id]` is a getter: reading a field through it copies the whole stream, and a
+    // `var stream = streams[id]` … `streams[id] = stream` round trip copies it and hashes twice.
+    // `values[index]` modifies the stored stream in place, so these helpers look a stream up once
+    // and don't copy it.
+
+    typealias Index = [UInt64: CoreStream].Index
+
+    /// The position of stream `id`, valid until a stream is added or removed.
+    func index(of id: UInt64) -> Index? {
+        self.streams.index(forKey: id)
+    }
+
+    /// The stream at `index`. Reading copies the whole stream, like `streams[id]` does; mutating
+    /// code reads in place through ``withStream(at:_:)``.
+    subscript(index: Index) -> CoreStream {
+        get { self.streams.values[index] }
+        _modify { yield &self.streams.values[index] }
+    }
+
+    /// Whether stream `id` exists.
+    func contains(_ id: UInt64) -> Bool {
+        self.streams.index(forKey: id) != nil
+    }
+
+    /// Calls `body` with stream `id`, mutated in place. Returns `nil` if there is no such stream.
+    ///
+    /// The stream stays in the map even if it closed; ``finishOperation(at:)`` forgets it.
+    mutating func withStream<Result, Failure: Error>(
+        _ id: UInt64,
+        _ body: (inout CoreStream) throws(Failure) -> Result
+    ) throws(Failure) -> Result? {
+        guard let index = self.streams.index(forKey: id) else { return nil }
+        return try body(&self.streams.values[index])
+    }
+
+    /// Calls `body` with the stream at `index`, mutated in place.
+    mutating func withStream<Result, Failure: Error>(
+        at index: Index,
+        _ body: (inout CoreStream) throws(Failure) -> Result
+    ) throws(Failure) -> Result {
+        try body(&self.streams.values[index])
+    }
+
+    /// Calls `body` with every stream, mutated in place.
+    mutating func forEachStream(_ body: (inout CoreStream) -> Void) {
+        var index = self.streams.startIndex
+        while index != self.streams.endIndex {
+            body(&self.streams.values[index])
+            self.streams.formIndex(after: &index)
+        }
+    }
+
+    /// Queues every stream that has frames to send.
+    mutating func enqueueStreamsWithPendingFrames() {
+        var index = self.streams.startIndex
+        while index != self.streams.endIndex {
+            if self.streams.values[index].hasPendingFrames {
+                self.enqueueForSending(self.streams.keys[index])
+            }
+            self.streams.formIndex(after: &index)
+        }
+    }
+
+    /// The bookkeeping after an operation changed the stream at `index`: hands back the stream's
+    /// slot in the peer's stream limit once it no longer needs it, and forgets the stream once
+    /// both directions are done. Returns the stream's ID if it closed; `index` is invalid then.
+    mutating func finishOperation(at index: Index) -> UInt64? {
+        let id = self.streams.keys[index]
+        let returnsCredit = self.returnsStreamCreditAutomatically && !self.isLocal(id)
+        let (doneForStreamCredit, isClosed, creditReturned) = self.withStream(at: index) { stream in
+            let doneForStreamCredit = returnsCredit && !stream.creditReturned && stream.isDoneForStreamCredit
+            if doneForStreamCredit {
+                stream.creditReturned = true
+            }
+            return (doneForStreamCredit, stream.isClosed, stream.creditReturned)
+        }
+        if doneForStreamCredit {
+            self.returnStreamCredit(id)
+        }
+        guard isClosed else { return nil }
+        self.streams.remove(at: index)
+        if self.returnsStreamCreditAutomatically && !creditReturned {
+            self.returnStreamCredit(id)
+        }
+        return id
+    }
+
     /// Whether `id` names a stream that existed and is now gone.
     func wasClosed(_ id: UInt64) -> Bool {
-        guard self.streams[id] == nil else { return false }
+        guard !self.contains(id) else { return false }
         let index = id / 4
         if self.isLocal(id) {
             let next = Self.isBidirectional(id) ? self.nextLocalBidirectional : self.nextLocalUnidirectional

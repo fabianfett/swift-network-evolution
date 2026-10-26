@@ -755,23 +755,24 @@ public struct QUICConnectionCore: ~Copyable {
     /// raises its limit.
     @discardableResult
     public mutating func write(_ bytes: RawSpan, to streamID: UInt64, fin: Bool = false) -> Int {
-        guard !self.isClosingOrDraining, var stream = self.streams.streams.removeValue(forKey: streamID) else {
-            return 0
+        guard !self.isClosingOrDraining else { return 0 }
+        let hasPendingFrames = self.streams.withStream(streamID) { stream -> Bool? in
+            guard stream.canSend, stream.resetCode == nil, !stream.send.isFinished else {
+                return nil
+            }
+            if bytes.byteCount > 0 {
+                stream.send.append(bytes)
+            }
+            if stream.send.writeOffset >= stream.sendLimit {
+                stream.writableBlocked = true
+            }
+            if fin {
+                stream.send.finish()
+            }
+            return stream.hasPendingFrames
         }
-        defer { self.streams.streams[streamID] = stream }
-        guard stream.canSend, stream.resetCode == nil, !stream.send.isFinished else {
-            return 0
-        }
-        if bytes.byteCount > 0 {
-            stream.send.append(bytes)
-        }
-        if stream.send.writeOffset >= stream.sendLimit {
-            stream.writableBlocked = true
-        }
-        if fin {
-            stream.send.finish()
-        }
-        if stream.hasPendingFrames {
+        guard let hasPendingFrames = hasPendingFrames ?? nil else { return 0 }
+        if hasPendingFrames {
             self.streams.enqueueForSending(streamID)
         }
         return bytes.byteCount
@@ -779,10 +780,12 @@ public struct QUICConnectionCore: ~Copyable {
 
     /// Finishes the send side of a stream.
     public mutating func finish(_ streamID: UInt64) {
-        guard self.streams.streams[streamID]?.canSend == true, self.streams.streams[streamID]?.resetCode == nil else {
-            return
+        let finished = self.streams.withStream(streamID) { stream in
+            guard stream.canSend, stream.resetCode == nil else { return false }
+            stream.send.finish()
+            return true
         }
-        self.streams.streams[streamID]!.send.finish()
+        guard finished == true else { return }
         self.streams.enqueueForSending(streamID)
     }
 
@@ -793,47 +796,53 @@ public struct QUICConnectionCore: ~Copyable {
         from streamID: UInt64,
         _ body: (RawSpan, _ isFinished: Bool) -> (consumed: Int, result: Result)
     ) -> Result? {
-        guard var stream = self.streams.streams.removeValue(forKey: streamID) else { return nil }
-        let before = stream.receive.readOffset
-        let finalSize = stream.receive.finalSize
-        let contiguousEnd = stream.receive.contiguousEnd
-        let result = stream.receive.read { bytes in
-            body(bytes, finalSize != nil && contiguousEnd == finalSize)
+        guard let index = self.streams.index(of: streamID) else { return nil }
+        let (result, consumed, raisedReceiveLimit) = self.streams.withStream(at: index) { stream in
+            let before = stream.receive.readOffset
+            let finalSize = stream.receive.finalSize
+            let contiguousEnd = stream.receive.contiguousEnd
+            let result = stream.receive.read { bytes in
+                body(bytes, finalSize != nil && contiguousEnd == finalSize)
+            }
+            let consumed = stream.receive.readOffset &- before
+            stream.readableReported = false
+            return (result, consumed, consumed > 0 && stream.updateReceiveLimit())
         }
-        let consumed = stream.receive.readOffset &- before
-        stream.readableReported = false
         if consumed > 0 {
             self.consumedData &+= consumed
-            if stream.updateReceiveLimit() {
+            if raisedReceiveLimit {
                 self.streams.enqueueForSending(streamID)
             }
             self.updateConnectionReceiveLimit()
         }
-        self.storeOrRemove(stream)
+        self.finishStreamOperation(at: index)
         return result
     }
 
     /// Resets the send side of a stream with RESET_STREAM.
     public mutating func resetStream(_ streamID: UInt64, errorCode: UInt64) {
-        guard var stream = self.streams.streams[streamID], stream.canSend, stream.resetCode == nil else { return }
-        guard !stream.send.isFullyAcknowledged else { return }
-        stream.resetCode = errorCode
-        stream.resetPending = true
-        self.streams.streams[streamID] = stream
+        let reset = self.streams.withStream(streamID) { stream in
+            guard stream.canSend, stream.resetCode == nil, !stream.send.isFullyAcknowledged else { return false }
+            stream.resetCode = errorCode
+            stream.resetPending = true
+            return true
+        }
+        guard reset == true else { return }
         self.streams.enqueueForSending(streamID)
     }
 
     /// Asks the peer to stop sending on a stream with STOP_SENDING.
     public mutating func stopSending(_ streamID: UInt64, errorCode: UInt64) {
-        guard var stream = self.streams.streams[streamID], stream.canReceive, stream.stopSendingCode == nil else {
-            return
+        let discarded = self.streams.withStream(streamID) { stream -> UInt64? in
+            guard stream.canReceive, stream.stopSendingCode == nil else { return nil }
+            guard stream.peerResetCode == nil, !stream.receive.isComplete else { return nil }
+            stream.stopSendingCode = errorCode
+            stream.stopSendingPending = true
+            return stream.receive.discard()
         }
-        guard stream.peerResetCode == nil, !stream.receive.isComplete else { return }
-        stream.stopSendingCode = errorCode
-        stream.stopSendingPending = true
-        self.consumedData &+= stream.receive.discard()
+        guard let discarded = discarded ?? nil else { return }
+        self.consumedData &+= discarded
         self.updateConnectionReceiveLimit()
-        self.streams.streams[streamID] = stream
         self.streams.enqueueForSending(streamID)
     }
 
@@ -927,25 +936,14 @@ public struct QUICConnectionCore: ~Copyable {
         }
     }
 
-    mutating func storeOrRemove(_ stream: consuming CoreStream) {
-        var stream = stream
-        let id = stream.id
-        if self.streams.returnsStreamCreditAutomatically && !stream.creditReturned && !self.streams.isLocal(id)
-            && stream.isDoneForStreamCredit
-        {
-            stream.creditReturned = true
-            self.streams.returnStreamCredit(id)
-        }
-        if stream.isClosed {
-            self.events.append(.streamClosed(id))
-            if self.streams.returnsStreamCreditAutomatically && !stream.creditReturned {
-                self.streams.returnStreamCredit(id)
-            }
-            // The caller may or may not have taken the stream out of the map.
-            self.streams.streams[id] = nil
-        } else {
-            self.streams.streams[id] = stream
-        }
+    /// Ends an operation that changed the stream at `index`: hands back stream credit as due, and
+    /// forgets the stream and reports ``Event/streamClosed(_:)`` once both directions are done.
+    /// Returns whether the stream closed; `index` is invalid then.
+    @discardableResult
+    mutating func finishStreamOperation(at index: CoreStreamMap.Index) -> Bool {
+        guard let id = self.streams.finishOperation(at: index) else { return false }
+        self.events.append(.streamClosed(id))
+        return true
     }
 }
 
@@ -1116,7 +1114,7 @@ extension QUICConnectionCore {
 
     /// Whether a stream exists.
     public func hasStream(_ streamID: UInt64) -> Bool {
-        self.streams.streams[streamID] != nil
+        self.streams.contains(streamID)
     }
 
     /// Whether the connection has nothing to do until the peer or the application acts: no
