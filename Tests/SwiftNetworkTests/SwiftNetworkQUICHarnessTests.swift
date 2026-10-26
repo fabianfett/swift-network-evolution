@@ -1050,7 +1050,33 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         }
     }
 
-    /// A datagram flow carries as much as the datagrams the path carries once PMTUD raised them.
+    /// Writes within an outbound batch leave acting on the core to the batch end, which does it once.
+    func testQUICOutboundDataBatchUpdatesTheCoreOnceAtItsEnd() {
+        QUICTestHarness().runQUICTestOnNewStream { harness, stream in
+            let expectation = XCTestExpectation(description: "Write a batch")
+            harness.context.async {
+                defer { expectation.fulfill() }
+                guard let client = harness.state?.clientInstance, let box = client.coreBox else {
+                    return XCTFail("No client core")
+                }
+                let sent = box.core.statistics[.txStreamBytes]
+                client.fromExternal { eventContext in
+                    _ = client.handleApplicationEvent(.outboundDataBatchStart, in: &eventContext)
+                }
+                let runs = client.coreAfterUpdateRuns
+                for _ in 0..<10 {
+                    XCTAssertTrue(stream.write(Array("Hello World!".utf8)))
+                }
+                XCTAssertEqual(client.coreAfterUpdateRuns, runs, "no update per write")
+                client.fromExternal { eventContext in
+                    _ = client.handleApplicationEvent(.outboundDataBatchEnd, in: &eventContext)
+                }
+                XCTAssertEqual(client.coreAfterUpdateRuns, runs + 1, "one update for the batch")
+                XCTAssertEqual(box.core.statistics[.txStreamBytes], sent + 120, "the whole batch went out")
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+        }
+    }
     func testQUICDatagramFlowsGrowWithPMTUD() {
         let clientOptions = QUICProtocol.options()
         clientOptions.connectionOptions.pmtudIgnoreCost = true

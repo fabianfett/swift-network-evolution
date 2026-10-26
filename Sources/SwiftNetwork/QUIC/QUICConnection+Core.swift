@@ -395,6 +395,7 @@ extension QUICConnection {
             return
         }
         self.coreIsUpdating = true
+        self.coreAfterUpdateRuns &+= 1
         defer { self.coreIsUpdating = false }
         repeat {
             self.coreUpdatePending = false
@@ -415,6 +416,17 @@ extension QUICConnection {
         self.coreSynchronizeStatistics(in: &eventContext)
         self.coreRescheduleTimer(in: &eventContext)
         self.checkConnectionIdle(in: &eventContext)
+    }
+
+    /// Runs `coreAfterUpdate` after the application wrote to or read from a stream, unless an
+    /// outbound batch is open: `outboundDataBatchEnd` runs it once for the whole batch, which
+    /// spares a pass over the core's events, the statistics and the timer per stream. What the
+    /// core has to send waits for the batch end either way.
+    private func coreAfterApplicationUpdate(in eventContext: inout NetworkContext.EventContext) {
+        if self.pendOutboundData, let box = self.coreBox, !box.core.isTerminating {
+            return
+        }
+        self.coreAfterUpdate(in: &eventContext)
     }
 
     private func coreProcessEvents(in eventContext: inout NetworkContext.EventContext) {
@@ -1178,7 +1190,7 @@ extension QUICConnection {
         self.withPinnedClock {
             self.coreWriteQueuedStreamData(stream, in: &eventContext)
             self.checkConnectionIdle(in: &eventContext)
-            self.coreAfterUpdate(in: &eventContext)
+            self.coreAfterApplicationUpdate(in: &eventContext)
         }
     }
 
@@ -1261,7 +1273,7 @@ extension QUICConnection {
         } else {
             self.coreDeliverReadableData(stream, in: &eventContext)
         }
-        self.coreAfterUpdate(in: &eventContext)
+        self.coreAfterApplicationUpdate(in: &eventContext)
     }
 
     /// Closes the flow of a bidirectional stream the core is done with, once the application read

@@ -349,6 +349,8 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     /// Set while `coreAfterUpdate` runs, which the application may re-enter.
     var coreIsUpdating = false
     var coreUpdatePending = false
+    /// How often `coreAfterUpdate` ran, for tests.
+    var coreAfterUpdateRuns = 0
     /// The core's name for each path; the path of the handshake is `.initial`.
     var corePathIDs: [MultiplexingPathIdentifier: CorePathID] = [:]
     var coreNextPathID = 1
