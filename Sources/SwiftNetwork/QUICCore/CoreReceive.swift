@@ -682,25 +682,31 @@ extension QUICConnectionCore {
             if packet.ecn != .nonECT {
                 newlyAcknowledgedECN &+= 1
             }
-            self.onPacketAcknowledged(packet, in: space)
+            if packet.size > self.configuration.maxDatagramSize && self.pmtudLargePacketsLost > 0 {
+                self.pmtudLargePacket(acknowledged: true)
+            }
+            self.onPacketAcknowledged(packet, in: space, now: now)
         }
         if self.ecn.state.isMarking || newlyAcknowledgedECN > 0 {
             self.processAckECN(
                 ecnCounts,
                 newlyAcknowledged: newlyAcknowledgedECN,
                 increasesLargestAcknowledged: previousLargestAcknowledged.map { largest > $0 } ?? true,
+                largestAcknowledged: largest,
                 largestNewlyAcknowledgedTimeSent: result.largestNewlyAcknowledgedTimeSent,
                 in: space,
                 now: now
             )
         }
+        // The window grows by what is left after the ECN counts were looked at.
+        self.recovery.onAckEnd(packetsLost: result.congestionLoss, now: now)
         for packet in result.lost {
             self.onPacketLost(packet, in: space, now: now)
         }
         return true
     }
 
-    mutating func onPacketAcknowledged(_ packet: CoreSentPacket, in space: PacketNumberSpace) {
+    mutating func onPacketAcknowledged(_ packet: CoreSentPacket, in space: PacketNumberSpace, now: NetworkClock.Instant) {
         for frame in packet.frames {
             switch frame {
             case .ack(let largestAcknowledged):
@@ -722,6 +728,8 @@ extension QUICConnectionCore {
             case .keepAlive:
                 self.unacknowledgedKeepAlives = 0
                 self.statistics.increment(.keepAliveFramesAcknowledged)
+            case .pmtudProbe(let size):
+                self.pmtudProbeAcknowledged(datagramSize: size, packetNumber: packet.packetNumber, now: now)
             case .handshakeDone, .maxData, .maxStreamData, .maxStreamsBidirectional, .maxStreamsUnidirectional,
                 .stopSending, .dataBlocked, .streamDataBlocked, .newConnectionID, .retireConnectionID, .pathResponse,
                 .pathChallenge, .ping, .datagram:
@@ -741,6 +749,11 @@ extension QUICConnectionCore {
         }
         if self.configuration.recordsPacketEvents {
             self.recordPacketEvent(.lost, sent: packet, in: space, now: now)
+        }
+        if case .pmtudProbe(let size) = packet.frames.first {
+            self.pmtudProbeLost(datagramSize: size, packetNumber: packet.packetNumber, now: now)
+        } else if packet.size > self.configuration.maxDatagramSize && self.configuration.pmtudEnabled {
+            self.pmtudLargePacket(acknowledged: false)
         }
         self.requeueFrames(of: packet, in: space)
     }
@@ -782,7 +795,8 @@ extension QUICConnectionCore {
                 self.handshakeDonePending = true
             case .newConnectionID, .retireConnectionID:
                 self.connectionIDFrameLost(frame)
-            case .dataBlocked, .streamDataBlocked, .pathResponse, .pathChallenge, .ping, .keepAlive, .datagram:
+            case .dataBlocked, .streamDataBlocked, .pathResponse, .pathChallenge, .ping, .keepAlive, .datagram,
+                .pmtudProbe:
                 break
             }
         }
@@ -1218,6 +1232,7 @@ extension QUICConnectionCore {
         self.discardSpace(.initial)
         self.discardSpace(.handshake)
         self.handshake.release()
+        self.startPMTUD()
     }
 
     mutating func discardSpace(_ space: PacketNumberSpace) {

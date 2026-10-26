@@ -241,12 +241,13 @@ extension QUICConnectionCore {
         return codepoint == .ce
     }
 
-    /// Validates the ECN counts of an ACK frame, and reacts to new CE marks once the path is
-    /// ECN-capable: like a loss, at most once per recovery period (RFC 9002 Sections 7.1 and B.7).
+    /// Validates the ECN counts of an ACK frame, and once the path is ECN-capable hands them to
+    /// the congestion controller, which reacts to new CE marks (RFC 9002 Sections 7.1 and B.7).
     mutating func processAckECN(
         _ counts: CoreECNCounts?,
         newlyAcknowledged: UInt64,
         increasesLargestAcknowledged: Bool,
+        largestAcknowledged: UInt64,
         largestNewlyAcknowledgedTimeSent: NetworkClock.Instant?,
         in space: PacketNumberSpace,
         now: NetworkClock.Instant
@@ -264,11 +265,26 @@ extension QUICConnectionCore {
         if previousState != self.ecn.state {
             self.log.info("ECN validation: \(previousState) -> \(self.ecn.state)")
         }
-        guard newlyCE > 0 else { return }
-        self.statistics.increment(.ecnCapablePacketsMarked, by: Int(truncatingIfNeeded: newlyCE))
-        if self.ecn.state == .capable, let sentTime = largestNewlyAcknowledgedTimeSent {
-            self.recovery.onCongestionExperienced(sentTime: sentTime, now: now)
+        if newlyCE > 0 {
+            self.statistics.increment(.ecnCapablePacketsMarked, by: Int(truncatingIfNeeded: newlyCE))
         }
+        guard self.ecn.state == .capable, newlyCE > 0 || newlyAcknowledged > 0,
+            let sentTime = largestNewlyAcknowledgedTimeSent
+        else {
+            return
+        }
+        // Prague's α counts the unmarked packets too.
+        let nextPacketNumber = UInt64(self.protector.getPacketNumber(for: space).value)
+        self.recovery.onECNFeedback(
+            CoreECNFeedback(
+                newlyCE: newlyCE,
+                newlyAcknowledged: newlyAcknowledged,
+                largestAcknowledged: largestAcknowledged,
+                largestSent: nextPacketNumber > 0 ? nextPacketNumber &- 1 : 0,
+                largestAcknowledgedSentTime: sentTime
+            ),
+            now: now
+        )
     }
 
     /// Starts ECN validation over, for a new active path (RFC 9000 Section 13.4.2). Packets in

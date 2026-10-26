@@ -115,7 +115,7 @@ extension QUICConnectionCore {
                 case .pathResponse: self = .pathResponse
                 case .pathChallenge: self = .pathChallenge
                 case .handshakeDone: self = .handshakeDone
-                case .ping, .keepAlive: self = .ping
+                case .ping, .keepAlive, .pmtudProbe: self = .ping
                 case .datagram: self = .datagram
                 }
             }

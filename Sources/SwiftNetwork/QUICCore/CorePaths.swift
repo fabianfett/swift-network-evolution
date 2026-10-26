@@ -55,6 +55,10 @@ struct CorePath {
     /// This endpoint moves to the path once it is validated.
     var migrateWhenValidated = false
     var failed = false
+    /// The path MTU discovery of the path, once it was active after the handshake.
+    var pmtud: CorePMTUD?
+    /// The MTU of the path's interface, if the driver told; otherwise the configuration's.
+    var interfaceMTU: Int?
 
     static let maximumChallenges = 3
     /// PATH_CHALLENGE data kept to answer; a flood of them keeps only the latest.
@@ -298,8 +302,13 @@ extension QUICConnectionCore {
             self.paths[path]?.peerConnectionIDSequenceNumber = nil
         }
         self.activePath = path
+        // The new path carries what its PMTUD found, the base size before; its search starts
+        // over (RFC 9000 Section 14.2).
+        self.setMaxDatagramSize(state.pmtud?.maxDatagramSize ?? self.configuration.maxDatagramSize)
+        self.pmtudLargePacketsLost = 0
         // RFC 9000 Section 9.4: the new path's congestion controller starts over.
         self.recovery.resetCongestionControl()
+        self.startPMTUD()
         // RFC 9000 Section 13.4.2: ECN is validated on each path.
         self.resetECNValidation()
         if !self.isServer {

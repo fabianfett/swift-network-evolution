@@ -102,19 +102,25 @@ extension QUICConnectionCore {
             break
         }
 
-        var limit = min(buffer.count, self.configuration.maxDatagramSize)
+        var capacity = buffer.count
         if self.isServer && !self.addressValidated {
             // Anti-amplification: at most three times what the client sent.
             let budget = 3 &* self.bytesReceived &- self.bytesSent
             guard budget > 0 else { return nil }
-            limit = min(limit, budget)
+            capacity = min(capacity, budget)
         }
         if self.activePath != .initial {
             // The same holds on a path the client moved to, until it is validated.
             let budget = self.amplificationBudget(on: self.activePath)
             guard budget > 0 else { return nil }
-            limit = min(limit, budget)
+            capacity = min(capacity, budget)
         }
+        if let probeSize = self.pmtudProbeSize(limit: capacity),
+            let length = self.sendPMTUDProbe(size: probeSize, into: &buffer, now: now)
+        {
+            return length
+        }
+        let limit = min(capacity, self.maxDatagramSize)
 
         let congestionLimited = self.recovery.availableCongestionWindow <= 0
         var spaces: [PacketNumberSpace] = []
@@ -167,6 +173,36 @@ extension QUICConnectionCore {
             self.discardSpace(.initial)
         }
         return offset
+    }
+
+    /// Sends a PMTUD probe of `size` bytes: PING and PADDING, which is never sent again (RFC 9000
+    /// Section 14.4).
+    private mutating func sendPMTUDProbe(
+        size: Int,
+        into buffer: inout MutableSpan<UInt8>,
+        now: NetworkClock.Instant
+    ) -> Int? {
+        guard
+            let length = self.writePacket(
+                in: .applicationData,
+                into: &buffer,
+                at: 0,
+                maximumLength: size,
+                padDatagramTo: size,
+                congestionLimited: false,
+                pmtudProbe: size,
+                now: now
+            )
+        else {
+            return nil
+        }
+        self.paths[self.activePath]?.pmtud?.probeSent()
+        self.log.debug("PMTUD probe of \(length) bytes sent")
+        self.bytesSent &+= length
+        self.lastDatagramECN =
+            self.ecn.state.isMarking
+            ? self.markDatagram(spaces: 1 << PacketNumberSpace.applicationData.rawValue) : .nonECT
+        return length
     }
 
     private func wantsToSend(in space: PacketNumberSpace, congestionLimited: Bool) -> Bool {
@@ -273,6 +309,7 @@ extension QUICConnectionCore {
         padDatagramTo: Int?,
         congestionLimited: Bool,
         probing: CorePathID? = nil,
+        pmtudProbe: Int? = nil,
         now: NetworkClock.Instant
     ) -> Int? {
         let isEarlyData = space == .applicationData && probing == nil && self.sendsEarlyData
@@ -359,8 +396,14 @@ extension QUICConnectionCore {
                     now: now
                 )
             }
+            if let pmtudProbe, writer.uint8(0x01) {
+                // A PMTUD probe is a PING that `padDatagramTo` pads to the probe size.
+                frames.append(.pmtudProbe(size: pmtudProbe))
+                isAckEliciting = true
+            }
+            let writesFrames = probing == nil && pmtudProbe == nil
             // ACK.
-            if probing == nil && !isEarlyData && self.acks[space].hasAckToSend {
+            if writesFrames && !isEarlyData && self.acks[space].hasAckToSend {
                 let ackLength = self.acks[space].ackFrameLength(now: now, ackDelayExponent: 3)
                 // An ACK that isn't due yet stays out when the next datagram needs the room: a
                 // datagram as large as fits a packet would otherwise never go out.
@@ -379,7 +422,7 @@ extension QUICConnectionCore {
 
             let mayExceedCongestionWindow =
                 self.probesPending[Int(space.rawValue)] > 0 || (space == .applicationData && self.keepAlivePending)
-            if probing == nil && (!congestionLimited || mayExceedCongestionWindow || space != .applicationData) {
+            if writesFrames && (!congestionLimited || mayExceedCongestionWindow || space != .applicationData) {
                 // CRYPTO.
                 while true {
                     let available = frameLimit &- writer.offset &- 1 &- 8 &- 2
@@ -767,7 +810,7 @@ extension QUICConnectionCore {
         }
         // One datagram per space: some receivers drop the rest of a datagram after a packet they
         // can't decrypt, which a coalesced close in a space the peer already dropped would be.
-        let limit = min(buffer.count, self.configuration.maxDatagramSize)
+        let limit = min(buffer.count, self.maxDatagramSize)
         while let space = self.closeSpacesToSend.first {
             self.closeSpacesToSend.removeFirst()
             if let length = self.writeClosePacket(close, in: space, into: &buffer, at: 0, maximumLength: limit, now: now) {

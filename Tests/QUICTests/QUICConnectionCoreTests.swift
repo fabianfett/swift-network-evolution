@@ -36,6 +36,10 @@ struct LockstepPair: ~Copyable {
     var toClient: [[UInt8]] = []
     var clientEvents: [QUICConnectionCore.Event] = []
     var serverEvents: [QUICConnectionCore.Event] = []
+    /// The largest datagram the link carries in ``exchange(rounds:drop:)``; larger ones are lost.
+    var linkMaxDatagramSize = Int.max
+    /// The sizes of the datagrams the link dropped for being too large, per direction.
+    var droppedForSize: (toServer: [Int], toClient: [Int]) = ([], [])
 
     init(
         clientConfiguration: QUICConnectionCore.Configuration? = nil,
@@ -73,6 +77,10 @@ struct LockstepPair: ~Copyable {
         var datagrams: [[UInt8]] = []
         var buffer = [UInt8](repeating: 0, count: 1500)
         while true {
+            if machine.datagramCapacity > buffer.count {
+                // A PMTUD probe may be larger.
+                buffer = [UInt8](repeating: 0, count: machine.datagramCapacity)
+            }
             var span = buffer.mutableSpan
             guard let length = machine.send(into: &span, now: now) else { break }
             datagrams.append(Array(buffer[0..<length]))
@@ -119,6 +127,10 @@ struct LockstepPair: ~Copyable {
             for var datagram in self.toServer {
                 defer { index += 1 }
                 if drop(true, index) { continue }
+                guard datagram.count <= self.linkMaxDatagramSize else {
+                    self.droppedForSize.toServer.append(datagram.count)
+                    continue
+                }
                 var span = datagram.mutableSpan
                 server.receive(&span, now: self.now)
             }
@@ -128,6 +140,10 @@ struct LockstepPair: ~Copyable {
             for var datagram in self.toClient {
                 defer { index += 1 }
                 if drop(false, index) { continue }
+                guard datagram.count <= self.linkMaxDatagramSize else {
+                    self.droppedForSize.toClient.append(datagram.count)
+                    continue
+                }
                 var span = datagram.mutableSpan
                 self.client.receive(&span, now: self.now)
             }

@@ -109,7 +109,7 @@ extension QUICConnection {
         tlsOptions: SwiftTLSProtocol.Options?,
         isServer: Bool
     ) -> Bool {
-        if options.testSendingShortPackets || options.enableL4S == true {
+        if options.testSendingShortPackets {
             return false
         }
         return true
@@ -181,6 +181,18 @@ extension QUICConnection {
                     Int(TransportParameters.maxUDPPayloadSize)
                 )
             )
+            if options.enableL4S == true {
+                // L4S needs a scalable congestion controller and ECT(1) (RFC 9330 Section 4.3,
+                // RFC 9331 Section 4.3): Prague, paced.
+                configuration.congestionControl = .prague
+                configuration.pacingEnabled = true
+                configuration.useECT1 = true
+            }
+            configuration.pmtudEnabled = options.pmtud
+            configuration.pmtudIgnoreCost = options.pmtudIgnoreCost
+            if let interval = options.pmtudUpdateInterval {
+                configuration.pmtudInterval = interval
+            }
             if options.maxDatagramFrameSize > 0 {
                 configuration.maxDatagramFrameSize = UInt64(
                     min(options.maxDatagramFrameSize, UInt16(TransportParameters.maxDatagramFrameSize))
@@ -189,6 +201,12 @@ extension QUICConnection {
         }
         configuration.maxDatagramSize = self.initialMSS
         configuration.initialDatagramSize = self.initialMSS
+        // As `PMTUDState.start`: the interface's MTU, else the path's.
+        let interfaceMTU = self.currentPath?.interface?.mtu ?? 0
+        configuration.interfaceMTU = interfaceMTU != 0 ? interfaceMTU : self.pathPropertiesMTU
+        configuration.ipUDPHeaderSize =
+            UDPProtocol.headerLength
+            + (self.initialAddressIsIPv4 ? IPProtocol.ipv4HeaderLength : IPProtocol.ipv6HeaderLength)
         configuration.activeConnectionIDLimit = Constants.activeCIDLimit
         configuration.maxIssuedConnectionIDs = Constants.defaultMaxConnectionIDs
         configuration.spinBitEnabled = self.spinBitEnabled
@@ -554,7 +572,10 @@ extension QUICConnection {
 
     private func coreSendDatagrams(in eventContext: inout NetworkContext.EventContext) {
         guard let box = self.coreBox, var path = self.currentPath else { return }
-        let datagramSize = max(path.mss, Constants.initialMSS)
+        if box.core.maxDatagramSize != path.mss {
+            // PMTUD changed what the path carries; datagram flows size their frames by it.
+            self.setMSS(box.core.maxDatagramSize, on: path)
+        }
         var totalBytes = 0
         var totalPackets = 0
         var probesBlocked = false
@@ -569,6 +590,8 @@ extension QUICConnection {
                 }
                 continue
             }
+            // Room for a PMTUD probe, which is larger than the path's datagrams.
+            let datagramSize = max(path.mss, box.core.datagramCapacity, Constants.initialMSS)
             guard
                 var datagrams = try? self.getDatagramsToSend(
                     path: path.pathIdentifier,
@@ -661,6 +684,10 @@ extension QUICConnection {
         let id = CorePathID(self.coreNextPathID)
         self.coreNextPathID &+= 1
         self.corePathIDs[path.pathIdentifier] = id
+        if let mtu = path.interface?.mtu, mtu > 0 {
+            // PMTUD on the path is capped by its own interface.
+            self.coreBox?.core.setInterfaceMTU(mtu, on: id)
+        }
         return id
     }
 

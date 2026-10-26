@@ -44,8 +44,21 @@ public struct QUICConnectionCore: ~Copyable {
         /// Closes the connection once this many keepalives in a row went unacknowledged; zero
         /// never does.
         public var maxUnacknowledgedKeepAlives = 0
-        /// The largest UDP payload this endpoint sends.
+        /// The largest UDP payload this endpoint sends, until PMTUD finds that a path carries more.
         public var maxDatagramSize: Int = 1350
+        /// Whether this endpoint probes for larger datagrams once the handshake is confirmed
+        /// (RFC 9000 Section 14.3).
+        public var pmtudEnabled = false
+        /// Whether PMTUD probes as soon as the congestion window allows, even when the data to
+        /// send doesn't make up for the probe.
+        public var pmtudIgnoreCost = false
+        /// How long after a search ended PMTUD tries larger datagrams again.
+        public var pmtudInterval: NetworkDuration = .seconds(600)
+        /// The MTU of the interface, which caps PMTUD; zero if unknown, which allows 1280 bytes.
+        /// ``setInterfaceMTU(_:on:)`` sets it per path.
+        public var interfaceMTU = 0
+        /// The size of the IP and UDP headers of a datagram: 28 for IPv4, 48 for IPv6.
+        public var ipUDPHeaderSize = 48
         /// The size a client pads the datagrams of its Initial packets to, at least 1200 bytes
         /// (RFC 9000 Section 14.1).
         public var initialDatagramSize: Int = 1200
@@ -94,6 +107,8 @@ public struct QUICConnectionCore: ~Copyable {
         public var ecnEchoEnabled = true
         /// Whether ECN-capable packets carry ECT(1), as L4S does, instead of ECT(0).
         public var useECT1 = false
+        /// The congestion controller. Prague always paces.
+        public var congestionControl = CoreCongestionControlAlgorithm.cubic
 
         #if DEBUG
         /// Changes the transport parameters this endpoint sends, so tests can send what a broken
@@ -221,6 +236,11 @@ public struct QUICConnectionCore: ~Copyable {
     public internal(set) var departureTime: NetworkClock.Instant?
     /// The ECN codepoint for the IP header of the datagram the last ``send(into:on:now:)`` wrote.
     public internal(set) var lastDatagramECN = IPProtocol.ECN.nonECT
+    /// The largest UDP payload the active path carries: the configured size, or what PMTUD
+    /// found.
+    public internal(set) var maxDatagramSize: Int
+    /// Packets larger than the base size lost in a row on the active path.
+    var pmtudLargePacketsLost = 0
     /// The ECN validation of the active path.
     var ecn: CoreECNValidator
     /// The ECN codepoint of the datagram being processed.
@@ -406,7 +426,16 @@ public struct QUICConnectionCore: ~Copyable {
         )
         self.parser = PacketParser(logPrefixer: self.log)
         self.handshake = CoreHandshake(isServer: isServer)
-        self.recovery = CoreRecovery(pacingEnabled: configuration.pacingEnabled)
+        self.maxDatagramSize = configuration.maxDatagramSize
+        if configuration.congestionControl == .prague {
+            // Prague's short bursts need pacing.
+            self.configuration.pacingEnabled = true
+        }
+        self.recovery = CoreRecovery(
+            maxDatagramSize: configuration.maxDatagramSize,
+            pacingEnabled: self.configuration.pacingEnabled,
+            congestionControl: configuration.congestionControl
+        )
         self.ecn = CoreECNValidator(markingEnabled: configuration.ecnEnabled, useECT1: configuration.useECT1)
         self.streams = CoreStreamMap(
             isServer: isServer,
@@ -496,6 +525,7 @@ public struct QUICConnectionCore: ~Copyable {
         consider(self.idleDeadline)
         consider(self.keepAliveDeadline)
         consider(self.nextPathDeadline)
+        consider(self.pmtudDeadline)
         consider(self.lossDetectionDeadline?.deadline)
         for space in PacketNumberSpace.allCases where !self.spaceDiscarded[Int(space.rawValue)] {
             consider(self.acks[space].ackDeadline)
@@ -542,6 +572,7 @@ public struct QUICConnectionCore: ~Copyable {
             if self.isClosingOrDraining { return }
         }
         self.handlePathTimeouts(now: now)
+        self.handlePMTUDTimeout(now: now)
         for space in PacketNumberSpace.allCases {
             if let ackDeadline = self.acks[space].ackDeadline, now >= ackDeadline {
                 self.acks[space].ackNeeded = true
@@ -563,6 +594,7 @@ public struct QUICConnectionCore: ~Copyable {
             case .probe(let space):
                 self.probesPending[Int(space.rawValue)] = 2
                 self.statistics.increment(.probeTimeOuts)
+                self.checkPMTUDBlackhole()
                 // Probe in every other space with keys and data in flight too (RFC 9002 Section
                 // 6.2.4): the peer may already have dropped the keys of the space whose timer fired.
                 // That includes 1-RTT before the handshake is confirmed, whose own timer isn't armed
@@ -820,7 +852,7 @@ public struct QUICConnectionCore: ~Copyable {
         guard peerLimit > 0 else { return 0 }
         // A short header with the longest packet number, and the tag.
         let packetOverhead = 1 &+ self.peerConnectionID.length &+ 4 &+ Self.tagLength
-        let frameLimit = min(peerLimit, self.configuration.maxDatagramSize &- packetOverhead)
+        let frameLimit = min(peerLimit, self.maxDatagramSize &- packetOverhead)
         // The frame type and the length field.
         return max(0, frameLimit &- 1 &- CoreWriter.vleLength(UInt64(max(0, frameLimit))))
     }

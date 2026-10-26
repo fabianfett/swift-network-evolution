@@ -541,6 +541,70 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         )
     }
 
+    func testQUICEcho40KiBRaisesTheMSSWithPMTUD() {
+        // Probes as soon as the handshake is confirmed, rather than once enough data waits.
+        let clientOptions = QUICProtocol.options()
+        clientOptions.connectionOptions.pmtudIgnoreCost = true
+        let serverOptions = QUICProtocol.options()
+        serverOptions.connectionOptions.pmtudIgnoreCost = true
+
+        QUICTestHarness().runQUICTest(
+            blockSize: 10240,
+            blockCount: 4,
+            clientOptions: clientOptions,
+            serverOptions: serverOptions,
+            afterData: { harness in
+                let expectation = XCTestExpectation(description: "Check the MSS")
+                harness.context.async {
+                    let instances = [harness.state?.clientInstance, harness.state?.serverInstance]
+                    for (instance, side) in zip(instances, ["client", "server"]) {
+                        guard let instance, let box = instance.coreBox, let path = instance.currentPath else {
+                            XCTFail("No \(side) core")
+                            continue
+                        }
+                        // The 1500-byte link carries more than the initial 1200 bytes.
+                        XCTAssertGreaterThan(box.core.maxDatagramSize, Constants.initialMSS, side)
+                        XCTAssertEqual(path.mss, box.core.maxDatagramSize, side)
+                    }
+                    expectation.fulfill()
+                }
+                XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+            }
+        )
+    }
+
+    func testQUICEcho40KiBWithL4S() {
+        let clientOptions = QUICProtocol.options()
+        clientOptions.connectionOptions.enableL4S = true
+        let serverOptions = QUICProtocol.options()
+        serverOptions.connectionOptions.enableL4S = true
+
+        QUICTestHarness().runQUICTest(
+            blockSize: 10240,
+            blockCount: 4,
+            clientOptions: clientOptions,
+            serverOptions: serverOptions,
+            afterData: { harness in
+                let expectation = XCTestExpectation(description: "Check the congestion controller")
+                harness.context.async {
+                    let instances = [harness.state?.clientInstance, harness.state?.serverInstance]
+                    for (instance, side) in zip(instances, ["client", "server"]) {
+                        guard let instance, let box = instance.coreBox else {
+                            XCTFail("No \(side) core")
+                            continue
+                        }
+                        // L4S is Prague, paced, in ECT(1) packets.
+                        XCTAssertEqual(box.core.recovery.controller.algorithm, .prague, side)
+                        XCTAssertNotNil(box.core.recovery.pacer, side)
+                        XCTAssertTrue(box.core.configuration.useECT1, side)
+                    }
+                    expectation.fulfill()
+                }
+                XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+            }
+        )
+    }
+
     func testQUICEcho40KiBMultistream() {
         QUICTestHarness().runQUICTest(streamCount: 4, blockSize: 10240, blockCount: 4)
     }

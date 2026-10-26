@@ -44,6 +44,8 @@ enum CoreSentFrame {
     /// The PING of a keepalive.
     case keepAlive
     case datagram
+    /// The PING of a PMTUD probe, padded to a datagram of `size` bytes.
+    case pmtudProbe(size: Int)
 }
 
 @available(Network 0.1.0, *)
@@ -59,9 +61,15 @@ struct CoreSentPacket {
     /// 13.4.2).
     var isECNValidation = false
     var frames: [CoreSentFrame]
+
+    var isPMTUDProbe: Bool {
+        if case .pmtudProbe = self.frames.first { return true }
+        return false
+    }
 }
 
-/// Loss detection (RFC 9002 Section 6) and NewReno congestion control (RFC 9002 Section 7).
+/// Loss detection (RFC 9002 Section 6), persistent congestion (Section 7.6), and the congestion
+/// controller (Section 7) that the ACK frames and losses drive.
 @available(Network 0.1.0, *)
 struct CoreRecovery {
     static let packetThreshold: UInt64 = 3
@@ -90,6 +98,8 @@ struct CoreRecovery {
         var rttSampled = false
         /// When the largest newly acknowledged packet was sent.
         var largestNewlyAcknowledgedTimeSent: NetworkClock.Instant?
+        /// Whether packets in flight other than PMTUD probes were declared lost.
+        var congestionLoss = false
     }
 
     enum Timeout {
@@ -104,37 +114,57 @@ struct CoreRecovery {
     var rttVariance = CoreRecovery.initialRTT / 2
     var minRTT = NetworkDuration.zero
     var hasRTTSample = false
+    /// When the first RTT sample was taken. Persistent congestion counts only packets sent after
+    /// it (RFC 9002 Section 7.6.2).
+    var firstRTTSampleTime: NetworkClock.Instant?
     /// The peer's maximum ACK delay, from its transport parameters.
     var maxAckDelay = NetworkDuration.milliseconds(25)
 
     var ptoCount = 0
 
-    var maxDatagramSize: Int
-    var congestionWindow: Int
-    var bytesInFlight = 0
-    var slowStartThreshold = Int.max
-    var congestionRecoveryStartTime: NetworkClock.Instant?
+    /// The window, threshold and recovery period, which the controller works on.
+    var congestion: CoreCongestionState
+    var controller: CoreCongestionController
     /// When datagrams leave, if the connection paces; `nil` otherwise.
     var pacer: CorePacer?
 
-    init(maxDatagramSize: Int = 1200, pacingEnabled: Bool = false) {
-        self.maxDatagramSize = maxDatagramSize
-        self.congestionWindow = Self.initialWindow(maxDatagramSize: maxDatagramSize)
+    init(
+        maxDatagramSize: Int = 1200,
+        pacingEnabled: Bool = false,
+        congestionControl: CoreCongestionControlAlgorithm = .cubic
+    ) {
+        self.congestion = CoreCongestionState(maxDatagramSize: maxDatagramSize)
+        self.controller = CoreCongestionController(congestionControl, state: &self.congestion)
         if pacingEnabled {
             var pacer = CorePacer()
-            pacer.reset(congestionWindow: self.congestionWindow, maxDatagramSize: maxDatagramSize)
+            pacer.reset(congestionWindow: self.congestion.congestionWindow, maxDatagramSize: maxDatagramSize)
             self.pacer = pacer
         }
     }
 
     static func initialWindow(maxDatagramSize: Int) -> Int {
-        min(10 * maxDatagramSize, max(14720, 2 * maxDatagramSize))
+        CoreCongestionState.initialWindow(maxDatagramSize: maxDatagramSize)
     }
 
-    var minimumWindow: Int { 2 * self.maxDatagramSize }
+    var maxDatagramSize: Int { self.congestion.maxDatagramSize }
+    var congestionWindow: Int { self.congestion.congestionWindow }
+    var slowStartThreshold: Int { self.congestion.slowStartThreshold }
+    var congestionRecoveryStartTime: NetworkClock.Instant? { self.congestion.recoveryStartTime }
+    var minimumWindow: Int { self.congestion.minimumWindow }
+
+    var bytesInFlight: Int {
+        get { self.congestion.bytesInFlight }
+        set { self.congestion.bytesInFlight = newValue }
+    }
+
+    /// PMTUD changed the largest datagram of the path.
+    mutating func maxDatagramSizeChanged(to size: Int) {
+        self.congestion.maxDatagramSize = size
+        self.congestion.congestionWindow = max(self.congestion.congestionWindow, self.congestion.minimumWindow)
+    }
 
     var availableCongestionWindow: Int {
-        max(0, self.congestionWindow &- self.bytesInFlight)
+        max(0, self.congestion.congestionWindow &- self.congestion.bytesInFlight)
     }
 
     var hasAckElicitingInFlight: Bool {
@@ -160,6 +190,9 @@ struct CoreRecovery {
     // MARK: Acknowledgements
 
     /// Processes an ACK frame. `ranges` are the acknowledged packet number ranges, descending.
+    ///
+    /// Losses reduce the window right away; what the frame acknowledged grows it in
+    /// ``onAckEnd(packetsLost:now:)``, after the frame's ECN counts were looked at.
     mutating func onAckReceived(
         ranges: [ClosedRange<UInt64>],
         ackDelay: NetworkDuration,
@@ -168,6 +201,7 @@ struct CoreRecovery {
         now: NetworkClock.Instant
     ) -> AckResult {
         var result = AckResult()
+        self.congestion.bytesAcknowledged = 0
         guard let largest = ranges.first?.upperBound else { return result }
         let index = Int(space.rawValue)
 
@@ -189,6 +223,11 @@ struct CoreRecovery {
             if Self.contains(ranges, packet.packetNumber) {
                 if packet.isInFlight {
                     self.bytesInFlight &-= packet.size
+                    // Packets sent before the recovery period started don't grow the window
+                    // (RFC 9002 Section 7.3.2).
+                    if !self.congestion.inRecovery(sentTime: packet.timeSent) {
+                        self.congestion.bytesAcknowledged &+= packet.size
+                    }
                     if packet.isAckEliciting {
                         self.spaces[index].ackElicitingInFlight &-= 1
                         ackedAckEliciting = true
@@ -210,6 +249,9 @@ struct CoreRecovery {
 
         // RTT sample (RFC 9002 Section 5.1).
         if largestNewlyAcked.packetNumber == largest, ackedAckEliciting {
+            if self.firstRTTSampleTime == nil {
+                self.firstRTTSampleTime = now
+            }
             self.updateRTT(
                 sample: largestNewlyAcked.timeSent.duration(to: now),
                 ackDelay: ackDelay,
@@ -218,16 +260,15 @@ struct CoreRecovery {
             result.rttSampled = true
         }
 
-        result.lost = self.detectLostPackets(in: space, now: now)
-
-        // Congestion control.
-        for packet in result.acknowledged where packet.isInFlight {
-            self.onPacketAcknowledgedCongestionControl(packet)
-        }
+        var persistentCongestion = false
+        result.lost = self.detectLostPackets(in: space, now: now, persistentCongestion: &persistentCongestion)
         if !result.lost.isEmpty {
-            self.onPacketsLostCongestionControl(result.lost, now: now)
+            result.congestionLoss = self.onPacketsLost(
+                result.lost,
+                persistentCongestion: persistentCongestion,
+                now: now
+            )
         }
-        self.updatePacer()
 
         // Reset the PTO backoff, unless the client is unsure the server validated its address.
         self.ptoCount = 0
@@ -293,6 +334,17 @@ struct CoreRecovery {
     }
 
     mutating func detectLostPackets(in space: PacketNumberSpace, now: NetworkClock.Instant) -> [CoreSentPacket] {
+        var persistentCongestion = false
+        return self.detectLostPackets(in: space, now: now, persistentCongestion: &persistentCongestion)
+    }
+
+    /// Declares the packets lost that the largest acknowledged one or the time leave behind
+    /// (RFC 9002 Section 6.1), and finds whether they establish persistent congestion.
+    private mutating func detectLostPackets(
+        in space: PacketNumberSpace,
+        now: NetworkClock.Instant,
+        persistentCongestion: inout Bool
+    ) -> [CoreSentPacket] {
         let index = Int(space.rawValue)
         guard let largestAcknowledged = self.spaces[index].largestAcknowledged else { return [] }
         self.spaces[index].lossTime = nil
@@ -301,11 +353,17 @@ struct CoreRecovery {
         // Only packets up to the largest acknowledged one can be lost; they are at the front.
         let end = Self.firstIndex(in: self.spaces[index].sent, above: largestAcknowledged)
         var kept: [CoreSentPacket] = []
+        var period = CorePersistentCongestionPeriod(
+            duration: self.persistentCongestionDuration,
+            firstRTTSampleTime: self.firstRTTSampleTime
+        )
         for position in 0..<end {
             let packet = self.spaces[index].sent[position]
             let lostByTime = packet.timeSent.advanced(by: lossDelay) <= now
             let lostByCount = largestAcknowledged >= packet.packetNumber &+ Self.packetThreshold
-            if lostByTime || lostByCount {
+            let isLost = lostByTime || lostByCount
+            period.add(packet, lost: isLost)
+            if isLost {
                 if packet.isInFlight {
                     self.bytesInFlight &-= packet.size
                     if packet.isAckEliciting {
@@ -326,7 +384,13 @@ struct CoreRecovery {
         if end > 0 {
             self.spaces[index].sent.replaceSubrange(0..<end, with: kept)
         }
+        persistentCongestion = period.isEstablished
         return lost
+    }
+
+    /// How long the lost packets must span for persistent congestion (RFC 9002 Section 7.6.1).
+    var persistentCongestionDuration: NetworkDuration {
+        self.probeTimeout(includingMaxAckDelay: true) * Int(Self.persistentCongestionThreshold)
     }
 
     /// The probe timeout period, without backoff.
@@ -404,9 +468,10 @@ struct CoreRecovery {
             return nil
         }
         if self.spaces[Int(space.rawValue)].lossTime != nil {
-            let lost = self.detectLostPackets(in: space, now: now)
+            var persistentCongestion = false
+            let lost = self.detectLostPackets(in: space, now: now, persistentCongestion: &persistentCongestion)
             if !lost.isEmpty {
-                self.onPacketsLostCongestionControl(lost, now: now)
+                self.onPacketsLost(lost, persistentCongestion: persistentCongestion, now: now)
                 self.updatePacer()
             }
             return .lost(lost, space)
@@ -429,54 +494,113 @@ struct CoreRecovery {
 
     /// Starts the congestion controller over, for a new path (RFC 9000 Section 9.4).
     mutating func resetCongestionControl() {
-        self.congestionWindow = Self.initialWindow(maxDatagramSize: self.maxDatagramSize)
-        self.slowStartThreshold = .max
-        self.congestionRecoveryStartTime = nil
-        self.pacer?.reset(congestionWindow: self.congestionWindow, maxDatagramSize: self.maxDatagramSize)
+        let bytesInFlight = self.congestion.bytesInFlight
+        self.congestion = CoreCongestionState(maxDatagramSize: self.congestion.maxDatagramSize)
+        self.congestion.bytesInFlight = bytesInFlight
+        self.controller = CoreCongestionController(self.controller.algorithm, state: &self.congestion)
+        self.pacer?.reset(
+                congestionWindow: self.congestion.congestionWindow,
+                maxDatagramSize: self.congestion.maxDatagramSize
+            )
     }
 
     /// Paces at the rate the congestion window allows per RTT, once it changed.
     private mutating func updatePacer() {
         guard self.pacer != nil else { return }
         self.pacer!.update(
-            congestionWindow: self.congestionWindow,
-            inSlowStart: self.congestionWindow < self.slowStartThreshold,
-            smoothedRTT: self.smoothedRTT
+            congestionWindow: self.congestion.congestionWindow,
+            inSlowStart: self.congestion.inSlowStart,
+            smoothedRTT: self.smoothedRTT,
+            burstShift: self.controller.burstShift
         )
     }
 
-    private mutating func onPacketAcknowledgedCongestionControl(_ packet: CoreSentPacket) {
-        if let recoveryStart = self.congestionRecoveryStartTime, packet.timeSent <= recoveryStart {
-            return
-        }
-        if self.congestionWindow < self.slowStartThreshold {
-            self.congestionWindow &+= packet.size
-        } else {
-            self.congestionWindow &+= self.maxDatagramSize * packet.size / self.congestionWindow
-        }
-    }
-
-    private mutating func onPacketsLostCongestionControl(_ lost: [CoreSentPacket], now: NetworkClock.Instant) {
-        guard let lastLost = lost.max(by: { $0.timeSent < $1.timeSent }), lastLost.isInFlight else { return }
-        self.onCongestionEvent(sentTime: lastLost.timeSent, now: now)
-    }
-
-    /// The peer reported new CE marks; `sentTime` is when the largest newly acknowledged packet
-    /// went out (RFC 9002 Section B.7).
-    mutating func onCongestionExperienced(sentTime: NetworkClock.Instant, now: NetworkClock.Instant) {
-        self.onCongestionEvent(sentTime: sentTime, now: now)
+    /// Grows the window by what the ACK frame acknowledged, unless it declared packets lost,
+    /// and paces at the new window.
+    mutating func onAckEnd(packetsLost: Bool, now: NetworkClock.Instant) {
+        self.controller.onAckEnd(
+            state: &self.congestion,
+            packetsLost: packetsLost,
+            smoothedRTT: self.smoothedRTT,
+            now: now
+        )
+        self.congestion.bytesAcknowledged = 0
         self.updatePacer()
     }
 
-    /// Halves the window, unless the packet that signalled congestion went out during the current
-    /// recovery period (RFC 9002 Section B.6).
-    private mutating func onCongestionEvent(sentTime: NetworkClock.Instant, now: NetworkClock.Instant) {
-        if let recoveryStart = self.congestionRecoveryStartTime, sentTime <= recoveryStart {
+    /// Reacts to packets declared lost. Returns whether any was a congestion signal: lost PMTUD
+    /// probes are none (RFC 9000 Section 14.4).
+    @discardableResult
+    private mutating func onPacketsLost(
+        _ lost: [CoreSentPacket],
+        persistentCongestion: Bool,
+        now: NetworkClock.Instant
+    ) -> Bool {
+        var lastSent: NetworkClock.Instant?
+        for packet in lost where packet.isInFlight && !packet.isPMTUDProbe {
+            if lastSent.map({ packet.timeSent > $0 }) ?? true {
+                lastSent = packet.timeSent
+            }
+        }
+        guard let lastSent else { return false }
+        self.controller.onCongestionEvent(state: &self.congestion, sentTime: lastSent, now: now)
+        if persistentCongestion {
+            // RFC 9002 Section 7.6.2: the window collapses, and the next loss is a new congestion
+            // event. min_rtt starts over from the latest sample (Section 5.2).
+            self.controller.onPersistentCongestion(state: &self.congestion)
+            self.congestion.recoveryStartTime = nil
+            self.minRTT = self.latestRTT
+            self.pacer?.reset(
+                congestionWindow: self.congestion.congestionWindow,
+                maxDatagramSize: self.congestion.maxDatagramSize
+            )
+        }
+        return true
+    }
+
+    /// Feeds the ECN counts of an ACK frame to the controller, once the path is ECN-capable
+    /// (RFC 9002 Section 7.1).
+    mutating func onECNFeedback(_ feedback: CoreECNFeedback, now: NetworkClock.Instant) {
+        self.controller.onECNFeedback(state: &self.congestion, feedback, smoothedRTT: self.smoothedRTT, now: now)
+    }
+}
+
+/// The lost packets of one space, in packet number order, checked for persistent congestion
+/// (RFC 9002 Section 7.6.2): two ack-eliciting packets declared lost, sent at least the
+/// persistent congestion duration apart, with no packet in between acknowledged, all sent after
+/// the first RTT sample.
+@available(Network 0.1.0, *)
+struct CorePersistentCongestionPeriod {
+    let duration: NetworkDuration
+    let firstRTTSampleTime: NetworkClock.Instant?
+    private var start: NetworkClock.Instant?
+    private var previousPacketNumber: UInt64?
+    private(set) var isEstablished = false
+
+    init(duration: NetworkDuration, firstRTTSampleTime: NetworkClock.Instant?) {
+        self.duration = duration
+        self.firstRTTSampleTime = firstRTTSampleTime
+    }
+
+    /// Adds the next packet of the space up to the largest acknowledged one, lost or still in
+    /// flight.
+    mutating func add(_ packet: CoreSentPacket, lost: Bool) {
+        guard let firstRTTSampleTime = self.firstRTTSampleTime, !self.isEstablished else { return }
+        if let previous = self.previousPacketNumber, packet.packetNumber != previous &+ 1 {
+            // A packet in between is gone: acknowledged, or lost before. Either ends the period.
+            self.start = nil
+        }
+        self.previousPacketNumber = packet.packetNumber
+        guard lost, packet.isAckEliciting, !packet.isPMTUDProbe, packet.timeSent >= firstRTTSampleTime else {
+            // Packets in flight in between don't end the period, nor do lost probes.
             return
         }
-        self.congestionRecoveryStartTime = now
-        self.slowStartThreshold = max(self.congestionWindow / 2, self.minimumWindow)
-        self.congestionWindow = self.slowStartThreshold
+        if self.start == nil {
+            self.start = packet.timeSent
+        }
+        if let start = self.start, start.duration(to: packet.timeSent) >= self.duration {
+            self.isEstablished = true
+        }
     }
 }
 
@@ -504,12 +628,18 @@ struct CorePacer {
     }
 
     /// Paces the window per smoothed RTT, twice that in slow start, which RFC 9002 Section 7.7
-    /// allows so that pacing doesn't slow the window's growth.
-    mutating func update(congestionWindow: Int, inSlowStart: Bool, smoothedRTT: NetworkDuration) {
+    /// allows so that pacing doesn't slow the window's growth. A burst is the rate shifted right
+    /// by `burstShift`: Prague's are shorter, for the short L4S queues.
+    mutating func update(
+        congestionWindow: Int,
+        inSlowStart: Bool,
+        smoothedRTT: NetworkDuration,
+        burstShift: UInt64 = CorePacer.burstShift
+    ) {
         let microseconds = smoothedRTT.microseconds > 0 ? smoothedRTT.microseconds : Self.startupRTT.microseconds
         let window = UInt64(max(0, congestionWindow)) &* (inSlowStart ? 2 : 1)
         self.rate = window &* 1_000_000 / UInt64(microseconds)
-        self.burstSize = Int(truncatingIfNeeded: self.rate >> Self.burstShift)
+        self.burstSize = Int(truncatingIfNeeded: self.rate >> burstShift)
     }
 
     /// When a datagram of `length` bytes leaves: with the current burst, or a burst interval
