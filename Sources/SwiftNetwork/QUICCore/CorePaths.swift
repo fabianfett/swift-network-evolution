@@ -300,6 +300,8 @@ extension QUICConnectionCore {
         self.activePath = path
         // RFC 9000 Section 9.4: the new path's congestion controller starts over.
         self.recovery.resetCongestionControl()
+        // RFC 9000 Section 13.4.2: ECN is validated on each path.
+        self.resetECNValidation()
         if !self.isServer {
             // The server only follows a non-probing packet.
             self.pingPending = true

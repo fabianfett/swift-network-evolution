@@ -59,8 +59,7 @@ internal import os
 @available(Network 0.1.0, *)
 final class SwiftNetworkQUICECNTests: NetTestCase {
     func testQUICTestECNMarkedPacketsSentAndACKed() throws {
-        // The core doesn't mark ECN yet.
-        QUICTestHarness(driver: .legacy).runQUICTest(
+        QUICTestHarness().runQUICTest(
             dataBlock: Array("Hello World!".utf8),
             afterData: { harness in
                 // Verify the pakets with ECN marking reached the other side
@@ -73,6 +72,10 @@ final class SwiftNetworkQUICECNTests: NetTestCase {
                     XCTAssertTrue(
                         harness.state?.clientInstance.stats[.ecnCapablePacketsSent] ?? 0 > 0,
                         "Clients should have sent ECN marked packets"
+                    )
+                    XCTAssertEqual(
+                        harness.state?.clientInstance.protocolEstablishmentReport?.clientAccurateECNState,
+                        .ecnNegotiationSuccess
                     )
                     expectation.fulfill()
                 }
@@ -103,6 +106,10 @@ final class SwiftNetworkQUICECNTests: NetTestCase {
                     XCTAssertTrue(
                         harness.state?.clientInstance.stats[.ecnCapablePacketsSent] == 0,
                         "Clients should NOT have sent ECN marked packets"
+                    )
+                    XCTAssertEqual(
+                        harness.state?.clientInstance.protocolEstablishmentReport?.clientAccurateECNState,
+                        .ecnFeatureDisabled
                     )
                     expectation.fulfill()
                 }

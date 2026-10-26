@@ -2870,7 +2870,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     public var protocolEstablishmentReport: ProtocolEstablishmentReport? {
         var clientAccurateECNState: ClientAccurateECNState = .ecnFeatureDisabled
         var l4sEnabled = false
-        if let path = currentPath {
+        if self.usesCore {
+            clientAccurateECNState = self.coreClientAccurateECNState
+        } else if let path = currentPath {
             l4sEnabled = path.l4sEnabled
             if let ecnState = path.ecnState?.state {
                 switch ecnState {

@@ -152,6 +152,67 @@ struct LockstepPair: ~Copyable {
         return datagrams.count
     }
 
+    /// A datagram as the network carries it: on a path, with the ECN codepoint of its IP header.
+    struct NetworkDatagram {
+        var path: CorePathID
+        var ecn: IPProtocol.ECN
+        var bytes: [UInt8]
+    }
+
+    /// Everything `machine` has to send, the probes for other paths first, each with its
+    /// codepoint.
+    static func drainWithECN(_ machine: inout QUICConnectionCore, now: NetworkClock.Instant) -> [NetworkDatagram] {
+        var datagrams: [NetworkDatagram] = []
+        var buffer = [UInt8](repeating: 0, count: 1500)
+        while datagrams.count < 1000 {
+            let path = machine.pathWithProbeToSend ?? machine.activePathID
+            var span = buffer.mutableSpan
+            guard let length = machine.send(into: &span, on: path, now: now) else { break }
+            datagrams.append(NetworkDatagram(path: path, ecn: machine.lastDatagramECN, bytes: Array(buffer[0..<length])))
+        }
+        return datagrams
+    }
+
+    /// Like ``exchange(rounds:drop:)``, but each datagram keeps its path and ECN codepoint.
+    /// `network` sees every datagram and may change its path and codepoint, or drop it by
+    /// returning `false`.
+    mutating func exchangeWithECN(
+        rounds: Int = 50,
+        network: (_ toServer: Bool, _ datagram: inout NetworkDatagram) -> Bool = { _, _ in true }
+    ) {
+        for _ in 0..<rounds {
+            let fromClient = Self.drainWithECN(&self.client, now: self.now)
+            if self.server == nil, let first = fromClient.first {
+                let ids = Self.connectionIDs(ofInitial: first.bytes)
+                self.server = QUICConnectionCore(
+                    serverWith: self.serverConfiguration,
+                    localConnectionID: QUICConnectionID(8),
+                    originalDestinationConnectionID: ids.destination,
+                    peerConnectionID: ids.source,
+                    now: self.now
+                )
+            }
+            guard var server = self.server.take() else { return }
+            for var datagram in fromClient {
+                guard network(true, &datagram) else { continue }
+                let (path, ecn) = (datagram.path, datagram.ecn)
+                var span = datagram.bytes.mutableSpan
+                server.receive(&span, on: path, ecn: ecn, now: self.now)
+            }
+            self.serverEvents += Self.events(&server)
+            let fromServer = Self.drainWithECN(&server, now: self.now)
+            self.server = consume server
+            for var datagram in fromServer {
+                guard network(false, &datagram) else { continue }
+                let (path, ecn) = (datagram.path, datagram.ecn)
+                var span = datagram.bytes.mutableSpan
+                self.client.receive(&span, on: path, ecn: ecn, now: self.now)
+            }
+            self.clientEvents += Self.events(&self.client)
+            if fromClient.isEmpty && fromServer.isEmpty { return }
+        }
+    }
+
     /// Moves the clock to the earliest deadline and fires the timers that are due.
     mutating func advanceToNextDeadline() {
         var deadline = self.client.nextDeadline

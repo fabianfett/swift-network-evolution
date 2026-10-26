@@ -59,6 +59,18 @@ extension QUICConnectionCore {
 
     /// Processes one received UDP datagram that arrived on `path`. Decrypts in place.
     public mutating func receive(_ datagram: inout MutableSpan<UInt8>, on path: CorePathID, now: NetworkClock.Instant) {
+        self.receive(&datagram, on: path, ecn: .nonECT, now: now)
+    }
+
+    /// Processes one received UDP datagram that arrived on `path` with the ECN codepoint `ecn` in
+    /// its IP header. Decrypts in place.
+    public mutating func receive(
+        _ datagram: inout MutableSpan<UInt8>,
+        on path: CorePathID,
+        ecn: IPProtocol.ECN,
+        now: NetworkClock.Instant
+    ) {
+        self.receivingECN = ecn
         if self.paths[path] == nil {
             self.paths[path] = CorePath(id: path, isValidated: false)
         }
@@ -204,10 +216,11 @@ extension QUICConnectionCore {
             if space == .applicationData && !self.packetIsProbing && !self.isClosingOrDraining {
                 self.nonProbingPacketArrived(on: self.receivingPath, packetNumber: packetNumber, now: now)
             }
+            let congestionExperienced = self.countReceivedECN(in: space)
             self.acks[space].onPacketReceived(
                 packetNumber,
                 isAckEliciting: isAckEliciting,
-                immediate: space != .applicationData || !self.handshake.isComplete,
+                immediate: space != .applicationData || !self.handshake.isComplete || congestionExperienced,
                 maxAckDelay: self.configuration.maxAckDelay,
                 now: now
             )
@@ -643,8 +656,10 @@ extension QUICConnectionCore {
             smallest = upper &- length
             index &+= 1
         }
+        var ecnCounts: CoreECNCounts?
         if hasECN {
-            guard reader.vle() != nil, reader.vle() != nil, reader.vle() != nil else { return false }
+            guard let ect0 = reader.vle(), let ect1 = reader.vle(), let ce = reader.vle() else { return false }
+            ecnCounts = CoreECNCounts(ect0: ect0, ect1: ect1, ce: ce)
         }
         // Acknowledging a packet we never sent is a protocol violation.
         let nextPacketNumber = UInt64(self.protector.getPacketNumber(for: space).value)
@@ -654,6 +669,7 @@ extension QUICConnectionCore {
         }
         let exponent = self.peerTransportParameters?.intValue(.ackDelayExponent) ?? 3
         let delay = NetworkDuration.microseconds(ackDelay << UInt64(exponent))
+        let previousLargestAcknowledged = self.recovery.spaces[Int(space.rawValue)].largestAcknowledged
         let result = self.recovery.onAckReceived(
             ranges: ranges,
             ackDelay: delay,
@@ -661,8 +677,22 @@ extension QUICConnectionCore {
             handshakeConfirmed: self.isHandshakeConfirmed,
             now: now
         )
+        var newlyAcknowledgedECN: UInt64 = 0
         for packet in result.acknowledged {
+            if packet.ecn != .nonECT {
+                newlyAcknowledgedECN &+= 1
+            }
             self.onPacketAcknowledged(packet, in: space)
+        }
+        if self.ecn.state.isMarking || newlyAcknowledgedECN > 0 {
+            self.processAckECN(
+                ecnCounts,
+                newlyAcknowledged: newlyAcknowledgedECN,
+                increasesLargestAcknowledged: previousLargestAcknowledged.map { largest > $0 } ?? true,
+                largestNewlyAcknowledgedTimeSent: result.largestNewlyAcknowledgedTimeSent,
+                in: space,
+                now: now
+            )
         }
         for packet in result.lost {
             self.onPacketLost(packet, in: space, now: now)
@@ -703,6 +733,12 @@ extension QUICConnectionCore {
     mutating func onPacketLost(_ packet: CoreSentPacket, in space: PacketNumberSpace, now: NetworkClock.Instant) {
         self.statistics.increment(.txLostPackets)
         self.statistics.increment(.txLostBytes, by: packet.size)
+        if packet.ecn != .nonECT {
+            self.statistics.increment(.ecnCapablePacketsLost)
+            if packet.isECNValidation {
+                self.ecn.validationPacketLost()
+            }
+        }
         if self.configuration.recordsPacketEvents {
             self.recordPacketEvent(.lost, sent: packet, in: space, now: now)
         }

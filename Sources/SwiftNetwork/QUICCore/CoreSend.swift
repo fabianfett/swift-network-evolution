@@ -39,7 +39,10 @@ extension QUICConnectionCore {
                 // The pacer belongs to the active path.
                 self.departureTime = nil
             }
-            return self.sendProbe(into: &buffer, on: path, now: now)
+            guard let length = self.sendProbe(into: &buffer, on: path, now: now) else { return nil }
+            // Only the active path is validated for ECN.
+            self.lastDatagramECN = .nonECT
+            return length
         }
         guard let length = self.sendOnActivePath(into: &buffer, now: now) else { return nil }
         self.paths[path]?.bytesSent &+= length
@@ -92,7 +95,9 @@ extension QUICConnectionCore {
         case .closed, .draining:
             return nil
         case .closing:
-            return self.sendClose(into: &buffer, now: now)
+            guard let length = self.sendClose(into: &buffer, now: now) else { return nil }
+            self.lastDatagramECN = .nonECT
+            return length
         case .handshaking, .established:
             break
         }
@@ -130,6 +135,8 @@ extension QUICConnectionCore {
 
         var offset = 0
         var sentHandshake = false
+        // A bit per space with a packet in the datagram.
+        var writtenSpaces: UInt8 = 0
         for (index, space) in spaces.enumerated() {
             let isLast = index == spaces.count &- 1
             let padTo = (padsInitial && isLast) ? min(initialDatagramSize, limit) : nil
@@ -147,12 +154,14 @@ extension QUICConnectionCore {
                 continue
             }
             offset &+= length
+            writtenSpaces |= 1 << space.rawValue
             if space == .handshake { sentHandshake = true }
             if space == .applicationData { break }
             if limit &- offset < 64 { break }
         }
         guard offset > 0 else { return nil }
         self.bytesSent &+= offset
+        self.lastDatagramECN = self.ecn.state.isMarking ? self.markDatagram(spaces: writtenSpaces) : .nonECT
         if sentHandshake && !self.isServer {
             // A client discards its Initial keys once it sends a Handshake packet.
             self.discardSpace(.initial)

@@ -158,6 +158,8 @@ extension QUICConnection {
             connectionOptions.initialMaxStreamsUnidirectional == .max
             ? UInt64(FlowControlGlobals.shared.maxConcurrentStreams)
             : connectionOptions.initialMaxStreamsUnidirectional
+        // As `ECN()` without options, ECN is off unless the options turn it on.
+        configuration.ecnEchoEnabled = false
         if let perProtocolOptions = quicOptions.perProtocolOptions {
             let options = perProtocolOptions.quicConnectionOptions
             if options.forceVersionNegotiation {
@@ -170,6 +172,9 @@ extension QUICConnection {
             configuration.automaticallyIssueConnectionIDs = !options.disableAutomaticNewConnectionIDs
             configuration.resendRejectedEarlyData = options.resendRejectedEarlyDataAutomatically
             configuration.pacingEnabled = options.enablePacing || QUICPreferences.shared.pacePackets
+            // An endpoint that marks also reports the marks it receives, as `ECN.init` does.
+            configuration.ecnEnabled = !options.disableECN
+            configuration.ecnEchoEnabled = !options.disableECNEcho || !options.disableECN
             configuration.maxUDPPayloadSize = UInt64(
                 min(
                     max(Int(options.maxUDPPayloadSize), Int(TransportParameters.minUDPPayloadSize)),
@@ -386,8 +391,9 @@ extension QUICConnection {
                 }
                 if let box = self.coreBox {
                     let corePath = self.corePathID(for: path)
+                    let ecn = frame.ecnFlag
                     _ = frame.withUnclaimedMutableSpan { span in
-                        box.core.receive(&span, on: corePath, now: now)
+                        box.core.receive(&span, on: corePath, ecn: ecn, now: now)
                     }
                 }
                 frame.finalize(success: true)
@@ -590,6 +596,7 @@ extension QUICConnection {
                 datagram.departureTime = UInt64(clamping: absolute.time.nanoseconds)
                 self.stats.increment(.txDepartureTimestamp)
             }
+            datagram.ecnFlag = box.core.lastDatagramECN
             QUICSignpost.outbound(id: self.signpostID, length: written)
             totalBytes &+= written
             totalPackets &+= 1
@@ -633,6 +640,7 @@ extension QUICConnection {
             return false
         }
         self.coreSynchronizePath(path, id, in: &eventContext)
+        datagram.ecnFlag = box.core.lastDatagramECN
         QUICSignpost.outbound(id: self.signpostID, length: written)
         path.enqueueOutboundDatagram(datagram)
         self.recordTxPackets(
@@ -751,7 +759,22 @@ extension QUICConnection {
         .txRetransmittedCryptoFrames, .txRetransmittedCryptoBytes, .txRetransmittedBytes,
         .txLostBytes, .txLostPackets,
         .txDatagramFrameWithLength, .rxDatagramFrameWithLength, .rxDatagramFrameWithOutLength,
+        .txECT0, .txECT1, .rxECT0, .rxECT1, .rxECTCE,
+        .ecnCapablePacketsSent, .ecnCapablePacketsAcknowledged, .ecnCapablePacketsMarked, .ecnCapablePacketsLost,
     ]
+
+    /// The ECN state of the establishment report, from the core's validation of the active path.
+    var coreClientAccurateECNState: ClientAccurateECNState {
+        guard let state = self.coreBox?.core.ecn.state else { return .ecnFeatureDisabled }
+        switch state {
+        case .disabled: return .ecnFeatureDisabled
+        case .probing, .validating: return .ecnFeatureEnabled
+        case .probingValidated, .capable: return .ecnNegotiationSuccess
+        case .manglingDetected: return .ecnNegotiationSuccessECTManglingDetected
+        case .blackholed: return .ecnNegotiationBlackholed
+        case .unsupported: return .ecnNotAvailable
+        }
+    }
 
     /// Copies the core's statistics, spin bit and destination connection ID to where the
     /// framework reads them.

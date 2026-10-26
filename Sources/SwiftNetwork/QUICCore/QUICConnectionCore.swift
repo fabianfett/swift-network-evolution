@@ -84,6 +84,16 @@ public struct QUICConnectionCore: ~Copyable {
         public var pacingEnabled = false
         /// Whether the connection records ``PacketEvent``s, for qlog.
         public var recordsPacketEvents = false
+        /// Whether this endpoint sends ECN-capable packets once it validated that the path
+        /// carries them (RFC 9000 Section 13.4.2). The driver sets ``lastDatagramECN`` in the IP
+        /// header of each datagram.
+        public var ecnEnabled = false
+        /// Whether this endpoint reports the ECN codepoints of the packets it receives in its
+        /// ACK frames (RFC 9000 Section 13.4.1). The driver passes them to
+        /// ``receive(_:on:ecn:now:)``.
+        public var ecnEchoEnabled = true
+        /// Whether ECN-capable packets carry ECT(1), as L4S does, instead of ECT(0).
+        public var useECT1 = false
 
         #if DEBUG
         /// Changes the transport parameters this endpoint sends, so tests can send what a broken
@@ -209,6 +219,12 @@ public struct QUICConnectionCore: ~Copyable {
     /// When the datagram the last ``send(into:on:now:)`` wrote should leave, if the connection
     /// paces; `nil` when it goes out right away.
     public internal(set) var departureTime: NetworkClock.Instant?
+    /// The ECN codepoint for the IP header of the datagram the last ``send(into:on:now:)`` wrote.
+    public internal(set) var lastDatagramECN = IPProtocol.ECN.nonECT
+    /// The ECN validation of the active path.
+    var ecn: CoreECNValidator
+    /// The ECN codepoint of the datagram being processed.
+    var receivingECN = IPProtocol.ECN.nonECT
     /// Packets sent, received and lost, oldest first, if the configuration records them.
     var packetEvents = Deque<PacketEvent>()
     /// The frame types of the packet being processed, while packet events are recorded.
@@ -391,6 +407,7 @@ public struct QUICConnectionCore: ~Copyable {
         self.parser = PacketParser(logPrefixer: self.log)
         self.handshake = CoreHandshake(isServer: isServer)
         self.recovery = CoreRecovery(pacingEnabled: configuration.pacingEnabled)
+        self.ecn = CoreECNValidator(markingEnabled: configuration.ecnEnabled, useECT1: configuration.useECT1)
         self.streams = CoreStreamMap(
             isServer: isServer,
             localMaxStreamsBidirectional: configuration.initialMaxStreamsBidirectional,
@@ -889,6 +906,8 @@ struct CoreAckTracker {
     /// An ACK frame has to go out with the next packet in this space.
     var ackNeeded = false
     var ackDeadline: NetworkClock.Instant?
+    /// The ECN codepoints of the packets received, which the ACK frames report.
+    var ecnCounts = CoreECNCounts()
 
     static let maximumRanges = 64
 
@@ -931,7 +950,10 @@ struct CoreAckTracker {
         var delay = UInt64(max(0, self.largestReceivedTime.duration(to: now).microseconds))
         delay >>= UInt64(ackDelayExponent)
         let start = writer.offset
-        var ok = writer.vle(0x02) && writer.vle(largest) && writer.vle(delay)
+        // ACK_ECN once a packet arrived with an ECN codepoint (RFC 9000 Section 19.3).
+        let ecnCounts = self.ecnCounts
+        let hasECN = !ecnCounts.isZero
+        var ok = writer.vle(hasECN ? 0x03 : 0x02) && writer.vle(largest) && writer.vle(delay)
         ok = ok && writer.vle(UInt64(ranges.count &- 1))
         // Ranges are ascending; ACK frames list them descending.
         var index = ranges.count &- 1
@@ -944,6 +966,9 @@ struct CoreAckTracker {
             ok = writer.vle(gap) && writer.vle(range.upperBound &- 1 &- range.lowerBound)
             previousLower = range.lowerBound
             index &-= 1
+        }
+        if hasECN {
+            ok = ok && writer.vle(ecnCounts.ect0) && writer.vle(ecnCounts.ect1) && writer.vle(ecnCounts.ce)
         }
         guard ok else {
             _ = start
@@ -958,6 +983,10 @@ struct CoreAckTracker {
         var length = 1 + CoreWriter.vleLength(largest) + 8 + CoreWriter.vleLength(UInt64(ranges.count))
         for range in ranges {
             length &+= 2 * CoreWriter.vleLength(range.upperBound &- range.lowerBound)
+        }
+        if !self.ecnCounts.isZero {
+            length &+= CoreWriter.vleLength(self.ecnCounts.ect0) &+ CoreWriter.vleLength(self.ecnCounts.ect1)
+            length &+= CoreWriter.vleLength(self.ecnCounts.ce)
         }
         return length
     }

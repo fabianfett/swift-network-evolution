@@ -53,6 +53,11 @@ struct CoreSentPacket {
     var size: Int
     var isAckEliciting: Bool
     var isInFlight: Bool
+    /// The ECN codepoint of the packet's datagram.
+    var ecn: IPProtocol.ECN = .nonECT
+    /// Whether the packet is one of the ECN validation packets of its path (RFC 9000 Section
+    /// 13.4.2).
+    var isECNValidation = false
     var frames: [CoreSentFrame]
 }
 
@@ -71,6 +76,10 @@ struct CoreRecovery {
         var lossTime: NetworkClock.Instant?
         var timeOfLastAckElicitingPacket: NetworkClock.Instant?
         var ackElicitingInFlight = 0
+        /// The packets that went out ECN-capable, and the largest ECN counts the peer reported
+        /// (RFC 9000 Section 13.4.2.1).
+        var ecnCapableSent: UInt64 = 0
+        var ecnFeedback = CoreECNCounts()
     }
 
     struct AckResult {
@@ -79,6 +88,8 @@ struct CoreRecovery {
         /// Whether the largest acknowledged packet was newly acknowledged and ack-eliciting, which
         /// makes it an RTT sample.
         var rttSampled = false
+        /// When the largest newly acknowledged packet was sent.
+        var largestNewlyAcknowledgedTimeSent: NetworkClock.Instant?
     }
 
     enum Timeout {
@@ -195,6 +206,7 @@ struct CoreRecovery {
         }
 
         guard let largestNewlyAcked else { return result }
+        result.largestNewlyAcknowledgedTimeSent = largestNewlyAcked.timeSent
 
         // RTT sample (RFC 9002 Section 5.1).
         if largestNewlyAcked.packetNumber == largest, ackedAckEliciting {
@@ -446,7 +458,20 @@ struct CoreRecovery {
 
     private mutating func onPacketsLostCongestionControl(_ lost: [CoreSentPacket], now: NetworkClock.Instant) {
         guard let lastLost = lost.max(by: { $0.timeSent < $1.timeSent }), lastLost.isInFlight else { return }
-        if let recoveryStart = self.congestionRecoveryStartTime, lastLost.timeSent <= recoveryStart {
+        self.onCongestionEvent(sentTime: lastLost.timeSent, now: now)
+    }
+
+    /// The peer reported new CE marks; `sentTime` is when the largest newly acknowledged packet
+    /// went out (RFC 9002 Section B.7).
+    mutating func onCongestionExperienced(sentTime: NetworkClock.Instant, now: NetworkClock.Instant) {
+        self.onCongestionEvent(sentTime: sentTime, now: now)
+        self.updatePacer()
+    }
+
+    /// Halves the window, unless the packet that signalled congestion went out during the current
+    /// recovery period (RFC 9002 Section B.6).
+    private mutating func onCongestionEvent(sentTime: NetworkClock.Instant, now: NetworkClock.Instant) {
+        if let recoveryStart = self.congestionRecoveryStartTime, sentTime <= recoveryStart {
             return
         }
         self.congestionRecoveryStartTime = now
