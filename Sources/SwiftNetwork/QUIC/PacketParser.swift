@@ -60,38 +60,8 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
     }
     package var log: LogPrefixer
 
-    // Temporary storage for the frames parsed out of the packet currently being
-    // processed.
-    var framesReceived = NetworkUniqueDeque<QUICFrame>()
-
-    // Initial capacity for `framesReceived`.
-    private static var framesReceivedCapacity: Int { 4 }
-
     init(logPrefixer: LogPrefixer) {
         self.log = logPrefixer
-        self.framesReceived.reserveCapacity(Self.framesReceivedCapacity)
-    }
-
-    // Drain any frames which haven't been processed, finalizing the ones holding
-    // borrowed buffers so that they aren't leaked.
-    mutating func cleanupReceivedFrames() {
-        while let receivedFrame = self.framesReceived.popFirst() {
-            switch receivedFrame {
-            case .crypto(var frame):
-                frame.frame.finalize(success: false)
-            case .stream(var frame):
-                frame.frame.finalize(success: false)
-            case .datagram(var frame):
-                frame.frame.finalize(success: false)
-            default: continue
-            }
-        }
-
-        // A packet stuffed with single byte frames can grow the deque a long way; a peer
-        // shouldn't be able to pin that storage for the lifetime of the connection.
-        if self.framesReceived.capacity > QUICPreferences.shared.maxReceivedFramesCapacity {
-            self.framesReceived.reallocate(capacity: Self.framesReceivedCapacity)
-        }
     }
 
     private func parsePacketNumber(
@@ -109,54 +79,6 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             return nil
         }
         return packetNumber
-    }
-
-    @inline(never)
-    private mutating func parseFrames(
-        frame: inout Frame,
-        packet: inout Packet,
-        connection: QUICConnection,
-        stats: inout Statistics,
-        isLastPacketInFrame: Bool,
-        in eventContext: inout NetworkContext.EventContext
-    ) throws(QUICError) {
-        if QUICShorthandFrame.shouldGenerateShorthandFrames(hasQLog: (connection.qLog != nil)) {
-            packet.shorthandFrames = .init()
-        }
-        while frame.unclaimedLength > 0 {
-            var rawType: UInt64 = 0
-            let result = Deserializer.deserialize(&frame, claim: false) { read throws(DeserializationError) in
-                try read.vle(&rawType)
-            }
-            try validateDeserializationResult(result)
-
-            guard let type = FrameType(rawValue: rawType) else {
-                connection.log.error("Invalid frame type \(rawType) (pn \(packet.number))")
-                throw QUICError.frameParse(FrameParseError.invalidType(rawType))
-            }
-            let typeLength = rawType.variableLengthSize
-
-            // RFC9000: "To ensure simple and efficient implementations of
-            // frame parsing, a frame type MUST use the shortest possible
-            // encoding."
-
-            if _slowPath(type.isOneByte && typeLength != 1) {
-                connection.close(with: .protocolViolation, "Invalid frame type encoding", in: &eventContext)
-                throw QUICError.frameParse(
-                    FrameParseError.invalidValue("Invalid frame type encoding")
-                )
-            }
-            let quicFrame = try QUICFrame.parse(
-                type: type,
-                frame: &frame,
-                packet: &packet,
-                connection: connection,
-                stats: &stats,
-                isLastPacketInFrame: isLastPacketInFrame,
-                in: &eventContext
-            )
-            self.framesReceived.append(quicFrame)
-        }
     }
 
     @inline(never)
@@ -361,91 +283,6 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             return .payload(packet, extraLength: extraLength, reservedBits: reservedBits)
         } catch {
             return .drop
-        }
-    }
-
-    mutating func parse(
-        frame: inout Frame,
-        connection: QUICConnection,
-        ecn: IPProtocol.ECN,
-        ack: inout Ack,
-        protector: inout Protector,
-        stats: inout Statistics,
-        in eventContext: inout NetworkContext.EventContext
-    ) -> Packet? {
-        let context = DecodeContext(
-            localCIDLength: connection.localCIDLength,
-            isVersionSent: connection.state == .versionSent,
-            isConnected: connection.state.isConnected,
-            connectionKeyState: connection.keyState
-        )
-        let decoded = frame.withPacketBytes { bytes in
-            self.decodeAndOpen(
-                &bytes,
-                context: context,
-                largestPacketNumberReceived: { space in
-                    var largest = PacketNumber.none
-                    _ = ack.withAckSpace(packetNumberSpace: space) { ackSpace in
-                        largest = ackSpace.largestPNReceived
-                        return true
-                    }
-                    return largest
-                },
-                protector: &protector
-            )
-        }
-        guard let decoded else {
-            connection.log.error("Dropping short packet, len=\(frame.unclaimedLength)")
-            return nil
-        }
-
-        switch consume decoded {
-        case .drop:
-            return nil
-        case .packet(let packet):
-            return packet
-        case .payload(var packet, let extraLength, let reservedBits):
-            let tagLength = Int(packet.tagLength)
-            defer {
-                // At this point, the entire packet payload has been read. If there is another packet at the end,
-                // unclaim to expose it, and re-mark the tag length.
-                if extraLength > 0 {
-                    _ = frame.unclaim(fromStart: 0, fromEnd: tagLength + extraLength)
-                    _ = frame.claim(fromStart: tagLength)
-                }
-            }
-
-            // At this point we have decrypted and authenticated the
-            // packet so we're free to close the connection with
-            // a PROTOCOL_VIOLATION if needed.
-
-            guard reservedBits == 0 else {
-                let reason = "Reserved bits are not zero"
-                connection.log.error("\(reason)")
-                connection.close(with: .protocolViolation, reason, in: &eventContext)
-                return nil
-            }
-
-            if frame.unclaimedLength == 0 {
-                connection.log.error("Packet with no frames")
-                return packet
-            }
-
-            do throws(QUICError) {
-                try parseFrames(
-                    frame: &frame,
-                    packet: &packet,
-                    connection: connection,
-                    stats: &stats,
-                    isLastPacketInFrame: extraLength == 0,
-                    in: &eventContext
-                )
-            } catch {
-                // Explicitly release finalize frames in case of error
-                self.cleanupReceivedFrames()
-                return nil
-            }
-            return packet
         }
     }
 

@@ -860,20 +860,6 @@ extension QUICStreamInstance {
         }
     }
 
-    func sendInboundFlowControlCreditForStreamDataBlocked(connection: QUICConnection) {
-        // Ignore STREAM_DATA_BLOCKED once we have received a FIN
-        // or a RESET_STREAM.
-        guard !receive.state.isSizeKnown else {
-            return
-        }
-
-        sendInboundFlowControlCredit(
-            connection: connection,
-            sendStreamCredit: true,
-            sendConnectionCredit: true
-        )
-    }
-
     @inline(always)
     fileprivate func sendInboundFlowControlCredit(
         connection: QUICConnection,
