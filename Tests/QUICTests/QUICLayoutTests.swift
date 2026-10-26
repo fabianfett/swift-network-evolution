@@ -30,9 +30,12 @@ import XCTest
 final class QUICLayoutTests: XCTestCase {
 
     var stream: QUICStreamInstance!
-    var connection = QUICConnection(context: NetworkContext.implicitContext)
+    // Made in `setUp`: an XCTest runner can create test cases it never runs, and a connection
+    // released without `destroyFromExternalTest` traps.
+    var connection: QUICConnection!
 
     override func setUp() {
+        connection = QUICConnection(context: NetworkContext.implicitContext)
         stream = QUICStreamInstance(parent: connection, inbound: false)
         stream.setup(
             streamID: QUICStreamID(0),
@@ -48,6 +51,7 @@ final class QUICLayoutTests: XCTestCase {
             self.stream.destroyFromExternalTest()
             self.stream = nil
             self.connection.destroyFromExternalTest()
+            self.connection = nil
         }
     }
 
