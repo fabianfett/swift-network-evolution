@@ -1633,14 +1633,13 @@ class QUICTestHarness {
     /// Closes a stream that still has unread inbound bytes using `stop()`, which
     /// tears down both directions at once and so emits a `RESET_STREAM`.
     ///
-    /// When the peer ACKs that `RESET_STREAM`, the ACK walk closes the stream, and
-    /// closing a stream flushes frames. That flush re-enters `sendFrames()` while
-    /// `recovery` is still exclusively borrowed for ACK processing, which traps
-    /// under Swift's exclusivity enforcement. The trap fires on the ACK, well
-    /// after `stop()` has returned, so this waits for the round trip to complete.
+    /// When the peer ACKs that `RESET_STREAM`, processing the ACK closes the
+    /// stream, and closing a stream sends again: the connection is re-entered
+    /// while it handles the ACK. That happens well after `stop()` has returned,
+    /// so this waits for the round trip to complete.
     ///
-    /// - Parameter readBeforeStop: When `true`, drain the bytes first. The trap
-    ///   does not depend on unread data, so both variants must survive.
+    /// - Parameter readBeforeStop: When `true`, drain the bytes first. The
+    ///   re-entry does not depend on unread data, so both variants must survive.
     func runQUICStopStreamAfterPeerWrite(
         readBeforeStop: Bool = false,
         payloadSize: Int = 4000,

@@ -486,8 +486,8 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
     // MARK: Closing a stream from inside ACK processing
 
     // Closing a stream with `stop()` sends a RESET_STREAM. Processing the peer's
-    // ACK for it closes the stream, which flushes frames — re-entering
-    // `sendFrames()` while `recovery` is still borrowed for ACK processing.
+    // ACK for it closes the stream, which sends again — re-entering the
+    // connection while it handles the ACK.
     func testQUICStopStreamWithUnreadBytesSurvivesResetAck() {
         QUICTestHarness().runQUICStopStreamAfterPeerWrite()
     }
@@ -639,7 +639,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         QUICTestHarness().runQUICTest(blockSize: 10240, blockCount: 10)
     }
 
-    // Good test for resuming the StreamSendBuffer at a particular index
+    // Many small writes: the send buffer resumes sending in the middle of one
     func testQUICEcho300KiB() {
         QUICTestHarness().runQUICTest(blockSize: 300, blockCount: 1000)
     }

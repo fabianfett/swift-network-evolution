@@ -196,112 +196,12 @@ extension QUICStreamID {
             return QUICStreamID(((streams - 1) << 2) + 2)  // 4(n-1) + 2
         }
     }
-
-    // Compute Max Stream Data for the remote end based on our connection role (server or client)
-    // and the Stream ID we received from the remote end.
-    package static func computeRemoteMaxStreamData(
-        isServer: Bool,
-        remoteTransportParameters: TransportParameters?,
-        streamID: QUICStreamID
-    ) -> Int {
-        guard let remoteTransportParameters = remoteTransportParameters else {
-            return 0
-        }
-
-        if streamID.isUnidirectional {
-            // It doesn't matter if we're server or client here
-            return remoteTransportParameters.intValue(.initialMaxStreamDataUnidirectional)
-        }
-
-        let maxStreamData: Int
-        let maxLimitLocal = remoteTransportParameters.intValue(
-            .initialMaxStreamDataBidirectionalLocal
-        )
-        let maxLimitRemote = remoteTransportParameters.intValue(
-            .initialMaxStreamDataBidirectionalRemote
-        )
-
-        if !isServer {
-            maxStreamData = streamID.isServerInitiated ? maxLimitLocal : maxLimitRemote
-        } else {
-            maxStreamData = streamID.isServerInitiated ? maxLimitRemote : maxLimitLocal
-        }
-
-        return maxStreamData
-    }
-
-    package static func computeLocalMaxStreamData(
-        isServer: Bool,
-        localTransportParameters: TransportParameters,
-        streamID: QUICStreamID
-    ) -> Int {
-
-        if streamID.isUnidirectional {
-            return localTransportParameters.intValue(.initialMaxStreamDataUnidirectional)
-        }
-
-        let maxStreamData: Int
-        let maxLimitLocal = localTransportParameters.intValue(
-            .initialMaxStreamDataBidirectionalLocal
-        )
-        let maxLimitRemote = localTransportParameters.intValue(
-            .initialMaxStreamDataBidirectionalRemote
-        )
-
-        if !isServer {
-            maxStreamData = streamID.isServerInitiated ? maxLimitRemote : maxLimitLocal
-        } else {
-            maxStreamData = streamID.isServerInitiated ? maxLimitLocal : maxLimitRemote
-        }
-
-        return maxStreamData
-    }
-
 }
 
 @available(Network 0.1.0, *)
 extension QUICStreamID {
     package var variableLengthSize: Int {
         self.value.variableLengthSize
-    }
-}
-
-@available(Network 0.1.0, *)
-extension QUICStreamID {
-    // Returns the next available Stream ID
-    package static func nextAvailableStreamID(
-        allocatedStreamCount: Int,
-        remoteMaxStreams: Int,
-        remoteMaxStreamID: QUICStreamID?,
-        server: Bool,
-        logIDString: String,
-        isUnidirectional: Bool
-    ) -> QUICStreamID? {
-        // There is a overflow check in QUICStreamID so this will return nil
-        // if the shift overflows.
-        let nextStreamID = allocatedStreamCount << 2
-        let newStreamID = QUICStreamID(
-            UInt64(nextStreamID),
-            serverInitiated: server,
-            isUnidirectional: isUnidirectional
-        )
-        guard let newStreamID else {
-            return nil
-        }
-
-        if remoteMaxStreams == 0 {
-            Logger.proto.debug("\(logIDString) remote max streams is 0")
-            return nil
-        }
-        if let remoteMaxStreamID = remoteMaxStreamID,
-            newStreamID > remoteMaxStreamID
-        {
-            Logger.proto.debug(
-                "\(logIDString) new stream ID \(newStreamID) exceeds the unidirectional limit \(remoteMaxStreamID)"
-            )
-            return nil
-        }
-        return newStreamID
     }
 }
 

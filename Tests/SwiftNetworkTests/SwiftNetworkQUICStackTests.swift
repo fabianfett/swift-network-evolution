@@ -273,7 +273,6 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
         var serverQUICMultipathLinkage: TestDatagramMultipathLinkage?
 
         var pairedPathsArray = [PairedUDPIPPaths]()
-        var instances: [QUICConnection] = []
 
         context.async {
             defer { expectation.fulfill() }
@@ -290,7 +289,6 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
             let clientPath = PathProperties(parameters: clientParameters)
             let (clientQUICStreamListener, _, clientQUICMultipath) = storage.createTestQUICInstance()
             clientQUICMultipathLinkage = clientQUICMultipath
-            instances += storage.quicInstance(for: clientQUICStreamListener.base).map { [$0] } ?? []
 
             let clientQUICOptions: ProtocolOptions<QUICProtocol>
             if migrateCount > 0 {
@@ -354,7 +352,6 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
             let serverPath = PathProperties(parameters: serverParameters)
             let (serverQUICStreamListener, _, serverQUICMultipath) = storage.createTestQUICInstance()
             serverQUICMultipathLinkage = serverQUICMultipath
-            instances += storage.quicInstance(for: serverQUICStreamListener.base).map { [$0] } ?? []
 
             let serverQUICOptions = self.createQUICTestOptions(
                 server: true,
@@ -543,7 +540,6 @@ final class SwiftNetworkQUICStackTests: NetTestCase {
 
         let stopExpectation = XCTestExpectation()
         context.async {
-            XCTAssertEqual(instances.count, 2)
             clientUpperHarness?.stop()
             serverUpperHarness?.stop()
 

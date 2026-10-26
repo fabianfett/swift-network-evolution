@@ -128,10 +128,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         get { protocolState.state }
         set { protocolState.state = newValue }
     }
-    var priority: Int {  // Relative priority to other paths, used to gate migration decisions
-        get { protocolState.priority }
-        set { protocolState.priority = newValue }
-    }
     var interface: Interface?
     var localEndpoint: Endpoint?
     var remoteEndpoint: Endpoint?
@@ -162,10 +158,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         get { protocolState.maximumMSS }
         set { protocolState.maximumMSS = newValue }
     }
-    var minimumMSS: Int {
-        get { protocolState.minimumMSS }
-        set { protocolState.minimumMSS = newValue }
-    }
 
     private var flags: Flags {
         get { protocolState.flags }
@@ -176,22 +168,9 @@ public final class QUICPath: MultiplexingDatagramPath<
         get { flags.contains(.isInitialPath) }
         set { if newValue { flags.insert(.isInitialPath) } else { flags.remove(.isInitialPath) } }
     }
-    var isPrimaryPath: Bool {
-        get { flags.contains(.isPrimaryPath) }
-        set { if newValue { flags.insert(.isPrimaryPath) } else { flags.remove(.isPrimaryPath) } }
-    }
     var spinValue: Bool {
         get { flags.contains(.spinValue) }
         set { if newValue { flags.insert(.spinValue) } else { flags.remove(.spinValue) } }
-    }
-    var isPreferredAddress: Bool {
-        get { flags.contains(.isPreferredAddress) }
-        set { if newValue { flags.insert(.isPreferredAddress) } else { flags.remove(.isPreferredAddress) } }
-    }
-
-    var hasPreAssignedCIDs: Bool {
-        get { flags.contains(.hasPreAssignedCIDs) }
-        set { if newValue { flags.insert(.hasPreAssignedCIDs) } else { flags.remove(.hasPreAssignedCIDs) } }
     }
     var reportedIdleEvent: Bool {
         get { flags.contains(.reportedIdleEvent) }
@@ -210,8 +189,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         lhs.pathIdentifier == rhs.pathIdentifier
     }
 
-    var isOpenForSending: Bool { state.isOpenForSending }
-
     var isValidated: Bool { state.isValidated }
 
     var isProbing: Bool { state.isProbing }
@@ -229,11 +206,9 @@ public final class QUICPath: MultiplexingDatagramPath<
 
     func set(
         interface: Interface?,
-        priority: Int,
         isInitial: Bool,
     ) {
         self.isInitialPath = isInitial
-        self.priority = priority
         self.interface = interface
 
         if isInitial {
@@ -243,7 +218,7 @@ public final class QUICPath: MultiplexingDatagramPath<
         self.setup()
 
         log.debug(
-            "Set up new path \(pathIdentifier) (\(priority)), \(interface?.description ?? "<none>")"
+            "Set up new path \(pathIdentifier), \(interface?.description ?? "<none>")"
         )
     }
 
@@ -285,8 +260,6 @@ public final class QUICPath: MultiplexingDatagramPath<
         self.initialMSS = parentProtocol.initialMSS
         self.maximumMSS =
             CorePMTUD.maximumMTU - (IPProtocol.ipv6HeaderLength + UDPProtocol.headerLength)
-        self.minimumMSS =
-            CorePMTUD.minimumMTU - (IPProtocol.ipv6HeaderLength + UDPProtocol.headerLength)
 
         self.mss = parentProtocol.initialMSS
         if !self.isInitialPath, let interface {

@@ -20,7 +20,6 @@
 @available(Network 0.1.0, *)
 struct QUICPathProtocolState: ~Copyable {
     var state: QUICPathState = QUICPathState()
-    var priority: Int = 0  // Relative priority to other paths, used to gate migration decisions
 
     var dcid: QUICConnectionID?  // The DCID we assigned before probing
     var scid: QUICConnectionID?  // Contains the SCID we expect to see once we migrate.
@@ -30,19 +29,15 @@ struct QUICPathProtocolState: ~Copyable {
     var initialMSS = 0
     var mss = 0
     var maximumMSS = 0
-    var minimumMSS = 0
 
     struct Flags: OptionSet {
         init(rawValue: Self.RawValue) {
             self.rawValue = rawValue
         }
         var rawValue: UInt16
-        static let isInitialPath = Flags(rawValue: 1 << 1)
-        static let isPrimaryPath = Flags(rawValue: 1 << 2)
-        static let spinValue = Flags(rawValue: 1 << 3)
-        static let isPreferredAddress = Flags(rawValue: 1 << 5)
-        static let hasPreAssignedCIDs = Flags(rawValue: 1 << 8)
-        static let reportedIdleEvent = Flags(rawValue: 1 << 11)
+        static let isInitialPath = Flags(rawValue: 1 << 0)
+        static let spinValue = Flags(rawValue: 1 << 1)
+        static let reportedIdleEvent = Flags(rawValue: 1 << 2)
     }
     var flags = Flags()
 

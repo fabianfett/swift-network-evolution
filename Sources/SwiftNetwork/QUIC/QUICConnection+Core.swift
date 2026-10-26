@@ -38,21 +38,6 @@ import Darwin
 internal import Synchronization
 #endif
 
-/// Which implementation runs a `QUICConnection`.
-///
-/// Deprecated: `QUICConnectionCore` is the only driver, whatever the options say. The type and
-/// `QUICConnectionOptions.driver` only remain until the classes they chose are deleted.
-@_spi(ProtocolProvider)
-@available(Network 0.1.0, *)
-public enum QUICConnectionDriver: Equatable, Sendable {
-    /// `QUICConnectionCore`.
-    case automatic
-    /// `QUICConnectionCore`.
-    case core
-    /// `QUICConnectionCore` as well; the classes no longer run connections.
-    case legacy
-}
-
 /// Holds the core of a connection, which can't be stored as an optional and still be borrowed.
 @available(Network 0.1.0, *)
 final class QUICConnectionCoreBox {
@@ -96,7 +81,7 @@ final class QUICConnectionCoreAsyncResult: Sendable {
 
 @available(Network 0.1.0, *)
 extension QUICConnection {
-    /// The configuration of the core, from the options as `setupLocalTransportParameters` reads them.
+    /// The configuration of the core, from the options.
     func makeCoreConfiguration(
         quicOptions: ProtocolOptions<QUICProtocol>,
         tlsOptions: SwiftTLSProtocol.Options
@@ -342,7 +327,6 @@ extension QUICConnection {
         }
         path.assignDCID(sourceConnectionID, in: &eventContext)
         self.state.change(to: .initialReceived, logIDString: self.logPrefixer.logIDString)
-        self.keyState = .handshake
         return true
     }
 
@@ -396,7 +380,6 @@ extension QUICConnection {
                 pathStatistics: &path.pathStatistics,
                 connectionStatistics: &self.stats
             )
-            self.lastPacketReceivedTimestamp = now
             if let box = self.coreBox, !self.isServer, !box.core.initialToken.isEmpty {
                 self.initialToken = box.core.initialToken
             }
@@ -431,7 +414,7 @@ extension QUICConnection {
         self.coreLogPackets()
         self.coreSynchronizeStatistics(in: &eventContext)
         self.coreRescheduleTimer(in: &eventContext)
-        self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
+        self.checkConnectionIdle(in: &eventContext)
     }
 
     private func coreProcessEvents(in eventContext: inout NetworkContext.EventContext) {
@@ -468,30 +451,27 @@ extension QUICConnection {
                 }
             case .datagramsReadable:
                 self.coreDeliverDatagrams(in: &eventContext)
-            case .newLocalConnectionID(let sequenceNumber, let connectionID, let token):
-                try? self.localCIDs.insert(sequenceNumber: sequenceNumber, connectionID: connectionID, token: token)
+            case .newLocalConnectionID(_, let connectionID, _):
                 self.deliverNetworkProtocolEvent(
                     flow: .allFlows,
                     event: .init(quicEvent: .newInboundConnectionID(connectionID)),
                     in: &eventContext
                 )
             case .retiredLocalConnectionID(let connectionID):
-                self.localCIDs.retire(connectionID: connectionID)
                 self.deliverNetworkProtocolEvent(
                     flow: .allFlows,
                     event: .init(quicEvent: .retiredInboundConnectionID(connectionID)),
                     in: &eventContext
                 )
-            case .newPeerConnectionID(let sequenceNumber, let connectionID, let token):
-                try? self.remoteCIDs.insert(sequenceNumber: sequenceNumber, connectionID: connectionID, token: token)
+            case .newPeerConnectionID(_, let connectionID, let token):
                 self.deliverNetworkProtocolEvent(
                     flow: .allFlows,
                     event: .init(quicEvent: .newOutboundConnectionID(connectionID, statelessResetToken: token)),
                     in: &eventContext
                 )
             case .retiredPeerConnectionID(let connectionID, let token):
-                let retired = self.remoteCIDs.retire(connectionID: connectionID)
-                guard let token = token ?? retired?.token else { continue }
+                // A connection ID of the handshake the peer sent no token for has no event.
+                guard let token else { continue }
                 self.deliverNetworkProtocolEvent(
                     flow: .allFlows,
                     event: .init(quicEvent: .retiredOutboundConnectionID(connectionID, statelessResetToken: token)),
@@ -835,39 +815,17 @@ extension QUICConnection {
         guard let box = self.coreBox else { return }
         self.negotiatedVersion = .v1
         self.state.change(to: .connected, logIDString: self.logPrefixer.logIDString)
-        if let signpostConnectInterval {
-            QUICSignpost.connectEnd(signpostConnectInterval)
-        }
         self.handshakeDuration = self.handshakeStartTime.duration(to: self.now)
-        self.keyState = .phase0
-        self.initialKeysDiscarded = true
-        self.isHandshakeConfirmed = box.core.isHandshakeConfirmed || self.isServer
         let peerParameters = box.core.peerTransportParameters
         if let peerParameters {
             self.logTransportParameters(owner: .remote, transportParameters: peerParameters)
         }
         self.connectionMetadata.activeConnectionIDLimit = peerParameters?.intValue(.activeConnectionIDLimit) ?? 2
-        self.localCIDs.activeConnectionIDLimit = box.core.peerActiveConnectionIDLimit
-        // The peer's connection ID of the handshake, with the server's stateless reset token.
-        if self.remoteCIDs.isEmpty,
-            let handshakeEntry = box.core.connectionIDs.peer.first(where: { $0.sequenceNumber == 0 })
-        {
-            if let token = handshakeEntry.token {
-                try? self.remoteCIDs.insert(
-                    sequenceNumber: 0,
-                    connectionID: handshakeEntry.connectionID,
-                    token: token,
-                    used: true
-                )
-            } else {
-                try? self.remoteCIDs.insertInitialConnectionID(handshakeEntry.connectionID)
-            }
-        }
-        self.remoteMaxDatagramFrameSize = min(
+        let remoteMaxDatagramFrameSize = min(
             box.core.peerMaxDatagramFrameSize,
             Int(TransportParameters.maxDatagramFrameSize)
         )
-        self.connectionMetadata.remoteMaxDatagramFrameSize = UInt16(truncatingIfNeeded: self.remoteMaxDatagramFrameSize)
+        self.connectionMetadata.remoteMaxDatagramFrameSize = UInt16(truncatingIfNeeded: remoteMaxDatagramFrameSize)
         // Flows opened before the peer's limit was known sized themselves against zero.
         self.applyToAllSecondaryFlows { self.coreUpdateUsableDatagramSize($0) }
         if peerParameters?[.disableActiveMigration] == nil {
@@ -883,7 +841,7 @@ extension QUICConnection {
 
     // MARK: Closing
 
-    /// Closes the connection, from `close(sendCloseFrame:in:)`.
+    /// Closes the connection, from `close(in:)`.
     func coreClose(in eventContext: inout NetworkContext.EventContext) {
         guard !self.coreReportedClose else { return }
         guard let box = self.coreBox else {
@@ -913,7 +871,7 @@ extension QUICConnection {
         self.coreAfterUpdate(in: &eventContext)
     }
 
-    /// Tells the application the connection is gone, as `close(sendCloseFrame:in:)` does.
+    /// Tells the application the connection is gone.
     private func coreReportClose(
         _ reason: QUICConnectionCore.CloseReason,
         in eventContext: inout NetworkContext.EventContext
@@ -1137,7 +1095,6 @@ extension QUICConnection {
         stream.resetStreamID(streamID: streamID)
         self.knownFlows[streamID] = stream.flowIdentifier
         stream.outboundStreamReady()
-        self.withMutableQUICStreams(unidirectional: stream.unidirectional) { $0.incrementActiveStreams() }
     }
 
     /// Whether streams get their IDs now: once connected, or in 0-RTT with the limits the client
@@ -1215,7 +1172,7 @@ extension QUICConnection {
     func coreServiceStreamDataToSend(_ stream: QUICStreamInstance, in eventContext: inout NetworkContext.EventContext) {
         self.withPinnedClock {
             self.coreWriteQueuedStreamData(stream, in: &eventContext)
-            self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
+            self.checkConnectionIdle(in: &eventContext)
             self.coreAfterUpdate(in: &eventContext)
         }
     }
@@ -1373,7 +1330,6 @@ extension QUICConnection {
             return
         }
         box.core.stopSending(streamID.value, errorCode: stream.inboundApplicationError ?? 0)
-        stream.stopSendRequested = true
         stream.upperReceiveQueue.finalizeAllFramesAsFailed()
     }
 
@@ -1393,7 +1349,6 @@ extension QUICConnection {
         // The send state mirrors what the core does, for code that inspects it.
         if let code = stream.outboundApplicationError {
             box.core.resetStream(streamID.value, errorCode: code)
-            stream.resetSent = true
             stream.send.state = .resetSent
         } else {
             box.core.finish(streamID.value)
@@ -1445,7 +1400,7 @@ extension QUICConnection {
                 datagram.finalize(success: accepted)
             }
         }
-        self.checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
+        self.checkConnectionIdle(in: &eventContext)
         self.coreAfterUpdate(in: &eventContext)
     }
 

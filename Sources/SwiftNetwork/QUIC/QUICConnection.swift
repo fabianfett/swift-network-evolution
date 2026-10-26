@@ -198,41 +198,15 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
     public var state: QUICConnectionState = .invalid
 
-    // All the CIDs advertised to the peer
-    var localCIDs = QUICConnectionIDList()
-    private var nextLocalCIDSequenceNumber: UInt64 = 1
-    private var largestSentLocalCIDSequenceNumber: UInt64 = 1
-
-    // All the CIDs advertised by the peer
-    var remoteCIDs = QUICConnectionIDList()
-
-    // The largest "retire prior to" value received
-    private var retiredRemoteCIDSequenceNumberThreshold: UInt64 = 0
-
-    private(set) var remoteTransportParametersForEarlyData = false
-    private(set) var remoteTransportParameters: TransportParameters?
-    private(set) var localTransportParameters: TransportParameters
     var connectionMetadata = QUICConnectionProtocol.QUICConnectionMetadata()
-
-    private(set) var packetParser: PacketParser
-
-    var keyState = PacketKeyState.initial
-    var remoteMaxDatagramFrameSize = 0
-    var remoteMaximumUDPPayloadSize = 0
 
     var timer: Timer
 
-    var protector: Protector
-
     var handshakeStartTime: NetworkClock.Instant = .zero
     var handshakeDuration: NetworkDuration = .zero
-    private(set) var handshakeRTT: NetworkDuration = .zero
-    private(set) var idleTimeout: NetworkDuration = .zero
 
+    /// The keepalive interval the application set, which a core created later picks up.
     var keepaliveDuration: NetworkDuration = .zero
-    var keepaliveTimerID: Timer.TimerID?
-    var maxKeepaliveCount = 0
-    var unackedKeepaliveCount = 0
 
     /// A continuous and an absolute reading of the clock, taken back to back.
     struct ClockSample {
@@ -274,13 +248,8 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         body()
     }
 
-    var lastPacketReceivedTimestamp: NetworkClock.Instant = .zero
-    var lastAckElicitingPacketSentTimestamp: NetworkClock.Instant = .zero
-
-    var idleTimerID: Timer.TimerID?
     var logIDNumber: Int = 0
     let signpostID = QUICSignpost.makeSignpostID()
-    var signpostConnectInterval: QUICSignpost.IntervalState?
 
     // Initial version set by client or server
     var initialVersion: QUICVersion? = Constants.defaultVersion
@@ -294,6 +263,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         }
         return initialVersion ?? .v1
     }
+    /// Has no effect: the core reads `QUICConnectionOptions.forceUnsupportedClientVersion`.
     public var forceUnsupportedClientVersion: Bool = false
 
     // MARK: Streams
@@ -306,15 +276,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     var localCIDLength: Int = 0  // would be private(set)
     private var initialSourceConnectionID: QUICConnectionID?
     private var initialStatelessResetToken: QUICStatelessResetToken?
-    private var disableAutomaticNewConnectionIDs = false
-    private var resendRejectedEarlyDataAutomatically = false
-
-    private(set) var allowPMTUD = false
-    private(set) var pmtudIgnoreCost = false
-    private(set) var pmtudInterval: NetworkDuration? = nil
-
-    private(set) var earlyDataAccepted = false
-    private var drainingScheduled = false
 
     fileprivate var flowsHaveEverMarkedIdle = false
 
@@ -324,8 +285,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
     private(set) var initialMSS = Constants.initialMSS
     private(set) var pathPropertiesMTU = 0
-
-    var isPacing: Bool = false
 
     // MARK: Logging
     public var qlogConfiguration: QLogConfiguration?
@@ -339,26 +298,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     // MARK: Flags
 
     private(set) var isServer = false
-    private(set) var isCancelled = false
-    var hasSentDataBlocked = false
-    private(set) var versionReceived = false
-    private(set) var retryReceived = false
-    private var retrySCID: QUICConnectionID?
     private(set) var spinBitEnabled = false
-    private(set) var autoReceivedBuffer = false
-    private(set) var outboundDataPending = false
-    private(set) var trafficManagementBackground = false
-    var initialKeysDiscarded = false
-    private(set) var receivedHandshakePacket = false
-    var discardCryptoFrames = false
     private(set) var initialSpinValue = false
     private(set) var retryEnabled = false
-    var earlyDataSignalled = false
-    private(set) var inError = false
-    var hasAdvertisedMaxData = false
-    private(set) var waitingForOutstandingKeepAliveAcks = false
-    private(set) var tlsOptions: SwiftTLSProtocol.Options?
-    private(set) var testSendingShortPackets = false
     var migrationSupported = false
 
     var pendOutboundData = false  // Don't immediately process application sends
@@ -366,13 +308,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     // false == IPv6, true == IPv4
     private(set) var initialAddressIsIPv4 = false
 
-    #if NETWORK_EMBEDDED
-    let isL4SEnabled = false
-    #else
-    private(set) var isL4SEnabled = false
-    #endif
-    var isHandshakeConfirmed = false
-
+    /// Has no effect: the core paces as `QUICConnectionOptions.enablePacing` says.
     public var pacingEnabled: Bool = false
 
     private(set) var datagramUseQuarterStreamID = false
@@ -385,7 +321,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     var originalDCID: QUICConnectionID
     var initialDCID: QUICConnectionID?
     var initialToken: [UInt8]?
-    var newToken: [UInt8]?
 
     // The error code and reason sent/received in a CONNECTION_CLOSE frame.
     public var closeError: QUICTransportError?
@@ -404,9 +339,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
     // MARK: Core
 
-    /// Whether `QUICConnectionCore` runs this connection, rather than the state above: always,
-    /// the classes no longer run connections. The branches on it go with the classes.
-    let usesCore = true
     var coreConfiguration: QUICConnectionCore.Configuration?
     /// The core, once a client started its handshake or a server got the client's first packet.
     var coreBox: QUICConnectionCoreBox?
@@ -424,16 +356,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     var coreLastHandshakeRTT: NetworkDuration?
     var coreLastL4SEnabled = false
 
-    func withCurrentPath(_ block: (borrowing QUICPath) -> Void) {
-        guard let currentPath else { return }
-        block(currentPath)
-    }
-
-    func withCurrentPath(_ block: (borrowing QUICPath) -> Bool) -> Bool {
-        guard let currentPath else { return false }
-        return block(currentPath)
-    }
-
     public convenience init(context: NetworkContext) {
         self.init(context: context, in: &context.eventContext)
     }
@@ -441,14 +363,9 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     public init(context: NetworkContext, in eventContext: inout NetworkContext.EventContext) {
         self.context = context
         self.logPrefixer = LogPrefixer("[C?]")
-        self.packetParser = PacketParser(logPrefixer: self.logPrefixer)
 
         let defaultServerCIDLength = 8
-
-        let dcid = QUICConnectionID(defaultServerCIDLength)
-        originalDCID = dcid
-        protector = Protector(isClient: true, destinationCID: dcid, logPrefixer: self.logPrefixer)
-        self.localTransportParameters = TransportParameters(logPrefixer: self.logPrefixer)
+        self.originalDCID = QUICConnectionID(defaultServerCIDLength)
         self.stats = Statistics()
         self.identifier = InstanceIdentifier(
             eventManager: &self.eventManager,
@@ -515,18 +432,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             {
                 initialStatelessResetToken = statelessResetToken
             }
-            disableAutomaticNewConnectionIDs =
-                quicConnectionOptions.disableAutomaticNewConnectionIDs
-            resendRejectedEarlyDataAutomatically =
-                quicConnectionOptions.resendRejectedEarlyDataAutomatically
-            if quicConnectionOptions.keepaliveCount > 0 {
-                maxKeepaliveCount = Int(quicConnectionOptions.keepaliveCount)
-            }
-
-            allowPMTUD = quicConnectionOptions.pmtud
-            pmtudIgnoreCost = quicConnectionOptions.pmtudIgnoreCost
-            pmtudInterval = quicConnectionOptions.pmtudUpdateInterval
-
             // RFC 9000 - 14.1. Initial Datagram Size
             // Datagrams containing Initial packets MAY exceed 1200 bytes if the sender
             // believes that the network path and peer both support the size that it chooses
@@ -536,9 +441,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             }
 
             pacingEnabled = quicConnectionOptions.enablePacing
-
-            testSendingShortPackets =
-                quicConnectionOptions.testSendingShortPackets
 
             forceUnsupportedClientVersion = quicConnectionOptions.forceUnsupportedClientVersion
 
@@ -576,7 +478,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             }
             // The core sets up its transport parameters, ECN, L4S and pacing from the
             // configuration.
-            tlsOptions = quicOptions.tlsOptions
             self.coreConfiguration = self.makeCoreConfiguration(
                 quicOptions: quicOptions,
                 tlsOptions: quicOptions.tlsOptions
@@ -702,36 +603,16 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         // Get handlers
         self.connectionMetadata.getLocalMaxStreamsBidirectional {
-            if self.usesCore {
-                return self.coreBox?.core.localMaxStreams(bidirectional: true) ?? 0
-            }
-            let localMaxStreams = UInt64(self.bidirectionalStreams.localMaxStreams)
-            self.log.debug("Local bidi max_streams=\(localMaxStreams)")
-            return localMaxStreams
+            self.coreBox?.core.localMaxStreams(bidirectional: true) ?? 0
         }
         self.connectionMetadata.getLocalMaxStreamsUnidirectional {
-            if self.usesCore {
-                return self.coreBox?.core.localMaxStreams(bidirectional: false) ?? 0
-            }
-            let localMaxStreams = UInt64(self.unidirectionalStreams.localMaxStreams)
-            self.log.debug("Local uni max_streams=\(localMaxStreams)")
-            return localMaxStreams
+            self.coreBox?.core.localMaxStreams(bidirectional: false) ?? 0
         }
         self.connectionMetadata.getRemoteMaxStreamsBidirectional {
-            if self.usesCore {
-                return self.coreBox?.core.peerMaxStreams(bidirectional: true) ?? 0
-            }
-            let remoteMaxStreams = UInt64(self.bidirectionalStreams.remoteMaxStreams)
-            self.log.debug("Remote bidi max_streams=\(remoteMaxStreams)")
-            return remoteMaxStreams
+            self.coreBox?.core.peerMaxStreams(bidirectional: true) ?? 0
         }
         self.connectionMetadata.getRemoteMaxStreamsUnidirectional {
-            if self.usesCore {
-                return self.coreBox?.core.peerMaxStreams(bidirectional: false) ?? 0
-            }
-            let remoteMaxStreams = UInt64(self.unidirectionalStreams.remoteMaxStreams)
-            self.log.debug("Remote uni max_streams=\(remoteMaxStreams)")
-            return remoteMaxStreams
+            self.coreBox?.core.peerMaxStreams(bidirectional: false) ?? 0
         }
         self.connectionMetadata.getKeepalive {
             let keepaliveSeconds = self.keepaliveDuration.seconds
@@ -739,7 +620,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         }
 
         self.connectionMetadata.getLocalConnectionIDs {
-            self.localCIDs.managedConnectionIDs.map { $0.connectionID }
+            self.coreBox?.core.connectionIDs.local.map(\.connectionID) ?? []
         }
         #endif
     }
@@ -762,97 +643,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         #endif
     }
 
-    func setCIDsOnLocalTransportParameters(path: QUICPath) {
-        if let scid = path.scid {
-            let initialSCIDParam = TransportParameter.initialSCID(connectionID: scid)
-            localTransportParameters.append(initialSCIDParam)
-            log.info("Setting initial SCID (length \(scid.length)) on local transport parameters")
-
-            if isServer, let managedCID = localCIDs.find(connectionID: scid) {
-                localTransportParameters.append(
-                    .statelessResetToken(statelessResetToken: managedCID.token)
-                )
-                log.info("Setting SCID stateless reset token on local transport parameters")
-            }
-        }
-        if isServer {
-            // Use initialDCID on the server if present on the server, otherwise use originalDCID
-            if let _initialDCID = initialDCID {
-                let originalDCIDParam = TransportParameter.originalDCID(connectionID: _initialDCID)
-                localTransportParameters.append(originalDCIDParam)
-            } else {
-                let originalDCIDParam = TransportParameter.originalDCID(connectionID: originalDCID)
-                localTransportParameters.append(originalDCIDParam)
-            }
-            if let retrySCID = retrySCID {
-                let _retrySCID = TransportParameter.retrySCID(connectionID: retrySCID)
-                localTransportParameters.append(_retrySCID)
-            }
-
-            log.info(
-                "Setting original DCID (length \(originalDCID.length)) on local transport parameters"
-            )
-        }
-    }
-
-    func setupLocalTransportParameters(quicOptions: ProtocolOptions<QUICProtocol>) {
-
-        let activeConnectionIDLimit = TransportParameter.activeConnectionIDLimit(
-            value: Constants.activeCIDLimit
-        )
-        localTransportParameters.append(activeConnectionIDLimit)
-
-        // The local transport parameter determines the limit for how many
-        // remote CIDs we are willing to track
-        remoteCIDs.activeConnectionIDLimit = activeConnectionIDLimit.value
-
-        log.info("Setting up local transport parameters")
-
-        // Initialize the values for the next stream IDs that we expect
-        // to see from the peer.  Since we haven't received any stream yet
-        // these values represent the first stream IDs that we expect to see.
-        // They will be used when we receive streams out of order.
-        if isServer {
-            bidirectionalStreams.nextInboundStreamID = QUICStreamID(0)
-            unidirectionalStreams.nextInboundStreamID = QUICStreamID(2)
-        } else {
-            bidirectionalStreams.nextInboundStreamID = QUICStreamID(1)
-            unidirectionalStreams.nextInboundStreamID = QUICStreamID(3)
-        }
-
-        if var maxUDPPayloadSize = quicOptions.perProtocolOptions?.quicConnectionOptions
-            .maxUDPPayloadSize
-        {
-            if maxUDPPayloadSize < TransportParameters.minUDPPayloadSize {
-                maxUDPPayloadSize = UInt16(TransportParameters.minUDPPayloadSize)
-            } else if maxUDPPayloadSize > TransportParameters.maxUDPPayloadSize {
-                maxUDPPayloadSize = UInt16(TransportParameters.maxUDPPayloadSize)
-            }
-            localTransportParameters.append(.maxUDPPayloadSize(value: UInt64(maxUDPPayloadSize)))
-        }
-
-        if var maxDatagramFrameSize = quicOptions.perProtocolOptions?.quicConnectionOptions
-            .maxDatagramFrameSize
-        {
-            if maxDatagramFrameSize > TransportParameters.maxDatagramFrameSize {
-                maxDatagramFrameSize = UInt16(TransportParameters.maxDatagramFrameSize)
-            }
-            localTransportParameters.append(
-                .maxDatagramFrameSize(value: UInt64(maxDatagramFrameSize))
-            )
-        }
-
-        setupInitialMaxDatas(quicOptions: quicOptions)
-        setupInitialMaxStreams(quicOptions: quicOptions)
-
-        if let idleTimeout = quicOptions.perProtocolOptions?.quicConnectionOptions.idleTimeout {
-            localTransportParameters.append(
-                .maxIdleTimeout(value: UInt64(idleTimeout.milliseconds))
-            )
-        }
-        logTransportParameters(owner: .local, transportParameters: localTransportParameters)
-    }
-
     func logTransportParameters(
         owner: QLogOwner?,
         transportParameters: TransportParameters
@@ -868,112 +658,10 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         #endif
     }
 
-    // Flow control params are special as they decide whether
-    // we should do auto-tuning of receive buffer or not. They
-    // get all the QUIC option values and if any one them is
-    // not set, then fall back to use protocol default values.
-    private func setupInitialMaxDatas(quicOptions: ProtocolOptions<QUICProtocol>) {
-        // Setup initialMaxData
-        var initialMaxData = quicOptions.connectionOptions.initialMaxData
-        if initialMaxData == UInt64.max {
-            initialMaxData = UInt64(FlowControlGlobals.shared.initialMaxData)
-        }
-        localTransportParameters.append(TransportParameter.initialMaxData(value: initialMaxData))
-
-        // Setup initialMaxStreamDataBidirectionalLocal
-        var initialMaxStreamDataBidirectionalLocal = quicOptions.connectionOptions
-            .initialMaxStreamDataBidirectionalLocal
-        if initialMaxStreamDataBidirectionalLocal == UInt64.max {
-            initialMaxStreamDataBidirectionalLocal = UInt64(
-                FlowControlGlobals.shared.initialMaxBidirectionalStreamLocalData
-            )
-        }
-        localTransportParameters.append(
-            TransportParameter.initialMaxStreamDataBidirectionalLocal(
-                value: initialMaxStreamDataBidirectionalLocal
-            )
-        )
-
-        // Setup initialMaxStreamDataBidirectionalRemote
-        var initialMaxStreamDataBidirectionalRemote = quicOptions.connectionOptions
-            .initialMaxStreamDataBidirectionalRemote
-        if initialMaxStreamDataBidirectionalRemote == UInt64.max {
-            initialMaxStreamDataBidirectionalRemote = UInt64(
-                FlowControlGlobals.shared.initialMaxBidirectionalStreamRemoteData
-            )
-        }
-        localTransportParameters.append(
-            TransportParameter.initialMaxStreamDataBidirectionalRemote(
-                value: initialMaxStreamDataBidirectionalRemote
-            )
-        )
-
-        // Setup initialMaxStreamDataUnidirectional
-        var initialMaxStreamDataUnidirectional = quicOptions.connectionOptions
-            .initialMaxStreamDataUnidirectional
-        if initialMaxStreamDataUnidirectional == UInt64.max {
-            initialMaxStreamDataUnidirectional = UInt64(
-                FlowControlGlobals.shared.initialMaxUnidirectionalStreamData
-            )
-        }
-        localTransportParameters.append(
-            TransportParameter.initialMaxStreamDataUnidirectional(
-                value: initialMaxStreamDataUnidirectional
-            )
-        )
-
-    }
-
-    private func setupInitialMaxStreams(quicOptions: ProtocolOptions<QUICProtocol>) {
-        // Setup initialMaxStreamsBidirectional
-        var initialMaxStreamsBidirectional = UInt64(FlowControlGlobals.shared.maxConcurrentStreams)
-        if quicOptions.connectionOptions.initialMaxStreamsBidirectional != UInt64.max {
-            initialMaxStreamsBidirectional =
-                quicOptions.connectionOptions.initialMaxStreamsBidirectional
-        }
-        let initialMaxStreamsBidirectionalParameter =
-            TransportParameter.initialMaxStreamsBidirectional(
-                value: UInt64(initialMaxStreamsBidirectional)
-            )
-        localTransportParameters.append(initialMaxStreamsBidirectionalParameter)
-
-        // Setup initialMaxStreamsUnidirectional
-        var initialMaxStreamsUnidirectional = UInt64(FlowControlGlobals.shared.maxConcurrentStreams)
-        if quicOptions.connectionOptions.initialMaxStreamsUnidirectional != UInt64.max {
-            initialMaxStreamsUnidirectional =
-                quicOptions.connectionOptions.initialMaxStreamsUnidirectional
-        }
-        let initialMaxStreamsUnidirectionalParameter =
-            TransportParameter.initialMaxStreamsUnidirectional(
-                value: initialMaxStreamsUnidirectional
-            )
-        localTransportParameters.append(initialMaxStreamsUnidirectionalParameter)
-
-        bidirectionalStreams.updateLocalMaxStreams(
-            server: isServer,
-            newMaxStreams: (Int(initialMaxStreamsBidirectional)),
-            logIDString: logPrefixer.logIDString
-        )
-        unidirectionalStreams.updateLocalMaxStreams(
-            server: isServer,
-            newMaxStreams: (Int(initialMaxStreamsUnidirectional)),
-            logIDString: logPrefixer.logIDString
-        )
-    }
-
     public func connect(in eventContext: inout NetworkContext.EventContext) {
         log.debug(
             "Received connection start (isServer: \(self.isServer))"
         )
-
-        // Defer closing until end of processing connection
-        deferClosing = true
-        defer {
-            deferClosing = false
-            if closeError != nil {
-                close(in: &eventContext)
-            }
-        }
 
         // Generate a local CID
         let scid: QUICConnectionID
@@ -1008,14 +696,8 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         // Set up the initial path
         if currentPath == nil, let initialPath = self.somePath {
-            initialPath.set(interface: self.initialInterface, priority: 0, isInitial: true)
+            initialPath.set(interface: self.initialInterface, isInitial: true)
             log.info("Packet Pacing is \(self.coreConfiguration?.pacingEnabled == true ? "enabled" : "disabled")")
-            do {
-                try localCIDs.insertInitialConnectionID(scid, token: statelessResetToken)
-            } catch {
-                // Not a fatal error; duplicates are not a problem for the protocol
-                log.error("Error inserting initial local CID: \(error)")
-            }
             initialPath.setSCID(scid)
             if !isServer {
                 initialPath.assignDCID(originalDCID, in: &eventContext)
@@ -1025,109 +707,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         }
 
         self.coreConnect(scid: scid, statelessResetToken: statelessResetToken, in: &eventContext)
-    }
-
-    func clientStartIdleTimer(in eventContext: inout NetworkContext.EventContext) -> Bool {
-        precondition(
-            !isServer,
-            "must only be called when acting as a client. Server connections start when clientHello is received."
-        )
-        return _startIdleTimer(in: &eventContext)
-    }
-
-    func serverStartIdleTimer(in eventContext: inout NetworkContext.EventContext) -> Bool {
-        precondition(isServer, "must only be called when acting as a server.")
-        return _startIdleTimer(in: &eventContext)
-    }
-
-    private func _startIdleTimer(in eventContext: inout NetworkContext.EventContext) -> Bool {
-        let value = localTransportParameters.intValue(.maxIdleTimeout)
-        if value > 0 {
-            idleTimeout = .milliseconds(value)
-            log.debug("Parameter configured idle timeout: \(self.idleTimeout)")
-        } else {
-            idleTimeout = Constants.defaultIdleTimeout
-            log.debug("Default idle timeout: \(self.idleTimeout)")
-        }
-
-        idleTimerID = timer.insert(
-            description: "Idle timeout",
-            fromNow: idleTimeout,
-            timerNow: self.now,
-            in: &eventContext
-        ) { firedAt, timerState in
-            self.idleTimeoutFired(firedAt: firedAt, in: &timerState)
-        }
-
-        guard let idleTimerID else {
-            let reason = "Failed to start idle timer"
-            log.fault(reason)
-            close(with: .internalError, reason, in: &eventContext)
-            return false
-        }
-
-        log.debug(
-            "Starting idle timer \(idleTimerID.description) duration \(self.idleTimeout)"
-        )
-        return true
-    }
-
-    func configureTimeoutPostHandshake() {
-        // Only attempt to disable idle timeout if the connection is past the handshake stage
-        if state == .connected {
-            let idleTimeoutLocal = localTransportParameters.intValue(.maxIdleTimeout)
-            let idleTimeoutRemote = remoteTransportParameters?.intValue(.maxIdleTimeout) ?? 0
-            // An idle timeout value of 0 implies the absence of idle
-            // timeout. Therefore when either of the idle timeouts is 0,
-            // consider the other one, else take the minimum of the two.
-            let minIdleTimeout =
-                (idleTimeoutLocal == 0 || idleTimeoutRemote == 0)
-                ? (idleTimeoutLocal + idleTimeoutRemote) : min(idleTimeoutLocal, idleTimeoutRemote)
-            if minIdleTimeout == 0 {
-                log.info("Idle timeout is not configured by any endpoint, disabling timer")
-                if let idleTimerID {
-                    timer.remove(idleTimerID)
-                }
-            }
-        }
-    }
-
-    func idleTimeoutFired(firedAt now: NetworkClock.Instant, in eventContext: inout NetworkContext.EventContext) {
-        // Assumption: Timer will not be active unless:
-        //   - server: initial packet received
-        //   - client: initial packet sent
-
-        // Check when the last activity was recorded
-        guard now >= lastPacketReceivedTimestamp else {
-            log.fault("Now should not be less than lastPacketReceivedTimestamp")
-            return
-        }
-        let delta = lastPacketReceivedTimestamp.duration(to: now)
-        if delta < idleTimeout {
-            // Calculate how much longer until the new idle timeout
-            let sleepDuration = idleTimeout - delta
-
-            // Only reset the timer if it is at least the threshold from now (1ms)
-            if sleepDuration >= Timer.timerThreshold {
-                log.debug("Idle timer rescheduled for \(sleepDuration)")
-                if let idleTimerID {
-                    timer.reschedule(
-                        identifier: idleTimerID,
-                        fromNow: sleepDuration,
-                        timerNow: now,
-                        in: &eventContext
-                    )
-                }
-                return
-            }
-        }
-        errorToReport = NetworkError.posix(ETIMEDOUT)
-        log.info(
-            "Idle timeout fired, closing connection due to inactivity \(delta) >= \(idleTimeout)"
-        )
-
-        // No packets need to be sent when the idle timeout fires.
-        close(sendCloseFrame: false, in: &eventContext)
     }
 
     public func connect(flow flowID: MultiplexedFlowIdentifier, in eventContext: inout NetworkContext.EventContext) {
@@ -1377,47 +956,19 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         self.coreSetupNewOutboundStream(stream, with: protocolOptions)
     }
 
-    var deferClosing = false  // Set to defer closing until processing finishes
-    func close(
-        withCryptoError error: Int64,
-        _ reason: String? = nil,
-        in eventContext: inout NetworkContext.EventContext
-    ) {
-        closeError = QUICTransportError(cryptoError: error, reason)
-        if !deferClosing {
-            close(sendCloseFrame: true, in: &eventContext)
-        }
-    }
-
-    func close(
-        with error: QUICTransportError.QUICTransportErrorCode,
-        _ reason: String? = nil,
-        sendCloseFrame: Bool = true,
-        in eventContext: inout NetworkContext.EventContext
-    ) {
-        closeError = QUICTransportError(error, reason)
-        if !deferClosing {
-            close(sendCloseFrame: sendCloseFrame, in: &eventContext)
-        }
-    }
-
-    var hasApplicationCloseError: Bool {
-        applicationCloseError != nil
-    }
-
     /// Closes the connection from outside the protocol stack.
     ///
     /// Almost all closes originate inside the stack and should thread their own state into
-    /// `close(sendCloseFrame:in:)`. This entry point is for callers that are genuinely
+    /// `close(in:)`. This entry point is for callers that are genuinely
     /// external to the stack and therefore have to acquire the state themselves.
     public func closeFromExternal() {
         fromExternal { eventContext in
-            close(sendCloseFrame: true, in: &eventContext)
+            close(in: &eventContext)
         }
     }
 
     // Closing all flows, i.e. streams, and the connection itself
-    func close(sendCloseFrame: Bool = true, in eventContext: inout NetworkContext.EventContext) {
+    func close(in eventContext: inout NetworkContext.EventContext) {
         self.coreClose(in: &eventContext)
     }
 
@@ -1509,18 +1060,6 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         self.timer.timerFired(at: self.now, in: &eventContext)
     }
 
-    func setupStreamID(isUnidirectional: Bool, isServer: Bool) -> QUICStreamID? {
-        var streamID: QUICStreamID?
-        withMutableQUICStreams(unidirectional: isUnidirectional) { mutableStreamsState in
-            streamID = mutableStreamsState.allocateNewOutboundStreamID(
-                isServer: isServer,
-                logIDString: logPrefixer.logIDString,
-                isUnidirectional: isUnidirectional
-            )
-        }
-        return streamID
-    }
-
     func deliverInboundAbortedEvent(
         stream: Flow,
         error: NetworkError?,
@@ -1549,17 +1088,8 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
         stream.closed = true
         deliverDisconnectedEvent(flow: flowID, error: error, in: &eventContext)
         knownFlows.removeValue(forKey: streamID)
-        if !QUICStreamInstance.isValid(isServer: self.isServer, streamID: streamID) {
-            self.withMutableQUICStreams(unidirectional: streamID.isUnidirectional) { $0.decrementActiveStreams() }
-        }
         self.coreReturnStreamCredit(streamID)
     }
-}
-
-// MARK: Flow Control - Inbound Frame Processing
-
-@available(Network 0.1.0, *)
-extension QUICConnection {
 }
 
 // MARK: Flow Control - Outbound Frame Processing
@@ -1751,51 +1281,6 @@ extension QUICConnection {
     }
 }
 
-// MARK: Inbound stream creation
-
-@available(Network 0.1.0, *)
-extension QUICConnection {
-
-    // Support QUICStreamIDState being ~Copyable
-    func checkInboundStreamID(
-        _ streamID: QUICStreamID,
-        server: Bool,
-        in eventContext: inout NetworkContext.EventContext
-    )
-        -> (valid: Bool, checkZombie: Bool)
-    {
-        if streamID.isBidirectional {
-            return bidirectionalStreams.checkInboundStreamID(
-                streamID,
-                server: server,
-                connection: self,
-                in: &eventContext
-            )
-        } else {
-            return unidirectionalStreams.checkInboundStreamID(
-                streamID,
-                server: server,
-                connection: self,
-                in: &eventContext
-            )
-        }
-    }
-
-    // Support QUICStreamIDState being ~Copyable
-    func nextInboundStreamID(isBidirectional: Bool) -> QUICStreamID? {
-        isBidirectional
-            ? bidirectionalStreams.nextInboundStreamID
-            : unidirectionalStreams.nextInboundStreamID
-    }
-
-    // Support QUICStreamIDState being ~Copyable
-    func largestOutboundStreamID(isBidirectional: Bool) -> QUICStreamID? {
-        isBidirectional
-            ? bidirectionalStreams.largestOutboundStreamID
-            : unidirectionalStreams.largestOutboundStreamID
-    }
-}
-
 // MARK: Datagram flow handling
 
 @available(Network 0.1.0, *)
@@ -1839,35 +1324,6 @@ extension QUICConnection {
     }
 }
 
-// MARK: Frame Processing helpers
-
-@available(Network 0.1.0, *)
-extension QUICConnection {
-}
-
-// MARK: Frame Acknowledgement helpers
-@available(Network 0.1.0, *)
-extension QUICConnection {
-
-    func streamFromStreamID(_ id: UInt64) -> QUICStreamInstance? {
-        guard let streamID = QUICStreamID(id) else {
-            return nil
-        }
-        return streamFromStreamID(streamID)
-    }
-
-    func streamFromStreamID(_ streamID: QUICStreamID) -> QUICStreamInstance? {
-        let knownFlowID = knownFlows[streamID]
-        guard let flowID = knownFlowID else {
-            return nil
-        }
-        guard let stream = flow(for: flowID) else {
-            return nil
-        }
-        return stream
-    }
-}
-
 // MARK: Connection Idle / Reuse
 
 @available(Network 0.1.0, *)
@@ -1884,7 +1340,7 @@ extension QUICConnection {
             datagramFlow.applicationMarkedIdle = true
             flowsHaveEverMarkedIdle = true
         }
-        checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
+        checkConnectionIdle(in: &eventContext)
     }
 
     fileprivate func handleConnectionReusedForFlow(
@@ -1896,10 +1352,10 @@ extension QUICConnection {
         } else if let datagramFlow = secondaryFlow(for: flowID) {
             datagramFlow.applicationMarkedIdle = false
         }
-        checkConnectionIdle(unackedPacketCount: 0, in: &eventContext)
+        checkConnectionIdle(in: &eventContext)
     }
 
-    fileprivate func connectionIsIdleForAllStreams(unackedPacketCount: Int) -> Bool {
+    fileprivate func connectionIsIdleForAllStreams() -> Bool {
         // Fast exit if no flow has marked idle
         guard flowsHaveEverMarkedIdle else {
             return false
@@ -1929,7 +1385,7 @@ extension QUICConnection {
         return self.coreBox?.core.isQuiescent ?? true
     }
 
-    func checkConnectionIdle(unackedPacketCount: Int, in eventContext: inout NetworkContext.EventContext) {
+    func checkConnectionIdle(in eventContext: inout NetworkContext.EventContext) {
         // If no flow has ever been marked idle, `connectionIsIdleForAllStreams`
         // can only return false, and since `path.reportedIdleEvent` is only
         // ever set inside this function, no path can have it set either.
@@ -1937,7 +1393,7 @@ extension QUICConnection {
         guard flowsHaveEverMarkedIdle else {
             return
         }
-        let isIdle = connectionIsIdleForAllStreams(unackedPacketCount: unackedPacketCount)
+        let isIdle = connectionIsIdleForAllStreams()
         for path in multiplexingPaths.values {
             // A path with PATH_CHALLENGE or PATH_RESPONSE to send isn't idle either.
             let corePathID = self.corePathIDs[path.pathIdentifier]
@@ -2002,18 +1458,6 @@ extension QUICConnection {
         self.coreHandleApplicationEvent(quicEvent, in: &eventContext)
         return .consumed
     }
-}
-
-// MARK: Stats Proccesing
-
-@available(Network 0.1.0, *)
-extension QUICConnection {
-}
-
-// MARK: Path Challenge processing
-
-@available(Network 0.1.0, *)
-extension QUICConnection {
 }
 
 #else

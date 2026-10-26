@@ -73,29 +73,6 @@ package enum PacketKeyState: Int, CaseIterable, CustomStringConvertible, Compara
     }
 }
 
-package enum PacketBuilderError: Int, Error {
-    case argumentValidationFailed
-    case bufferTooShort
-    case frameError
-    case tokenLengthTooBig
-    case noPayloadsWritten
-
-    package func description() -> String {
-        switch self {
-        case .argumentValidationFailed:
-            return "Argument validation failed"
-        case .bufferTooShort:
-            return "Buffer too short"
-        case .frameError:
-            return "Frame error"
-        case .tokenLengthTooBig:
-            return "Token length too big"
-        case .noPayloadsWritten:
-            return "No payloads written"
-        }
-    }
-}
-
 @available(Network 0.1.0, *)
 package enum QUICPacketFormatsError: Int, Error {
     case serializationBufferTooSmall
@@ -111,30 +88,6 @@ package enum SecFramerError: Int, Error {
     case openFailed
 }
 
-@available(Network 0.1.0, *)
-package enum FrameParseError: Error {
-    case parsingError
-    case invalidType(UInt64)
-    case invalidValue(String)
-
-    package func description() -> String {
-        switch self {
-        case .parsingError:
-            return "Frame Parse: parsing error"
-        case .invalidType(let type):
-            return "Frame Parse: invalid type: \(type)"
-        case .invalidValue(let value):
-            return "Frame Parse: invalid value: \(value)"
-        }
-    }
-}
-
-@available(Network 0.1.0, *)
-package enum FrameWriteError: Int, Error {
-    case smallBuffer
-    case invalidTypeForSend
-}
-
 // QUICError is a common type for representing all exceptions thrown by the QUIC stack
 // More granular error types are not used as embedded swift does not support untyped throws
 
@@ -142,13 +95,10 @@ package enum FrameWriteError: Int, Error {
 @available(Network 0.1.0, *)
 package enum QUICError: Error {
     case packet(QUICPacketError)
-    case packetBuilder(PacketBuilderError)
     case packetFormats(QUICPacketFormatsError)
     #if IMPORT_CRYPTO || IMPORT_SWIFTTLS  // Keep in sync with protector scoping
     case protector(SecFramerError)
     #endif
-    case frameParse(FrameParseError)
-    case frameWrite(FrameWriteError)
     case transportParametersDecode(TransportParameterDecodeErrors)
     case transportParametersEncode(TransportParameterEncodeErrors)
     case connectionID(QUICConnectionIDError)
@@ -157,18 +107,12 @@ package enum QUICError: Error {
         switch self {
         case .packet(let subtype):
             return (subtype.rawValue, "QUIC Packet Exception")
-        case .packetBuilder(let subtype):
-            return (subtype.rawValue, subtype.description())
         case .packetFormats(let subtype):
             return (subtype.rawValue, "Packet Formats Exception")
         #if IMPORT_CRYPTO || IMPORT_SWIFTTLS  // Keep in sync with protector scoping
         case .protector(let subtype):
             return (subtype.rawValue, "QUIC Protector Exception")
         #endif
-        case .frameParse(let subtype):
-            return (Int.min, subtype.description())
-        case .frameWrite(let subtype):
-            return (subtype.rawValue, "QUIC Frame Write Exception")
         case .transportParametersDecode(let subtype):
             return (subtype.rawValue, "QUIC Transport Parameters Decode Exception")
         case .transportParametersEncode(let subtype):

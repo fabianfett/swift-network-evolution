@@ -205,9 +205,6 @@ public struct QUICConnectionProtocol: NetworkProtocol {
             }
         }
 
-        /// Deprecated, has no effect: `QUICConnectionCore` runs every connection.
-        @_spi(ProtocolProvider) public var driver: QUICConnectionDriver = .automatic
-
         internal var _idleTimeout: NetworkDuration = .seconds(30)
         public var idleTimeout: NetworkDuration {
             get { self._idleTimeout }

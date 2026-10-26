@@ -36,7 +36,6 @@ internal import os
 @available(Network 0.1.0, *)
 struct Packet: ~Copyable {
     static let longHeaderBaseSize = 5
-    static let shortHeaderBaseSize = 1
 
     private(set) var destinationConnectionID: QUICConnectionID?
     private(set) var sourceConnectionID: QUICConnectionID?

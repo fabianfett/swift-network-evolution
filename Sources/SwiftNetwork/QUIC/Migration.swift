@@ -35,7 +35,7 @@ extension QUICConnection {
         switch event {
         case .available:
             if !path.isRouteEstablished {
-                path.set(interface: nil, priority: 0, isInitial: false)
+                path.set(interface: nil, isInitial: false)
                 path.changeState(to: .routeAvailable)
                 if self.state == .connected {
                     log.debug("Bringing up path \(pathID.description)")

@@ -84,15 +84,6 @@ enum QUICSendStreamState: UInt8, CaseIterable, CustomStringConvertible {
         _ = isValidStateChange(logIDString: logIDString, to: newState)
         self = newState
     }
-
-    var dataHasAlreadyBeenSent: Bool {
-        switch self {
-        case .dataSent, .resetSent, .dataReceived, .resetReceived:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 // The send-state enum of a stream.
@@ -157,33 +148,6 @@ enum QUICReceiveStreamState: CaseIterable, CustomStringConvertible {
         #endif
         _ = isValidStateChange(logIDString: logIDString, to: newState)
         self = newState
-    }
-
-    var dataHasAlreadyBeenReceived: Bool {
-        switch self {
-        case .dataReceived, .resetReceived, .dataRead, .resetRead:
-            return true
-        default:
-            return false
-        }
-    }
-
-    var isReceivingData: Bool {
-        switch self {
-        case .receive, .sizeKnown:
-            return true
-        default:
-            return false
-        }
-    }
-
-    var isSizeKnown: Bool {
-        switch self {
-        case .invalid, .receive:
-            return false
-        default:
-            return true
-        }
     }
 }
 

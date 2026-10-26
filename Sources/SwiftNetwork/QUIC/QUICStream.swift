@@ -35,37 +35,15 @@ internal import os
 #endif
 
 // MARK: QUIC StreamID state
-// Keeps track of the QUICStreamID state for local and remote uni/bidi streams
+// The streams of one direction the application opened that wait for a stream ID: until the
+// handshake completes, or until the peer allows more streams.
 @available(Network 0.1.0, *)
 struct QUICStreamIDState: ~Copyable {
     let logContext: String
-    let streamType: QUICStreamType
-    var remoteMaxStreams: Int = 0
-    var previousRemoteMaxStreams: Int = 0
-    var localMaxStreams: Int = 0
-    var allocatedStreamCount: Int = 0
-    var largestOutboundStreamID: QUICStreamID?
-    var nextInboundStreamID: QUICStreamID?
-    var remoteMaxStreamID: QUICStreamID?
-    var localMaxStreamID: QUICStreamID?
-    private(set) var activeStreams: Int = 0
     private(set) var pendingStartStreams: [QUICStreamInstance] = []
 
     init(_ type: QUICStreamType) {
-        self.streamType = type
-        self.logContext = streamType == .unidirectional ? "unidirectional" : "bidirectional"
-    }
-
-    mutating func incrementActiveStreams() {
-        activeStreams += 1
-    }
-
-    mutating func decrementActiveStreams() {
-        activeStreams = activeStreams > 0 ? activeStreams - 1 : 0
-    }
-
-    func activeStreamsRemaining() -> Int {
-        activeStreams
+        self.logContext = type == .unidirectional ? "unidirectional" : "bidirectional"
     }
 
     mutating func addPending(_ stream: QUICStreamInstance) {
@@ -112,199 +90,6 @@ struct QUICStreamIDState: ~Copyable {
             stream.pendingStart = false
         }
     }
-
-    mutating func allocateNewOutboundStreamID(
-        isServer: Bool,
-        logIDString: String,
-        isUnidirectional: Bool
-    ) -> QUICStreamID? {
-        let newStreamID = QUICStreamID.nextAvailableStreamID(
-            allocatedStreamCount: allocatedStreamCount,
-            remoteMaxStreams: remoteMaxStreams,
-            remoteMaxStreamID: remoteMaxStreamID,
-            server: isServer,
-            logIDString: logIDString,
-            isUnidirectional: isUnidirectional
-        )
-        guard let newStreamID else {
-            return nil
-        }
-
-        let (newValue, overflow) = self.allocatedStreamCount.addingReportingOverflow(1)
-        guard !overflow else {
-            return nil
-        }
-        self.allocatedStreamCount = newValue
-
-        self.largestOutboundStreamID = newStreamID
-        #if !DisableDebugLogging
-        let logContext = self.logContext
-        Logger.proto.debug(
-            "\(logIDString) \(logContext) allocated new stream ID \(newStreamID)"
-        )
-        #endif
-        return newStreamID
-    }
-
-    func checkInboundStreamID(
-        _ streamID: QUICStreamID,
-        server isServer: Bool,
-        connection: QUICConnection,
-        in eventContext: inout NetworkContext.EventContext
-    ) -> (valid: Bool, checkZombie: Bool) {
-
-        guard let nextInboundStreamID else {
-            connection.log.fault("nextInboundStreamID is invalid")
-            connection.close(with: .internalError, "inconsistent next inbound stream ID", in: &eventContext)
-            return (valid: false, checkZombie: false)
-        }
-
-        if streamID.isInitiatedBy(server: isServer) {
-            // We're handling a new inbound stream, but it's not a Stream ID that
-            // the peer should have opened. Check if it's a stream we already closed?
-            if let largestOutboundStreamID = self.largestOutboundStreamID,
-                streamID <= largestOutboundStreamID
-            {
-                connection.log.info(
-                    "[S\(streamID)] already closed (last \(logContext) \(largestOutboundStreamID))"
-                )
-                return (valid: false, checkZombie: true)
-            } else {
-                connection.log.error(
-                    "Peer is attempting to open an invalid stream (\(streamID)); our role is \(isServer ? "server" : "client") (last \(logContext) \(largestOutboundStreamID?.description ?? "nil"))"
-                )
-                connection.close(with: .streamStateError, "invalid stream ID", in: &eventContext)
-
-                return (valid: false, checkZombie: false)
-            }
-        }
-
-        if newStreamIDsAreBlocked(streamID) {
-            connection.log.error(
-                "Stream ID \(streamID) exceeded the maximum allowed"
-            )
-            connection.close(with: .streamLimitError, "exceeded maximum stream ID", in: &eventContext)
-
-            return (valid: false, checkZombie: false)
-        }
-
-        // Check if the stream is already closed.  If we got here, it was
-        // because the lookup failed.  Don't re-create streams that are
-        // already closed.
-        if streamID < nextInboundStreamID {
-            connection.log.info(
-                "Not recreating closed stream (next \(logContext) \(nextInboundStreamID))"
-            )
-            return (valid: false, checkZombie: true)
-        }
-        return (valid: true, checkZombie: false)
-    }
-
-    // Set window to a non-zero value to check if there are room for N more streamIDs
-    func newStreamIDsAreBlocked(
-        _ streamID: QUICStreamID,
-        server: Bool = false,
-        window: Int = 0
-    ) -> Bool {
-        if localMaxStreams == 0 {
-            return true
-        }
-
-        let compareMaxStreamID: QUICStreamID
-        if window == 0 {
-            guard let localMaxStreamID else {
-                // The local Max Stream ID is yet to be determined, so new IDs are blocked
-                return true
-            }
-            compareMaxStreamID = localMaxStreamID
-        } else {
-            guard localMaxStreams > window else {
-                // Local max streams is less than the entire window, so new IDs are blocked
-                return true
-            }
-
-            let adjustedMaxStreams = localMaxStreams - window
-
-            let adjustedMaxStreamID: QUICStreamID?
-            if streamType == .unidirectional {
-                adjustedMaxStreamID = QUICStreamID.computeRemoteMaxStreamIDUnidirectional(
-                    server: server,
-                    streams: UInt64(adjustedMaxStreams)
-                )
-            } else {
-                adjustedMaxStreamID = QUICStreamID.computeRemoteMaxStreamIDBidirectional(
-                    server: server,
-                    streams: UInt64(adjustedMaxStreams)
-                )
-            }
-
-            guard let adjustedMaxStreamID else {
-                return true
-            }
-            compareMaxStreamID = adjustedMaxStreamID
-        }
-
-        if streamID >= compareMaxStreamID {
-            return true
-        }
-
-        return false
-    }
-
-    mutating func resetStreamsState(
-        nextInboundStreamID: QUICStreamID,
-        largestOutboundStreamID: QUICStreamID
-    ) {
-        self.allocatedStreamCount = 0
-        self.nextInboundStreamID = nextInboundStreamID
-        if self.largestOutboundStreamID == nil {
-            self.largestOutboundStreamID = largestOutboundStreamID
-        }
-    }
-
-    mutating func updateRemoteMaxStreams(server: Bool, newMaxStreams: Int, logIDString: String) {
-        remoteMaxStreams = newMaxStreams
-        if streamType == .unidirectional {
-            remoteMaxStreamID = QUICStreamID.computeRemoteMaxStreamIDUnidirectional(
-                server: server,
-                streams: UInt64(newMaxStreams)
-            )
-        } else {
-            remoteMaxStreamID = QUICStreamID.computeRemoteMaxStreamIDBidirectional(
-                server: server,
-                streams: UInt64(newMaxStreams)
-            )
-        }
-        #if !DisableDebugLogging
-        let logContext = self.logContext
-        let remoteMaxStreamID = self.remoteMaxStreamID
-        Logger.proto.debug(
-            "\(logIDString) \(logContext) Got newMaxStreams=\(newMaxStreams) which gives remoteMaxStreamID=\(remoteMaxStreamID?.description ?? "unknown")"
-        )
-        #endif
-    }
-
-    mutating func updateLocalMaxStreams(server: Bool, newMaxStreams: Int, logIDString: String) {
-        localMaxStreams = newMaxStreams
-        if streamType == .unidirectional {
-            localMaxStreamID = QUICStreamID.computeRemoteMaxStreamIDUnidirectional(
-                server: server,
-                streams: UInt64(newMaxStreams)
-            )
-        } else {
-            localMaxStreamID = QUICStreamID.computeRemoteMaxStreamIDBidirectional(
-                server: server,
-                streams: UInt64(newMaxStreams)
-            )
-        }
-        #if !DisableDebugLogging
-        let logContext = self.logContext
-        let localMaxStreamID = self.localMaxStreamID
-        Logger.proto.debug(
-            "\(logIDString) \(logContext) Got newMaxStreams=\(newMaxStreams) which gives localMaxStreamID=\(localMaxStreamID?.description ?? "unknown")"
-        )
-        #endif
-    }
 }
 
 // MARK: QUIC Stream
@@ -341,12 +126,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         _modify { yield &state.send }
     }
 
-    @inline(always)
-    var finalSize: UInt64? {
-        get { state.finalSize }
-        set { state.finalSize = newValue }
-    }
-
     /// The application error code for the inbound (receive) direction.
     ///
     /// Used for the `STOP_SENDING` frame.
@@ -373,17 +152,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         BaseOutboundStreamLinkage(quicStream: self)
     }
 
-    // Have sent DATA_BLOCKED for the stream without an increase
-    var hasSentDataBlocked: Bool {
-        get { flags.contains(.hasSentDataBlocked) }
-        set {
-            if newValue {
-                flags.insert(.hasSentDataBlocked)
-            } else {
-                flags.remove(.hasSentDataBlocked)
-            }
-        }
-    }
     fileprivate(set) var pendingStart: Bool {
         get { flags.contains(.pendingStart) }
         set { if newValue { flags.insert(.pendingStart) } else { flags.remove(.pendingStart) } }
@@ -404,27 +172,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         get { flags.contains(.unidirectional) }
         set { if newValue { flags.insert(.unidirectional) } else { flags.remove(.unidirectional) } }
     }
-    var stopSendRequested: Bool {
-        get { flags.contains(.stopSendRequested) }
-        set {
-            if newValue {
-                flags.insert(.stopSendRequested)
-            } else {
-                flags.remove(.stopSendRequested)
-            }
-        }
-    }
-    var resetSent: Bool {
-        get { flags.contains(.resetSent) }
-        set {
-            if newValue {
-                flags.insert(.resetSent)
-            }
-            // This is a trap door value: once set, it can't be unset
-        }
-    }
-
-    var pendingReportReady: Bool { flags.contains(.pendingReportReady) }
     var receivedStopSending: Bool {
         get { flags.contains(.receivedStopSending) }
         set {
@@ -439,15 +186,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         set {
             if newValue {
                 flags.insert(.resetReceived)
-            }
-            // This is a trap door value: once set, it can't be unset
-        }
-    }
-    var hasAdvertisedMaxStreamData: Bool {
-        get { flags.contains(.hasAdvertisedMaxStreamData) }
-        set {
-            if newValue {
-                flags.insert(.hasAdvertisedMaxStreamData)
             }
             // This is a trap door value: once set, it can't be unset
         }
@@ -541,12 +279,6 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         parent.coreAfterUpdate(in: &eventContext)
     }
 
-    var isOpen: Bool {
-
-        !(self.pendingStart || self.closed
-            || (self.send.state == .invalid && self.receive.state == .invalid))
-    }
-
     var streamType: QUICStreamType? { self.streamID?.quicStreamType }
 
     override public func upperReceiveQueueDrainedBytes(_ bytes: Int, in eventContext: inout NetworkContext.EventContext)
@@ -570,23 +302,5 @@ public final class QUICStreamInstance: MultiplexedStreamFlow<QUICConnection, Bas
         self.send.state.change(logIDString: logPrefix, to: .ready)
     }
 }
-
-// MARK: Utility on Stream
-
-@available(Network 0.1.0, *)
-extension QUICStreamInstance {
-    static func isValid(isServer: Bool, streamID: QUICStreamID) -> Bool {
-        if !isServer && streamID.isClientInitiated {
-            // Note that this is client reasoning about a peer streamID
-            return false
-        } else if isServer && streamID.isServerInitiated {
-            // Note that this is server reasoning about a peer streamID
-            return false
-        }
-        return true
-    }
-}
-
-// MARK: Flow Control - Limits
 
 #endif

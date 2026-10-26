@@ -93,9 +93,9 @@ final class SwiftNetworkQUICCIDTests: NetTestCase {
                     newOutboundStatelessResetToken = clientHarness.lastNewOutboundStatelessResetToken
                     if let newOutboundConnectionID {
                         expectedNewStatelessResetToken =
-                            clientInstance.remoteCIDs.find(
-                                connectionID: newOutboundConnectionID
-                            )?.token
+                            clientInstance.coreBox?.core.connectionIDs.peer.first {
+                                $0.connectionID == newOutboundConnectionID
+                            }?.token
                     }
                     XCTAssertNotNil(
                         expectedNewStatelessResetToken,
@@ -103,7 +103,7 @@ final class SwiftNetworkQUICCIDTests: NetTestCase {
                     )
 
                     expectedConnectionID = dcid
-                    expectedStatelessResetToken = clientInstance.remoteCIDs.find(connectionID: dcid)?.token
+                    expectedStatelessResetToken = clientInstance.coreBox?.core.connectionIDs.peer.first { $0.connectionID == dcid }?.token
                     XCTAssertNotNil(
                         expectedStatelessResetToken,
                         "The server's connection ID should have an associated stateless reset token"

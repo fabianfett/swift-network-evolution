@@ -52,25 +52,6 @@ public struct QLogConfiguration: CustomStringConvertible, Sendable {
     }
 }
 
-enum QLogCongestionState: String {
-    case slowStart = "slow_start"
-    case congestionAvoidance = "congestion_avoidance"
-    case applicationLimited = "application_limited"
-    case recovery
-    case cwr = "congestion_window_reduced"
-}
-
-enum QLogCongestionTrigger: String {
-    case persistentCongestion = "persistent_congestion"
-    case ecn
-}
-
-enum QLogPacketLostTrigger: String {
-    case reordering = "reordering_threshold"
-    case time = "time_threshold"
-    case pto = "pto_expired"
-}
-
 enum QLogFlowType: String {
     case client
     case server
@@ -84,85 +65,12 @@ enum QLogOwner: String {
 #if QlogOutput
 
 enum QLogPacketSentReceivedTrigger: String {
-    case retransmitReordered = "reordering_threshold"
-    case retransmitTimeout = "time_threshold"
-    case ptoProbe = "pto_expired"
-    case retransmitCrypto = "retransmit_crypto"
-    case congestionControlBandwidthProbe = "bandwidth_probe"
+    /// `QUICConnectionCore` doesn't report why it sent a packet.
     case unknown = "unknown"
 }
 
-enum QLogStreamSide: String {
-    case sending
-    case receiving
-}
-
-enum QLogStreamState: Int {
-    case idle = 0
-    case open
-    case halfClosedLocal
-    case halfClosedRemote
-    case closed
-
-    case ready
-    case send
-    case dataSent
-    case resetSent
-    case resetReceived
-
-    case receive
-    case sizeKnown
-    case dataRead
-    case resetRead
-
-    case dataReceived
-
-    case destroyed
-    case unknown
-}
-
-protocol EventProtocol {
-    func dumpData() -> [String: Any]
-}
-
 @available(Network 0.1.0, *)
-struct StreamEvent: EventProtocol {
-    let streamID: QUICStreamID
-    let streamType: QUICStreamType
-    let oldStreamState: QLogStreamState
-    let newStreamState: QLogStreamState
-    let streamSide: QLogStreamSide?
-
-    func dumpData() -> [String: Any] {
-        var data: [String: Any] = [:]
-        data["stream_id"] = QLog.wrapUInt64IfNotMax(streamID.value)
-        data["stream_type"] = streamType.description
-        data["old"] = oldStreamState.rawValue == 0 ? nil : oldStreamState.rawValue
-        data["new"] = newStreamState.rawValue == 0 ? nil : newStreamState.rawValue
-        data["stream_side"] = streamSide?.rawValue
-        return data
-    }
-}
-
-@available(Network 0.1.0, *)
-struct StreamTypeSetEvent: EventProtocol {
-    let streamID: QUICStreamID
-    let owner: QLogOwner?
-    let oldStreamType: QUICStreamType
-    let newStreamType: QUICStreamType
-
-    func dumpData() -> [String: Any] {
-        var data: [String: Any] = [:]
-        data["stream_id"] = QLog.wrapUInt64IfNotMax(streamID.value)
-        data["owner"] = owner?.rawValue
-        data["old"] = oldStreamType.description
-        data["new"] = newStreamType.description
-        return data
-    }
-}
-
-@available(Network 0.1.0, *)
-struct EventParametersSet: EventProtocol {
+struct EventParametersSet {
     let owner: QLogOwner?
     let resumptionAllowed: Bool?
     let earlyDataEnabled: Bool?
@@ -224,12 +132,8 @@ struct EventPacket {
     let packetType: PacketType
     let packetHeader: PacketHeader
     let frameList: EventFrames
-    let isCoalesced: Bool?
-    enum Trigger {
-        case sentReceivedTrigger(QLogPacketSentReceivedTrigger?)
-        case lostTrigger(QLogPacketLostTrigger?)
-    }
-    let trigger: Trigger
+    /// `nil` for a lost packet.
+    let trigger: QLogPacketSentReceivedTrigger?
 }
 
 @available(Network 0.1.0, *)
@@ -273,14 +177,7 @@ enum Event {
     case parametersSet(EventParametersSet, timestamp: NetworkDuration)
     case packetSent(EventPacket, timestamp: NetworkDuration)
     case packetReceived(EventPacket, timestamp: NetworkDuration)
-    case streamStateUpdated(StreamEvent, timestamp: NetworkDuration)
-    case metricsUpdated(EventMetrics, timestamp: NetworkDuration)
-    case congestionStateUpdated(
-        EventCongestionStateUpdated,
-        timestamp: NetworkDuration
-    )
     case packetLost(EventPacket, timestamp: NetworkDuration)
-    case streamTypeSet(StreamTypeSetEvent, timestamp: NetworkDuration)
 
     func commonEventData(timestamp: NetworkDuration) -> [Any] {
         // All timestamps and time-related values (e.g., offsets) in qlog are logged as
@@ -301,25 +198,11 @@ enum Event {
             dataContent["header"] = eventPacket.packetHeader.dumpData()
 
             dataContent["frames"] = eventPacket.frameList.dumpData()
-
-            if let coalesced = eventPacket.isCoalesced?.description {
-                dataContent["is_coalesced"] = coalesced
-            }
-
-            switch eventPacket.trigger {
-            case .sentReceivedTrigger(let trigger):
-                dataContent["trigger"] = trigger?.rawValue
-            case .lostTrigger(let trigger):
-                dataContent["trigger"] = trigger?.rawValue
-            }
+            dataContent["trigger"] = eventPacket.trigger?.rawValue
             content.append(dataContent)
             return content
 
-        case .parametersSet(let event as any EventProtocol, let timestamp),
-            .streamStateUpdated(let event as any EventProtocol, let timestamp),
-            .metricsUpdated(let event as any EventProtocol, let timestamp),
-            .congestionStateUpdated(let event as any EventProtocol, let timestamp),
-            .streamTypeSet(let event as any EventProtocol, let timestamp):
+        case .parametersSet(let event, let timestamp):
             var content: [Any] = self.commonEventData(timestamp: timestamp)
             let dataContent: [String: Any] = event.dumpData()
             content.append(dataContent)
@@ -329,14 +212,10 @@ enum Event {
 
     func category() -> String {
         switch self {
-        case .parametersSet, .packetSent,
-            .packetReceived, .streamStateUpdated:
+        case .parametersSet, .packetSent, .packetReceived:
             return "TRANSPORT"
-        case .metricsUpdated, .congestionStateUpdated,
-            .packetLost:
+        case .packetLost:
             return "RECOVERY"
-        case .streamTypeSet:
-            return "http"
         }
     }
 
@@ -348,16 +227,8 @@ enum Event {
             return "PACKET_SENT"
         case .packetReceived:
             return "PACKET_RECEIVED"
-        case .streamStateUpdated:
-            return "STREAM_STATE_UPDATED"
-        case .metricsUpdated:
-            return "METRICS_UPDATED"
-        case .congestionStateUpdated:
-            return "CONGESTION_STATE_UPDATED"
         case .packetLost:
             return "PACKET_LOST"
-        case .streamTypeSet:
-            return "STREAM_TYPE_SET"
         }
     }
 }
@@ -432,53 +303,9 @@ enum PacketType: String {
 }
 
 @available(Network 0.1.0, *)
-struct EventMetrics: EventProtocol {
-    let minRTT: NetworkDuration
-    let smoothedRTT: NetworkDuration
-    let latestRTT: NetworkDuration
-    let rttVariance: NetworkDuration
-    let ptoCount: UInt64
-    let congestionWindow: UInt64
-    let bytesInFlight: UInt64
-    let slowStartThresh: UInt64
-    let packetsInFlight: UInt64
-    let inRecovery: Bool?
-
-    func dumpData() -> [String: Any] {
-        var data: [String: Any] = [:]
-        data["min_rtt"] = QLog.wrapInt64IfZero(minRTT.milliseconds)
-        data["smoothed_rtt"] = QLog.wrapInt64IfZero(smoothedRTT.milliseconds)
-        data["latest_rtt"] = QLog.wrapInt64IfZero(latestRTT.milliseconds)
-        data["rtt_variance"] = QLog.wrapInt64IfZero(rttVariance.milliseconds)
-        data["pto_count"] = QLog.wrapUInt64IfNotMax(ptoCount)
-        data["congestion_window"] = QLog.wrapUInt64IfNotMax(congestionWindow)
-        data["bytes_in_flight"] = QLog.wrapUInt64IfNotMax(bytesInFlight)
-        data["ssthresh"] = QLog.wrapUInt64IfNotMax(slowStartThresh)
-        data["packets_in_flight"] = QLog.wrapUInt64IfNotMax(packetsInFlight)
-        data["in_recovery"] = inRecovery?.description
-        return data
-    }
-}
-
-struct EventCongestionStateUpdated: EventProtocol {
-    let oldCongestionState: QLogCongestionState?
-    let newCongestionState: QLogCongestionState?
-    let congestionStateTrigger: QLogCongestionTrigger?
-
-    func dumpData() -> [String: Any] {
-        var data: [String: Any] = [:]
-        data["old"] = oldCongestionState?.rawValue
-        data["new"] = newCongestionState?.rawValue
-        data["trigger"] = congestionStateTrigger?.rawValue
-        return data
-    }
-}
-
-@available(Network 0.1.0, *)
 final class QLog {
     private var eventsList: [Event]
     private var topLevelObject: [String: Any]
-    private var disableTimestamps: Bool = false
     private let context: NetworkContext
     private let startTime: NetworkClock.Instant
     var configuration: QLogConfiguration?
@@ -498,20 +325,6 @@ final class QLog {
         }
     }
 
-    static func wrapUInt64InStringIfNotMax(_ value: UInt64) -> String? {
-        if value == UInt64.max {
-            return nil
-        }
-        return String(value)
-    }
-
-    static func wrapInt64IfZero(_ value: Int64) -> Int64? {
-        if value == 0 {
-            return nil
-        }
-        return value
-    }
-
     static func wrapUInt64IfNotMax(_ value: UInt64) -> UInt64? {
         if value == UInt64.max {
             return nil
@@ -520,7 +333,7 @@ final class QLog {
     }
 
     private func calculateTimestamp(_ timestamp: NetworkClock.Instant) -> NetworkDuration {
-        if disableTimestamps || timestamp == .zero {
+        if timestamp == .zero {
             return .zero
         } else {
             return startTime.duration(to: timestamp)
@@ -539,8 +352,7 @@ final class QLog {
                 packetType: packetType,
                 packetHeader: header,
                 frameList: frames,
-                isCoalesced: nil,
-                trigger: .sentReceivedTrigger(.unknown)
+                trigger: .unknown
             )
             self.eventsList.append(.packetSent(packet, timestamp: timestamp))
         case .received:
@@ -548,8 +360,7 @@ final class QLog {
                 packetType: packetType,
                 packetHeader: header,
                 frameList: frames,
-                isCoalesced: nil,
-                trigger: .sentReceivedTrigger(.unknown)
+                trigger: .unknown
             )
             self.eventsList.append(.packetReceived(packet, timestamp: timestamp))
         case .lost:
@@ -557,54 +368,10 @@ final class QLog {
                 packetType: packetType,
                 packetHeader: header,
                 frameList: frames,
-                isCoalesced: nil,
-                trigger: .lostTrigger(nil)
+                trigger: nil
             )
             self.eventsList.append(.packetLost(packet, timestamp: timestamp))
         }
-    }
-
-    func streamStateUpdated(
-        stream: QUICStreamInstance,
-        oldStreamState: QLogStreamState,
-        newStreamState: QLogStreamState,
-        streamSide: QLogStreamSide?,
-        timestamp: NetworkClock.Instant
-    ) {
-        if let streamID = stream.streamID, let streamType = stream.streamType {
-            let streamEvent = StreamEvent(
-                streamID: streamID,
-                streamType: streamType,
-                oldStreamState: oldStreamState,
-                newStreamState: newStreamState,
-                streamSide: streamSide
-            )
-            let event = Event.streamStateUpdated(
-                streamEvent,
-                timestamp: calculateTimestamp(timestamp)
-            )
-            eventsList.append(event)
-        }
-    }
-
-    func logStreamTypeSet(
-        streamID: QUICStreamID,
-        owner: QLogOwner?,
-        oldStreamType: QUICStreamType,
-        newStreamType: QUICStreamType,
-        timestamp: NetworkClock.Instant
-    ) {
-        let streamTypeSetEvent = StreamTypeSetEvent(
-            streamID: streamID,
-            owner: owner,
-            oldStreamType: oldStreamType,
-            newStreamType: newStreamType
-        )
-        let event = Event.streamTypeSet(
-            streamTypeSetEvent,
-            timestamp: calculateTimestamp(timestamp)
-        )
-        eventsList.append(event)
     }
 
     public func parametersSet(
@@ -704,10 +471,6 @@ final class QLog {
 
     public func setTopLevelObjectEntry(_ key: String, to value: String) {
         self.topLevelObject[key] = value
-    }
-
-    func disableTimestamps(disableTimestamps: Bool) {
-        self.disableTimestamps = disableTimestamps
     }
 
     func dumpData(forFlowType flowType: QLogFlowType?) -> Data? {

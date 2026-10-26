@@ -20,19 +20,11 @@
 // QUICPreferences for Embedded is small subset of preferences based on what is currently used in the stack otherwise.
 struct QUICPreferences {
     static let shared = QUICPreferences()
-    let ackCompressionEnabled: Bool = true
-    let disableCachedRTT: Bool = false
     let pacePackets: Bool = false
 
-    let initialStreamReceiveSpace: Int? = nil
-    let initialConnectionReceiveSpace: Int? = nil
     let maxConcurrentStreams: Int? = nil
-    let streamMaxReceiveWindow: Int? = nil
     let initialMaxData: Int? = nil
     let initialMaxStreamBidirectionalLocalData: Int? = nil
-    let maxConnectivityProbes: Int = 3
-    let maxSentPacketsCapacity: Int = 512
-    let maxReceivedFramesCapacity: Int = 128
 
     private init() {}
 }
@@ -41,81 +33,19 @@ struct QUICPreferences {
 struct QUICPreferences: ~Copyable, Sendable {
     static let shared = QUICPreferences()
 
-    let debugEnabled: Bool
-    let disableCubic: Bool
-    let forceLEDBAT: Bool
-    let disableCachedRTT: Bool
-    let adaptiveTimeThreshold: Bool
-    let adaptivePacketThreshold: Bool
-    let enableAckFreq: Bool
     let pacePackets: Bool
-    let disableKernelPacing: Bool
-    let ackCompressionEnabled: Bool
-    let maxPacketReorderThreshold: Int
     let quiclogDirectory: String
-    let maxConnectivityProbes: Int
-    let maxSentPacketsCapacity: Int
-    let maxReceivedFramesCapacity: Int
 
     // Flow Control
-    let initialStreamReceiveSpace: Int?
-    let initialConnectionReceiveSpace: Int?
     let maxConcurrentStreams: Int?
-    let streamMaxReceiveWindow: Int?
     let initialMaxData: Int?
     let initialMaxStreamBidirectionalLocalData: Int?
 
     private init() {
-        debugEnabled = QUICPreferences.findSetting("enable_debug", defaultValue: false)
-        disableCubic = QUICPreferences.findSetting("disable_cubic", defaultValue: false)
-        forceLEDBAT = QUICPreferences.findSetting("force_ledbat", defaultValue: false)
-        disableCachedRTT = QUICPreferences.findSetting("disable_cached_rtt", defaultValue: false)
-        adaptiveTimeThreshold = QUICPreferences.findSetting(
-            "adaptive_time_thresh",
-            defaultValue: true
-        )
-        adaptivePacketThreshold = QUICPreferences.findSetting(
-            "adaptive_packet_thresh",
-            defaultValue: true
-        )
-        enableAckFreq = QUICPreferences.findSetting("enable_ack_freq", defaultValue: false)
         pacePackets = QUICPreferences.findSetting("pace_packets", defaultValue: false)
-        disableKernelPacing = QUICPreferences.findSetting(
-            "disable_kernel_pacing",
-            defaultValue: false
-        )
-        ackCompressionEnabled = QUICPreferences.findSetting(
-            "enable_ack_compression",
-            defaultValue: true
-        )
-        maxPacketReorderThreshold = QUICPreferences.findSetting(
-            "max_packet_reorder_thresh",
-            defaultValue: 20
-        )
-        maxConnectivityProbes = QUICPreferences.findSetting(
-            "max_connectivity_probes",
-            defaultValue: 3
-        )
-        maxSentPacketsCapacity = QUICPreferences.findSetting(
-            "max_sent_packets_capacity",
-            defaultValue: 512
-        )
-        maxReceivedFramesCapacity = QUICPreferences.findSetting(
-            "max_received_frames_capacity",
-            defaultValue: 128
-        )
         quiclogDirectory = QUICPreferences.findSetting("quiclog_directory", defaultValue: "")
 
         // Flow Control
-        streamMaxReceiveWindow = QUICPreferences.findSetting("stream_max_rcv_window", defaultValue: nil)
-        initialStreamReceiveSpace = QUICPreferences.findSetting(
-            "initial_stream_rcv_space",
-            defaultValue: nil
-        )
-        initialConnectionReceiveSpace = QUICPreferences.findSetting(
-            "initial_conn_rcv_space",
-            defaultValue: nil
-        )
         maxConcurrentStreams = QUICPreferences.findSetting("max_concurrent_streams", defaultValue: nil)
         initialMaxData = QUICPreferences.findSetting("initial_max_data", defaultValue: nil)
         initialMaxStreamBidirectionalLocalData = QUICPreferences.findSetting(

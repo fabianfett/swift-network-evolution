@@ -34,12 +34,6 @@ internal import Logging
 internal import os
 #endif
 
-@available(Network 0.1.0, *)
-protocol TimerUser {
-    var timerID: Timer.TimerID? { get set }
-    func timerFired(at timeNow: NetworkClock.Instant, in eventContext: inout NetworkContext.EventContext)
-}
-
 // TODO: convert timer to ~Copyable
 @available(Network 0.1.0, *)
 final class Timer: PrefixedLoggable {

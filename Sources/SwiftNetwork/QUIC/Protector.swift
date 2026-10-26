@@ -672,7 +672,6 @@ struct SecFramerChaChaPoly: ~Copyable, SecFramerProtocol {
 struct Protector: ~Copyable, PrefixedLoggable {
     var log: LogPrefixer
 
-    static let initialSecretSize = 32
     static let clientInitialLabel = "client in"
     static let serverInitialLabel = "server in"
     static let keyLabel = "quic key"

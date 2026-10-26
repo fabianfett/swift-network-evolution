@@ -53,7 +53,7 @@ final class QUICStreamTests: XCTestCase {
         }
     }
 
-    // MARK: - Sentinel-backed computed properties (finalSize, inboundApplicationError,
+    // MARK: - Sentinel-backed computed properties (inboundApplicationError,
     // outboundApplicationError, streamID)
 
     func testStreamIDDefaultsToNilBeforeSetup() {
@@ -64,29 +64,12 @@ final class QUICStreamTests: XCTestCase {
         }
     }
 
-    func testFinalSizeDefaultsToNil() {
-        XCTAssertNil(stream.finalSize)
-    }
-
     func testInboundApplicationErrorDefaultsToNil() {
         XCTAssertNil(stream.inboundApplicationError)
     }
 
     func testOutboundApplicationErrorDefaultsToNil() {
         XCTAssertNil(stream.outboundApplicationError)
-    }
-
-    func testFinalSizeRoundTrip() {
-        stream.finalSize = 123_456
-        XCTAssertEqual(stream.finalSize, 123_456)
-        stream.finalSize = nil
-        XCTAssertNil(stream.finalSize)
-    }
-
-    func testFinalSizeZeroIsNotConfusedWithNil() {
-        stream.finalSize = 0
-        XCTAssertNotNil(stream.finalSize)
-        XCTAssertEqual(stream.finalSize, 0)
     }
 
     func testInboundApplicationErrorRoundTrip() {

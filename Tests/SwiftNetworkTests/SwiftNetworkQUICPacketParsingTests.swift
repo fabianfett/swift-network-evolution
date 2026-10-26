@@ -136,7 +136,7 @@ final class SwiftNetworkQUICPacketParsingTests: NetTestCase {
                     // initial SCID (inserted first) is the one the client
                     // keeps using absent migration.
                     guard
-                        let serverCID = serverInstance.localCIDs.managedConnectionIDs.first?
+                        let serverCID = serverInstance.coreBox?.core.connectionIDs.local.first?
                             .connectionID.connectionID
                     else {
                         XCTFail("Server has no local connection IDs")
@@ -198,7 +198,7 @@ final class SwiftNetworkQUICPacketParsingTests: NetTestCase {
                     // initial SCID (inserted first) is the one the client
                     // keeps using absent migration.
                     guard
-                        let serverCID = serverInstance.localCIDs.managedConnectionIDs.first?
+                        let serverCID = serverInstance.coreBox?.core.connectionIDs.local.first?
                             .connectionID.connectionID
                     else {
                         XCTFail("Server has no local connection IDs")
