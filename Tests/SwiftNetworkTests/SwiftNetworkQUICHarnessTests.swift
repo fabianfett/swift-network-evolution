@@ -1080,6 +1080,32 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
             XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
         }
     }
+
+    /// Sending moves the loss detection deadline later; the armed timer stays, as firing early
+    /// changes nothing.
+    func testQUICTimerIsNotRearmedForLaterDeadlines() {
+        QUICTestHarness().runQUICTestOnNewStream { harness, stream in
+            let expectation = XCTestExpectation(description: "Write")
+            harness.context.async {
+                defer { expectation.fulfill() }
+                guard let client = harness.state?.clientInstance, let box = client.coreBox else {
+                    return XCTFail("No client core")
+                }
+                let rearms = client.coreTimerRearms
+                for _ in 0..<20 {
+                    XCTAssertTrue(stream.write(Array("Hello World!".utf8)))
+                }
+                XCTAssertLessThanOrEqual(client.coreTimerRearms, rearms + 1)
+                guard let armed = box.armedDeadline, let deadline = box.core.nextDeadline else {
+                    return XCTFail("No deadline")
+                }
+                XCTAssertLessThanOrEqual(armed, deadline, "armed no later than the core's deadline")
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+        }
+    }
+
+    /// A datagram flow carries as much as the datagrams the path carries once PMTUD raised them.
     func testQUICDatagramFlowsGrowWithPMTUD() {
         let clientOptions = QUICProtocol.options()
         clientOptions.connectionOptions.pmtudIgnoreCost = true
@@ -1129,11 +1155,13 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
                     guard let client = harness.state?.clientInstance, let box = client.coreBox else {
                         return XCTFail("No client core")
                     }
-                    // A delayed ACK falls due before anything else.
+                    // A delayed ACK falls due before anything else. A timer armed for an earlier
+                    // deadline would stay armed, so the timer is armed afresh for this one.
                     let deadline = client.now.advanced(by: .milliseconds(20))
                     client.fromExternal { eventContext in
                         box.core.acks[.applicationData].ackNeeded = false
                         box.core.acks[.applicationData].ackDeadline = deadline
+                        box.armedDeadline = nil
                         client.coreAfterUpdate(in: &eventContext)
                     }
                     XCTAssertEqual(box.core.nextDeadline, deadline)

@@ -799,8 +799,12 @@ extension QUICConnection {
             }
             return
         }
-        guard box.armedDeadline != deadline else { return }
+        // A timer armed no later than the deadline stays: firing early only makes the core handle a
+        // timeout that isn't due, which changes nothing, and arms it again for the real deadline.
+        // Re-arming after nearly every update, as the deadlines move on, cost more.
+        if let armed = box.armedDeadline, armed <= deadline { return }
         box.armedDeadline = deadline
+        self.coreTimerRearms &+= 1
         let now = self.now
         // Zero disarms the timer, so a deadline that already passed fires as soon as possible.
         let delay = deadline > now ? now.duration(to: deadline) : .microseconds(1)
