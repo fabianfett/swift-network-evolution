@@ -179,6 +179,13 @@ struct Statistics: ~Copyable {
         statisticsArray[key.rawValue] &+= value
     }
 
+    /// Takes the values of `statistics` from `other`.
+    mutating func copy(_ statistics: [QUICStatistic], from other: borrowing Statistics) {
+        for statistic in statistics {
+            self.statisticsArray[statistic.rawValue] = other.statisticsArray[statistic.rawValue]
+        }
+    }
+
     var connectionStatistics: [QUICStatistic: Int] {
         var dict: [QUICStatistic: Int] = [:]
         for key in QUICStatistic.allCases {

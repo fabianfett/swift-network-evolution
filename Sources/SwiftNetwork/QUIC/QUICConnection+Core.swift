@@ -774,9 +774,8 @@ extension QUICConnection {
     /// framework reads them.
     private func coreSynchronizeStatistics(in eventContext: inout NetworkContext.EventContext) {
         guard let box = self.coreBox else { return }
-        for statistic in Self.coreStatistics {
-            self.stats[statistic] = box.core.statistics[statistic]
-        }
+        // One access to each side, rather than two per statistic.
+        self.stats.copy(Self.coreStatistics, from: box.core.statistics)
         guard let path = self.currentPath else { return }
         path.spinValue = box.core.spinValue
         if box.core.peerConnectionID != path.dcid {
