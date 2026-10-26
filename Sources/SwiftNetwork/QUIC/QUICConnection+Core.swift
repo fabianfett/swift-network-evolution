@@ -158,6 +158,10 @@ extension QUICConnection {
             connectionOptions.initialMaxStreamsUnidirectional == .max
             ? UInt64(FlowControlGlobals.shared.maxConcurrentStreams)
             : connectionOptions.initialMaxStreamsUnidirectional
+        // With a concurrency limit in the options, a peer-initiated stream's slot comes back once
+        // the application closed the stream, as the classes do (`coreReturnStreamCredit`).
+        configuration.returnsStreamCreditAutomatically =
+            self.maximumConcurrentBidirectionalStreams == nil && self.maximumConcurrentUnidirectionalStreams == nil
         // As `ECN()` without options, ECN is off unless the options turn it on.
         configuration.ecnEchoEnabled = false
         if let perProtocolOptions = quicOptions.perProtocolOptions {
@@ -1193,6 +1197,7 @@ extension QUICConnection {
             if streamID.isBidirectional {
                 box.core.resetStream(id, errorCode: 0)
             }
+            self.coreReturnStreamCredit(streamID)
             return
         }
         let newStream = QUICStreamInstance(parent: self, inbound: true, in: &eventContext)
@@ -1215,6 +1220,20 @@ extension QUICConnection {
             self.stats.increment(.inboundUnidirectionalStreams)
         }
         self.log.info("Creating inbound stream \(streamID)")
+    }
+
+    /// Hands the slot of a peer-initiated stream in the stream limit back once the application
+    /// closed it, for the kinds of stream the options limit the concurrency of
+    /// (`maximumConcurrentBidirectionalStreams`, `maximumConcurrentUnidirectionalStreams`), as the
+    /// classes do. The core's limit then counts the streams the application still has open, up to
+    /// the initial limit and what the application raised it by (RFC 9000 Section 4.6).
+    func coreReturnStreamCredit(_ streamID: QUICStreamID) {
+        guard let box = self.coreBox, !streamID.isInitiatedBy(server: self.isServer) else { return }
+        let concurrency =
+            streamID.isBidirectional
+            ? self.maximumConcurrentBidirectionalStreams : self.maximumConcurrentUnidirectionalStreams
+        guard concurrency != nil else { return }
+        box.core.returnStreamCredit(forStream: streamID.value)
     }
 
     /// Moves the application's writes into the core, from `serviceStreamDataToSend`.
@@ -1308,13 +1327,17 @@ extension QUICConnection {
         self.coreAfterUpdate(in: &eventContext)
     }
 
-    /// Closes the flow of a stream the core is done with, once the application read everything.
+    /// Closes the flow of a bidirectional stream the core is done with, once the application read
+    /// everything.
+    ///
+    /// A unidirectional stream that finished stays open until the application closes it, as with
+    /// the classes: its one direction ending is no sign the application is done with it. An
+    /// application reads the FIN of a receive-only stream before it saw the stream at all, and
+    /// closing the flow then loses what it read.
     private func coreCloseStreamIfDone(_ stream: QUICStreamInstance, in eventContext: inout NetworkContext.EventContext)
     {
-        guard !stream.closed else { return }
-        let readDone =
-            stream.unidirectional && stream.streamID?.isSendOnly(server: self.isServer) == true
-            || stream.readClosed || (stream.markedInboundFINOnFrame && stream.upperReceiveQueue.isEmpty)
+        guard !stream.closed, !stream.unidirectional else { return }
+        let readDone = stream.readClosed || (stream.markedInboundFINOnFrame && stream.upperReceiveQueue.isEmpty)
         if stream.coreStreamClosed && readDone {
             stream.close(errorCode: nil, in: &eventContext)
         } else if stream.peerAcknowledgedFIN && readDone {

@@ -108,6 +108,45 @@ final class QUICConnectionCoreAdapterTests: XCTestCase {
         XCTAssertNil(pair.client.openStream(bidirectional: true))
     }
 
+    /// A core that leaves stream credit to its driver keeps a finished peer stream's slot until
+    /// the driver hands it back (RFC 9000 Section 4.6).
+    func testTheDriverHandsBackStreamCredit() throws {
+        for automatic in [true, false] {
+            var serverConfiguration = Self.configuration()
+            serverConfiguration.initialMaxStreamsUnidirectional = 1
+            serverConfiguration.returnsStreamCreditAutomatically = automatic
+            var pair = LockstepPair(serverConfiguration: serverConfiguration)
+            pair.exchange()
+            let streamID = try XCTUnwrap(pair.client.openStream(bidirectional: false))
+            pair.client.write([UInt8]("GET".utf8).span.bytes, to: streamID, fin: true)
+            pair.exchange()
+            guard var server = pair.server.take() else { return XCTFail("No server") }
+            var finished = false
+            _ = server.read(from: streamID) { bytes, isFinished in
+                finished = isFinished
+                return (bytes.byteCount, ())
+            }
+            XCTAssertTrue(finished)
+            pair.server = consume server
+            pair.exchange()
+            XCTAssertEqual(pair.client.peerMaxStreams(bidirectional: false), automatic ? 2 : 1, "automatic: \(automatic)")
+            guard !automatic else { continue }
+            XCTAssertNil(pair.client.openStream(bidirectional: false))
+
+            guard var server = pair.server.take() else { return XCTFail("No server") }
+            // Only a stream the peer opened has a slot to hand back.
+            server.returnStreamCredit(forStream: 3)
+            server.returnStreamCredit(forStream: 6)
+            XCTAssertEqual(server.localMaxStreams(bidirectional: false), 1)
+            server.returnStreamCredit(forStream: streamID)
+            XCTAssertEqual(server.localMaxStreams(bidirectional: false), 2)
+            pair.server = consume server
+            pair.exchange()
+            XCTAssertEqual(pair.client.peerMaxStreams(bidirectional: false), 2)
+            XCTAssertNotNil(pair.client.openStream(bidirectional: false))
+        }
+    }
+
     func testAConnectionIsQuiescentOnceEverythingIsAcknowledged() throws {
         var pair = LockstepPair()
         pair.exchange()

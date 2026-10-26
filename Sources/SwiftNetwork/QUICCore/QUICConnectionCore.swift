@@ -36,6 +36,10 @@ public struct QUICConnectionCore: ~Copyable {
         public var initialMaxStreamDataUnidirectional: UInt64 = 256 * 1024
         public var initialMaxStreamsBidirectional: UInt64 = 100
         public var initialMaxStreamsUnidirectional: UInt64 = 100
+        /// Whether the core hands back a peer-initiated stream's slot in the stream limit by itself,
+        /// once the stream is done (RFC 9000 Section 4.6). Otherwise the driver does, with
+        /// ``returnStreamCredit(forStream:)``, when the application is done with the stream.
+        public var returnsStreamCreditAutomatically = true
         /// Zero disables the idle timeout on our side (RFC 9000 Section 10.1).
         public var maxIdleTimeout: NetworkDuration = .seconds(30)
         /// Sends a PING once nothing arrived for this long, to keep the connection and the path
@@ -440,7 +444,8 @@ public struct QUICConnectionCore: ~Copyable {
         self.streams = CoreStreamMap(
             isServer: isServer,
             localMaxStreamsBidirectional: configuration.initialMaxStreamsBidirectional,
-            localMaxStreamsUnidirectional: configuration.initialMaxStreamsUnidirectional
+            localMaxStreamsUnidirectional: configuration.initialMaxStreamsUnidirectional,
+            returnsStreamCreditAutomatically: configuration.returnsStreamCreditAutomatically
         )
         self.receiveMaxData = configuration.initialMaxData
         self.addressValidated = !isServer
@@ -842,6 +847,17 @@ public struct QUICConnectionCore: ~Copyable {
         self.streams.raiseLocalMaxStreams(to: maximum, bidirectional: bidirectional)
     }
 
+    /// Hands the slot of the peer-initiated stream `id` in our stream limit back, for a core that
+    /// doesn't do so by itself (``Configuration/returnsStreamCreditAutomatically``). The limit
+    /// grows by one, and MAX_STREAMS goes out once half the initial limit came back (RFC 9000
+    /// Section 4.6). Call it once per stream, whether or not the core still has the stream.
+    public mutating func returnStreamCredit(forStream id: UInt64) {
+        guard !self.streams.returnsStreamCreditAutomatically, !self.isClosingOrDraining,
+            !self.streams.isLocal(id), self.streams.wasOpenedByPeer(id)
+        else { return }
+        self.streams.returnStreamCredit(id)
+    }
+
     // MARK: Datagrams
 
     /// The largest payload ``sendDatagram(_:)`` accepts: what fits a 1-RTT packet and the peer's
@@ -907,13 +923,15 @@ public struct QUICConnectionCore: ~Copyable {
     mutating func storeOrRemove(_ stream: consuming CoreStream) {
         var stream = stream
         let id = stream.id
-        if !stream.creditReturned && !self.streams.isLocal(id) && stream.isDoneForStreamCredit {
+        if self.streams.returnsStreamCreditAutomatically && !stream.creditReturned && !self.streams.isLocal(id)
+            && stream.isDoneForStreamCredit
+        {
             stream.creditReturned = true
             self.streams.returnStreamCredit(id)
         }
         if stream.isClosed {
             self.events.append(.streamClosed(id))
-            if !stream.creditReturned {
+            if self.streams.returnsStreamCreditAutomatically && !stream.creditReturned {
                 self.streams.returnStreamCredit(id)
             }
             // The caller may or may not have taken the stream out of the map.

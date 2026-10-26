@@ -976,6 +976,15 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         )
     }
 
+    func testQUICUnidirectionalStreamHeldUntilTheApplicationClosesIt() {
+        QUICTestHarness().runQUICUnidirectionalStreamHeldUntilTheApplicationClosesIt()
+    }
+
+    /// The core does what the classes do.
+    func testQUICUnidirectionalStreamHeldUntilTheApplicationClosesItLegacy() {
+        QUICTestHarness(driver: .legacy).runQUICUnidirectionalStreamHeldUntilTheApplicationClosesIt()
+    }
+
     func testQUICHelloWorldUnidirectionalServerInitiated() {
         // Make sure that the server is able to initiate a outbound unidirectional stream to the client
         QUICTestHarness().runQUICServerInitiatedUnidirectionalStreams(

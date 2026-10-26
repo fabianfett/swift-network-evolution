@@ -152,12 +152,20 @@ struct CoreStreamMap {
     var advertisedMaxStreamsUnidirectional: UInt64
     private let initialLocalMaxStreamsBidirectional: UInt64
     private let initialLocalMaxStreamsUnidirectional: UInt64
+    /// Whether the map hands back stream credit as streams finish, rather than the driver.
+    let returnsStreamCreditAutomatically: Bool
     /// How far the application raised the limits on the peer's streams.
     private var raisedLocalMaxStreamsBidirectional: UInt64 = 0
     private var raisedLocalMaxStreamsUnidirectional: UInt64 = 0
 
-    init(isServer: Bool, localMaxStreamsBidirectional: UInt64, localMaxStreamsUnidirectional: UInt64) {
+    init(
+        isServer: Bool,
+        localMaxStreamsBidirectional: UInt64,
+        localMaxStreamsUnidirectional: UInt64,
+        returnsStreamCreditAutomatically: Bool
+    ) {
         self.isServer = isServer
+        self.returnsStreamCreditAutomatically = returnsStreamCreditAutomatically
         self.nextLocalBidirectional = isServer ? 1 : 0
         self.nextLocalUnidirectional = isServer ? 3 : 2
         self.localMaxStreamsBidirectional = localMaxStreamsBidirectional
@@ -257,6 +265,12 @@ struct CoreStreamMap {
         return index < (Self.isBidirectional(id) ? self.remoteOpenedBidirectional : self.remoteOpenedUnidirectional)
     }
 
+    /// Whether the peer opened stream `id`.
+    func wasOpenedByPeer(_ id: UInt64) -> Bool {
+        guard !self.isLocal(id) else { return false }
+        return id / 4 < (Self.isBidirectional(id) ? self.remoteOpenedBidirectional : self.remoteOpenedUnidirectional)
+    }
+
     /// Whether a frame for local stream `id` refers to a stream we never opened.
     func isUnopenedLocal(_ id: UInt64) -> Bool {
         guard self.isLocal(id) else { return false }
@@ -285,7 +299,7 @@ struct CoreStreamMap {
     /// Forgets a closed stream, and hands back its slot in the stream limit if that didn't happen yet.
     mutating func remove(_ id: UInt64) {
         guard let stream = self.streams.removeValue(forKey: id) else { return }
-        if !stream.creditReturned {
+        if self.returnsStreamCreditAutomatically && !stream.creditReturned {
             self.returnStreamCredit(id)
         }
     }

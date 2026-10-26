@@ -1100,11 +1100,9 @@ extension QUICConnectionCore {
                     self.confirmHandshake()
                 }
             case .failed(let code):
-                self.closeWithError(
-                    CoreTransportError.cryptoError,
-                    reason: "TLS handshake failed (\(code))",
-                    now: now
-                )
+                // The reason the classes give, which applications match on.
+                self.log.error("TLS handshake failed (\(code))")
+                self.closeWithError(CoreTransportError.cryptoError, reason: "TLS error", now: now)
             }
         }
     }

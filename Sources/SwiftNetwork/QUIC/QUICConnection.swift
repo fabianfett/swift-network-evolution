@@ -5263,6 +5263,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
             if !QUICStreamInstance.isValid(isServer: self.isServer, streamID: streamID) {
                 self.withMutableQUICStreams(unidirectional: streamID.isUnidirectional) { $0.decrementActiveStreams() }
             }
+            self.coreReturnStreamCredit(streamID)
             return
         }
         if let frameArray = stream.dequeueReassembledData(connection: self) {

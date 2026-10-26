@@ -517,10 +517,15 @@ class QUICTestHarness {
         )
     }
 
+    /// Opens a stream and waits for it to connect. With `expectPending`, the peer's stream limit
+    /// is expected to hold the stream back: it doesn't connect within `pendingTimeout`, and is
+    /// returned anyway, to connect later.
     func createNewStream(
         identifier: String,
         quicOptions: ProtocolOptions<QUICProtocol> = QUICProtocol.options(),
-        serverInitiated: Bool = false
+        serverInitiated: Bool = false,
+        expectPending: Bool = false,
+        pendingTimeout: TimeInterval = 0.5
     ) -> StreamUpperHarness<TestStreamLinkageFamily>? {
         var handlerInstance: QUICConnection?
         var handlerListener: TestStreamListenerLinkage?
@@ -588,12 +593,17 @@ class QUICTestHarness {
                 }
             }
         }
-        wait(for: [newStreamExpectation], timeout: 5.0)
+        if expectPending {
+            wait(for: [newStreamExpectation], timeout: pendingTimeout, expectTimeout: true)
+            XCTAssertFalse(upperHarnessConnected, "New QUIC stream became ready beyond the stream limit")
+        } else {
+            wait(for: [newStreamExpectation], timeout: 5.0)
 
-        XCTAssertTrue(upperHarnessConnected, "New QUIC stream failed to become ready")
+            XCTAssertTrue(upperHarnessConnected, "New QUIC stream failed to become ready")
 
-        guard upperHarnessConnected else {
-            return nil
+            guard upperHarnessConnected else {
+                return nil
+            }
         }
 
         if let upperHarness {
@@ -2292,6 +2302,92 @@ class QUICTestHarness {
         )
 
         Logger.test.debug("Test phase: Termination")
+        stop()
+    }
+
+    /// The server lets the client open one unidirectional stream at a time
+    /// (`maximumConcurrentUnidirectionalStreams`). A stream the server read to its FIN stays open,
+    /// and keeps its slot in the limit, until the server's application closes it: then a second
+    /// stream gets its ID.
+    func runQUICUnidirectionalStreamHeldUntilTheApplicationClosesIt(timeout: TimeInterval = 5.0) {
+        let clientOptions = QUICProtocol.options()
+        clientOptions.isUnidirectional = true
+        let serverOptions = QUICProtocol.options()
+        serverOptions.isUnidirectional = true
+        serverOptions.modifyConnectionOptions {
+            $0.initialMaxStreamsUnidirectional = 1
+            $0.maximumConcurrentUnidirectionalStreams = 1
+        }
+        XCTAssertNoThrow(try quicHandshake(timeout: timeout, clientOptions: clientOptions, serverOptions: serverOptions))
+        let payload = Array("Hello World!".utf8)
+
+        guard let firstStream = createNewStream(identifier: "C1", quicOptions: clientOptions) else { return }
+        let writeExpectation = XCTestExpectation(description: "Wait for the client's write")
+        context.async {
+            XCTAssertTrue(firstStream.write(payload, sendFIN: true))
+            writeExpectation.fulfill()
+        }
+        wait(for: [writeExpectation], timeout: timeout)
+
+        // The server reads the stream to its FIN.
+        var received: [UInt8] = []
+        var serverStream: StreamUpperHarness<TestStreamLinkageFamily>?
+        let readExpectation = XCTestExpectation(description: "Wait for the server to read the FIN")
+        func readOnServer() {
+            if serverStream == nil, let harness = self.state?.serverHarness.upperHarnesses.first,
+                harness.receivedConnected
+            {
+                serverStream = harness
+            }
+            if let serverStream {
+                if let bytes = serverStream.read() {
+                    received += bytes
+                }
+                if serverStream.receivedFIN {
+                    readExpectation.fulfill()
+                    return
+                }
+            }
+            self.context.async { readOnServer() }
+        }
+        context.async { readOnServer() }
+        wait(for: [readExpectation], timeout: timeout)
+        XCTAssertEqual(received, payload)
+        guard let serverStream else { return XCTFail("The server got no stream") }
+
+        // The server's application hasn't closed the stream, so it is open and the client can't
+        // open another.
+        guard
+            let secondStream = createNewStream(identifier: "C2", quicOptions: clientOptions, expectPending: true)
+        else { return }
+        let openExpectation = XCTestExpectation(description: "Check the server's stream")
+        context.async {
+            XCTAssertFalse(serverStream.receivedDisconnected, "The server's stream closed before its application did")
+            XCTAssertFalse(secondStream.receivedConnected)
+            openExpectation.fulfill()
+        }
+        wait(for: [openExpectation], timeout: timeout)
+
+        // Closing it hands the slot back.
+        context.async { serverStream.stop() }
+        let connectedExpectation = XCTestExpectation(description: "Wait for the second stream to connect")
+        func checkConnected() {
+            if secondStream.receivedConnected {
+                connectedExpectation.fulfill()
+                return
+            }
+            self.context.async { checkConnected() }
+        }
+        context.async { checkConnected() }
+        wait(for: [connectedExpectation], timeout: timeout)
+        let metadataExpectation = XCTestExpectation(description: "Check the second stream's ID")
+        context.async {
+            let metadata: ProtocolMetadata<QUICProtocol>? = secondStream.getMetadata()
+            XCTAssertEqual(metadata?.streamID, 6)
+            metadataExpectation.fulfill()
+        }
+        wait(for: [metadataExpectation], timeout: timeout)
+
         stop()
     }
 
