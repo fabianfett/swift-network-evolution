@@ -214,9 +214,11 @@ struct CoreReceiveBuffer {
     private var contiguousStart = 0
     /// The offset of the next byte the application reads.
     private(set) var readOffset: UInt64 = 0
-    /// Out-of-order segments above the contiguous end, sorted by offset. None is empty.
+    /// Out-of-order segments above the contiguous end, sorted by offset. None is empty, and none
+    /// overlaps another: a byte is buffered once, however often it arrives.
     private var segments: [(offset: UInt64, bytes: [UInt8])] = []
-    /// The bytes in `segments`.
+    /// The bytes in `segments`. As they don't overlap and lie below `highestOffset`, this is at
+    /// most `highestOffset - contiguousEnd`, which flow control bounds by the receive window.
     private(set) var bufferedOutOfOrderCount = 0
     /// The highest offset received so far.
     private(set) var highestOffset: UInt64 = 0
@@ -286,8 +288,9 @@ struct CoreReceiveBuffer {
             }
             self.drainSegments()
         } else {
-            self.insertSegment(offset: offset, bytes: [UInt8](copying: bytes))
+            self.insertOutOfOrder(offset: offset, end: end, bytes: bytes)
         }
+        assert(UInt64(self.bufferedOutOfOrderCount) <= self.highestOffset &- self.contiguousEnd)
         return self.readableCount &- before
     }
 
@@ -344,26 +347,94 @@ struct CoreReceiveBuffer {
         self.highestOffset = finalSize
     }
 
-    private mutating func insertSegment(offset: UInt64, bytes: [UInt8]) {
-        var index = self.segments.count
-        while index > 0 && self.segments[index &- 1].offset > offset {
-            index &-= 1
-        }
-        self.segments.insert((offset, bytes), at: index)
-        self.bufferedOutOfOrderCount &+= bytes.count
+    private func segmentEnd(_ index: Int) -> UInt64 {
+        self.segments[index].offset &+ UInt64(self.segments[index].bytes.count)
     }
 
-    private mutating func drainSegments() {
-        while let first = self.segments.first {
-            let contiguousEnd = self.contiguousEnd
-            guard first.offset <= contiguousEnd else { break }
-            self.segments.removeFirst()
-            self.bufferedOutOfOrderCount &-= first.bytes.count
-            let end = first.offset &+ UInt64(first.bytes.count)
-            if end > contiguousEnd {
-                let skip = Int(contiguousEnd &- first.offset)
-                self.contiguous.append(contentsOf: first.bytes[skip...])
+    /// Stores the parts of `bytes`, from `offset` past the contiguous end to `end`, that no
+    /// segment holds yet.
+    private mutating func insertOutOfOrder(offset: UInt64, end: UInt64, bytes: RawSpan) {
+        var index = self.segments.count
+        if index > 0 {
+            let lastEnd = self.segmentEnd(index &- 1)
+            if lastEnd == offset {
+                // Data usually follows on what arrived after a gap: it extends the last segment.
+                bytes.withUnsafeBytes { buffer in
+                    self.segments[index &- 1].bytes.append(contentsOf: buffer)
+                }
+                self.bufferedOutOfOrderCount &+= bytes.byteCount
+                return
             }
+            if lastEnd > offset {
+                index = self.firstSegment(endingAfter: offset)
+            }
+        }
+        // Fill the gaps between the segments from `index` on, up to `end`.
+        var cursor = offset
+        while cursor < end {
+            if index < self.segments.count {
+                let segmentStart = self.segments[index].offset
+                if segmentStart <= cursor {
+                    cursor = max(cursor, self.segmentEnd(index))
+                    index &+= 1
+                    continue
+                }
+                let pieceEnd = min(end, segmentStart)
+                self.insertSegment(at: index, offset: cursor, bytes: bytes, from: offset, to: pieceEnd)
+                cursor = pieceEnd
+            } else {
+                self.insertSegment(at: index, offset: cursor, bytes: bytes, from: offset, to: end)
+                cursor = end
+            }
+            index &+= 1
+        }
+    }
+
+    /// Inserts the part of `bytes`, which start at `start`, from `offset` to `end` as a segment at
+    /// `index`.
+    private mutating func insertSegment(
+        at index: Int,
+        offset: UInt64,
+        bytes: RawSpan,
+        from start: UInt64,
+        to end: UInt64
+    ) {
+        let piece = bytes.extracting(Int(offset &- start)..<Int(end &- start))
+        self.segments.insert((offset, [UInt8](copying: piece)), at: index)
+        self.bufferedOutOfOrderCount &+= piece.byteCount
+    }
+
+    /// The index of the first segment that ends after `offset`, by binary search.
+    private func firstSegment(endingAfter offset: UInt64) -> Int {
+        var low = 0
+        var high = self.segments.count
+        while low < high {
+            let middle = low &+ (high &- low) / 2
+            if self.segmentEnd(middle) <= offset {
+                low = middle &+ 1
+            } else {
+                high = middle
+            }
+        }
+        return low
+    }
+
+    /// Moves the segments the contiguous bytes reached over to them.
+    private mutating func drainSegments() {
+        var drained = 0
+        var contiguousEnd = self.contiguousEnd
+        while drained < self.segments.count && self.segments[drained].offset <= contiguousEnd {
+            let end = self.segmentEnd(drained)
+            if end > contiguousEnd {
+                let skip = Int(contiguousEnd &- self.segments[drained].offset)
+                self.contiguous.append(contentsOf: self.segments[drained].bytes[skip...])
+                contiguousEnd = end
+            }
+            self.bufferedOutOfOrderCount &-= self.segments[drained].bytes.count
+            drained &+= 1
+        }
+        if drained > 0 {
+            self.segments.removeFirst(drained)
         }
     }
 }
