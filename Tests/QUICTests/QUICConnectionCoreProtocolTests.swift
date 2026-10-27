@@ -40,6 +40,10 @@ private enum Frame {
         return vle(type) + vle(id) + vle(offset) + vle(UInt64(data.count)) + data
     }
 
+    static func crypto(offset: UInt64, _ data: [UInt8]) -> [UInt8] {
+        vle(0x06) + vle(offset) + vle(UInt64(data.count)) + data
+    }
+
     static func resetStream(_ id: UInt64, errorCode: UInt64, finalSize: UInt64) -> [UInt8] {
         vle(0x04) + vle(id) + vle(errorCode) + vle(finalSize)
     }
@@ -548,6 +552,46 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
             XCTAssertNil(pair.client.closeReason, "delay \(delay)")
             XCTAssertLessThan(pair.client.smoothedRTT, .seconds(1), "delay \(delay)")
         }
+    }
+
+    /// CRYPTO frames without data, at offsets past what arrived, store nothing and don't break
+    /// the handshake, in Initial packets to a server and Handshake packets to a client.
+    func testEmptyCryptoFramesDuringTheHandshakeStoreNothing() {
+        let frames = (0..<1000).map { Frame.crypto(offset: 100_000 + UInt64($0) * 3, []) }
+        var pair = LockstepPair()
+        for frame in frames {
+            pair.client.injectFrame(frame, in: .initial)
+        }
+        let initials = LockstepPair.drain(&pair.client, now: pair.now)
+        let ids = LockstepPair.connectionIDs(ofInitial: initials[0])
+        var server = QUICConnectionCore(
+            serverWith: pair.serverConfiguration,
+            localConnectionID: QUICConnectionID(8),
+            originalDestinationConnectionID: ids.destination,
+            peerConnectionID: ids.source,
+            now: pair.now
+        )
+        for frame in frames {
+            server.injectFrame(frame, in: .handshake)
+        }
+        for var datagram in initials {
+            var span = datagram.mutableSpan
+            server.receive(&span, now: pair.now)
+        }
+        XCTAssertNil(server.closeReason)
+        XCTAssertEqual(server.handshake.receive[.initial].bufferedSegmentCount, 0)
+        let toClient = LockstepPair.drain(&server, now: pair.now)
+        pair.server = consume server
+        for var datagram in toClient {
+            var span = datagram.mutableSpan
+            pair.client.receive(&span, now: pair.now)
+        }
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertEqual(pair.client.handshake.receive[.handshake].bufferedSegmentCount, 0)
+        pair.exchange()
+        XCTAssertTrue(pair.client.isHandshakeConfirmed)
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
     }
 
     func testAnUnknownFrameTypeIsAFrameEncodingError() {

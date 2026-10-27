@@ -122,6 +122,44 @@ final class CoreBufferTests: XCTestCase {
         XCTAssertTrue(buffer.isFinishedReading)
     }
 
+    /// A frame without data stores nothing, wherever it lies: else a peer could make the buffer
+    /// hold any number of empty segments.
+    func testEmptyInsertsStoreNothing() throws {
+        var buffer = CoreReceiveBuffer()
+        try Self.insert(&buffer, at: 0, [0, 1])
+        for offset in stride(from: UInt64(3), to: 100_000, by: 7) {
+            XCTAssertEqual(try Self.insert(&buffer, at: offset, []), 0)
+        }
+        XCTAssertEqual(buffer.bufferedSegmentCount, 0)
+        XCTAssertEqual(buffer.bufferedOutOfOrderCount, 0)
+        XCTAssertEqual(Self.readAll(&buffer), [0, 1])
+    }
+
+    /// A FIN without data still sets the final size, and completes the buffer once the bytes
+    /// before it arrive.
+    func testAFinWithoutDataSetsTheFinalSize() throws {
+        var buffer = CoreReceiveBuffer()
+        try Self.insert(&buffer, at: 4, [], fin: true)
+        XCTAssertEqual(buffer.finalSize, 4)
+        XCTAssertEqual(buffer.bufferedSegmentCount, 0)
+        XCTAssertFalse(buffer.isComplete)
+        try Self.insert(&buffer, at: 2, [2, 3])
+        XCTAssertEqual(buffer.bufferedOutOfOrderCount, 2)
+        try Self.insert(&buffer, at: 0, [0, 1])
+        XCTAssertEqual(buffer.bufferedOutOfOrderCount, 0)
+        XCTAssertTrue(buffer.isComplete)
+        XCTAssertEqual(Self.readAll(&buffer), [0, 1, 2, 3])
+        XCTAssertTrue(buffer.isFinishedReading)
+
+        // At the end of what arrived.
+        var other = CoreReceiveBuffer()
+        try Self.insert(&other, at: 0, [0, 1])
+        try Self.insert(&other, at: 2, [], fin: true)
+        XCTAssertTrue(other.isComplete)
+        XCTAssertEqual(Self.readAll(&other), [0, 1])
+        XCTAssertTrue(other.isFinishedReading)
+    }
+
     func testDiscardingCountsTheUnreadBytes() throws {
         var buffer = CoreReceiveBuffer()
         try Self.insert(&buffer, at: 0, [0, 1, 2])

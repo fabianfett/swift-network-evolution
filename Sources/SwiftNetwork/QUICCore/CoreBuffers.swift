@@ -214,8 +214,10 @@ struct CoreReceiveBuffer {
     private var contiguousStart = 0
     /// The offset of the next byte the application reads.
     private(set) var readOffset: UInt64 = 0
-    /// Out-of-order segments above the contiguous end, sorted by offset.
+    /// Out-of-order segments above the contiguous end, sorted by offset. None is empty.
     private var segments: [(offset: UInt64, bytes: [UInt8])] = []
+    /// The bytes in `segments`.
+    private(set) var bufferedOutOfOrderCount = 0
     /// The highest offset received so far.
     private(set) var highestOffset: UInt64 = 0
     private(set) var finalSize: UInt64?
@@ -245,8 +247,9 @@ struct CoreReceiveBuffer {
         return self.contiguousEnd >= finalSize
     }
 
-    var bufferedOutOfOrderCount: Int {
-        self.segments.reduce(0) { $0 &+ $1.bytes.count }
+    /// The number of out-of-order segments buffered.
+    var bufferedSegmentCount: Int {
+        self.segments.count
     }
 
     enum InsertError: Error {
@@ -271,6 +274,8 @@ struct CoreReceiveBuffer {
         if end > self.highestOffset {
             self.highestOffset = end
         }
+        // A frame without data, such as a FIN alone, has nothing to store.
+        guard length > 0 else { return 0 }
         let contiguousEnd = self.contiguousEnd
         guard end > contiguousEnd else { return 0 }
         let before = self.readableCount
@@ -319,6 +324,7 @@ struct CoreReceiveBuffer {
         self.contiguous.removeAll()
         self.contiguousStart = 0
         self.segments.removeAll()
+        self.bufferedOutOfOrderCount = 0
         self.readOffset = self.highestOffset
         if let finalSize = self.finalSize, self.readOffset >= finalSize {
             self.finDelivered = true
@@ -344,6 +350,7 @@ struct CoreReceiveBuffer {
             index &-= 1
         }
         self.segments.insert((offset, bytes), at: index)
+        self.bufferedOutOfOrderCount &+= bytes.count
     }
 
     private mutating func drainSegments() {
@@ -351,6 +358,7 @@ struct CoreReceiveBuffer {
             let contiguousEnd = self.contiguousEnd
             guard first.offset <= contiguousEnd else { break }
             self.segments.removeFirst()
+            self.bufferedOutOfOrderCount &-= first.bytes.count
             let end = first.offset &+ UInt64(first.bytes.count)
             if end > contiguousEnd {
                 let skip = Int(contiguousEnd &- first.offset)
