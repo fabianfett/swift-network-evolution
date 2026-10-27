@@ -162,6 +162,66 @@ final class QUICConnectionCoreTransportParameterTests: XCTestCase {
             }
         }
     }
+
+    func testAHandshakeWithoutTransportParametersFailsWithMissingExtension() {
+        // The client completes its handshake as if the server's had no transport parameters.
+        var clientConfiguration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
+        clientConfiguration.ignoresPeerTransportParametersForTesting = true
+        var pair = LockstepPair(clientConfiguration: clientConfiguration)
+        pair.exchange()
+        // CRYPTO_ERROR with the missing_extension alert (RFC 9001 Section 8.2).
+        let code = CoreTransportError.cryptoError + 109
+        XCTAssertFalse(pair.clientEvents.contains(.connected), "\(pair.clientEvents)")
+        guard case .transportError(code, _) = pair.client.closeReason else {
+            return XCTFail("client close reason: \(String(describing: pair.client.closeReason))")
+        }
+        guard case .peer(code, false, _) = pair.server?.closeReason else {
+            return XCTFail("server close reason: \(String(describing: pair.server?.closeReason))")
+        }
+    }
+
+    func testAClientDropsLongHeaderPacketsFromAnotherServerConnectionID() throws {
+        var pair = LockstepPair()
+        let now = pair.now
+        let initial = LockstepPair.drain(&pair.client, now: now)
+        let ids = LockstepPair.connectionIDs(ofInitial: try XCTUnwrap(initial.first))
+        // Two servers answer the same Initial, each with a connection ID of its own.
+        func makeServer() -> QUICConnectionCore {
+            var server = QUICConnectionCore(
+                serverWith: pair.serverConfiguration,
+                localConnectionID: QUICConnectionID(8),
+                originalDestinationConnectionID: ids.destination,
+                peerConnectionID: ids.source,
+                now: now
+            )
+            for var datagram in initial {
+                var span = datagram.mutableSpan
+                server.receive(&span, now: now)
+            }
+            return server
+        }
+        var server = makeServer()
+        var impostor = makeServer()
+        XCTAssertNotEqual(server.localConnectionID, impostor.localConnectionID)
+        let flight = LockstepPair.drain(&server, now: now)
+        _ = LockstepPair.drain(&impostor, now: now)
+        // A later Initial from the other connection ID, which the client could open, closes the
+        // connection if the client processes it.
+        impostor.injectFrame([0x1c, 0x0a, 0x00, 0x00], in: .initial)
+        let forged = LockstepPair.drain(&impostor, now: now)
+        XCTAssertFalse(forged.isEmpty)
+        for var datagram in flight + forged {
+            var span = datagram.mutableSpan
+            pair.client.receive(&span, now: now)
+        }
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertEqual(pair.client.peerConnectionID, server.localConnectionID)
+        pair.server = consume server
+        pair.exchange()
+        XCTAssertTrue(pair.client.isHandshakeConfirmed)
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
+    }
 }
 
 #endif

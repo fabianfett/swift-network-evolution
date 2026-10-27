@@ -32,6 +32,13 @@ internal import CryptoKit
 #endif
 #endif
 
+/// The TLS alerts (RFC 8446 Section 6) a QUIC connection closes with, as CRYPTO_ERROR plus the
+/// alert (RFC 9001 Section 4.8).
+@available(Network 0.1.0, *)
+enum TLSAlert {
+    static let missingExtension: UInt64 = 109
+}
+
 /// Transport error codes (RFC 9000 Section 20.1).
 @available(Network 0.1.0, *)
 enum CoreTransportError {
@@ -173,6 +180,14 @@ extension QUICConnectionCore {
             }
         case .payload(let packet, let extraLength, let reservedBits):
             let packetLength = (count &- offset) &- extraLength
+            if !self.isServer, packet.longHeader, let first = self.firstServerSourceConnectionID,
+                packet.sourceConnectionID != first
+            {
+                // RFC 9000 Section 7.2: once a server's packet was processed, a client discards
+                // long header packets with any other source connection ID.
+                self.log.debug("Dropping a packet from another server connection ID")
+                return packetLength
+            }
             guard reservedBits == 0 else {
                 self.closeWithError(CoreTransportError.protocolViolation, reason: "Reserved bits set", now: now)
                 return packetLength
@@ -203,7 +218,7 @@ extension QUICConnectionCore {
                 let sourceConnectionID = packet.sourceConnectionID
             {
                 // The server picked its own connection ID; use it from now on.
-                self.receivedFirstServerPacket = true
+                self.firstServerSourceConnectionID = sourceConnectionID
                 self.handshakePeerConnectionIDChanged(sourceConnectionID)
             }
             self.packetIsEarlyData = packet.keyState == .earlyData
@@ -1152,6 +1167,9 @@ extension QUICConnectionCore {
                     self.earlyDataResolved(accepted: true, now: now)
                 }
             case .peerTransportParameters(let bytes, let earlyData):
+                #if DEBUG
+                if self.configuration.ignoresPeerTransportParametersForTesting { continue }
+                #endif
                 // The handshake reports them again with each message.
                 guard earlyData ? self.peerTransportParameters == nil : !self.receivedPeerTransportParameters
                 else { continue }
@@ -1162,6 +1180,16 @@ extension QUICConnectionCore {
             case .sessionTickets:
                 break
             case .complete:
+                guard self.receivedPeerTransportParameters else {
+                    // RFC 9001 Section 8.2: a handshake without the quic_transport_parameters
+                    // extension fails with the missing_extension alert.
+                    self.closeWithError(
+                        CoreTransportError.cryptoError &+ TLSAlert.missingExtension,
+                        reason: "missing quic_transport_parameters",
+                        now: now
+                    )
+                    return
+                }
                 if !self.isServer && self.earlyData == .accepted {
                     // A client is done with 0-RTT once it has 1-RTT keys (RFC 9001 Section 4.9.3).
                     self.protector.drop(keyState: .earlyData)

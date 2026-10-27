@@ -118,6 +118,10 @@ public struct QUICConnectionCore: ~Copyable {
         /// Changes the transport parameters this endpoint sends, so tests can send what a broken
         /// peer would.
         var transportParametersForTesting: ((inout TransportParameters) -> Void)?
+        /// Ignores the peer's quic_transport_parameters extension, as if the peer had left it
+        /// out. SwiftTLS can't leave it out: a client doesn't start without it, and a server
+        /// without it rejects the client's.
+        var ignoresPeerTransportParametersForTesting = false
         #endif
 
         public init(tlsOptions: SwiftTLSProtocol.Options) {
@@ -228,7 +232,12 @@ public struct QUICConnectionCore: ~Copyable {
     var receivedVersionNegotiation = false
     /// The token a client's Initial packets carry, from the server's Retry.
     public internal(set) var initialToken: [UInt8] = []
-    var receivedFirstServerPacket = false
+    /// The source connection ID of the first server packet a client processed. Long header
+    /// packets with another one are dropped (RFC 9000 Section 7.2).
+    var firstServerSourceConnectionID: QUICConnectionID?
+    var receivedFirstServerPacket: Bool {
+        self.firstServerSourceConnectionID != nil
+    }
     var connectionIDs: CoreConnectionIDs
     /// The destination connection ID of the packet whose frames are processed.
     var currentPacketDestination: QUICConnectionID?
