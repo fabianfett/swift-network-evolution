@@ -520,6 +520,10 @@ extension QUICConnection {
                         in: &eventContext
                     )
                 }
+            case .closing:
+                // `coreAfterUpdate` reports the close as soon as its CONNECTION_CLOSE is on the
+                // way, as the classes did: the application may tear the path down when it hears.
+                break
             case .closed(let reason):
                 self.coreReportClose(reason, in: &eventContext)
                 self.coreFinish(in: &eventContext)

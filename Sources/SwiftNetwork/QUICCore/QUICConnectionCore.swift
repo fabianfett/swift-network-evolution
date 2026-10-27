@@ -171,6 +171,11 @@ public struct QUICConnectionCore: ~Copyable {
         /// The server's transport parameters, which a client remembers for 0-RTT on a later
         /// connection. Only a client with early data enabled gets them.
         case transportParametersForResumption([UInt8])
+        /// The connection failed or is being closed: it no longer carries data, so the driver
+        /// can fail its streams and report the reason right away. The core keeps running until
+        /// its closing or draining period is over (RFC 9000 Section 10.2), and reports
+        /// ``closed(_:)`` then. Always comes first, also when the connection closes at once.
+        case closing(CloseReason)
         /// The connection is closed and can be released.
         case closed(CloseReason)
     }
@@ -672,6 +677,7 @@ public struct QUICConnectionCore: ~Copyable {
         self.datagramsReceivedWhileClosing = 0
         let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
         self.state = .closing(until: now.advanced(by: pto * 3))
+        self.events.append(.closing(self.closeReason ?? .idleTimeout))
         // The handshake is over: CONNECTION_CLOSE only needs the keys, which the protector has.
         // Releasing the handshaker drops the driver's continuation handler, and whatever it
         // captured, now rather than after three PTOs.
@@ -680,9 +686,14 @@ public struct QUICConnectionCore: ~Copyable {
 
     mutating func enterClosed() {
         guard !self.isClosed else { return }
+        let reason = self.closeReason ?? .idleTimeout
+        if !self.isClosingOrDraining {
+            // Closed at once, without a closing or draining period.
+            self.events.append(.closing(reason))
+        }
         self.state = .closed
         self.handshake.release()
-        self.events.append(.closed(self.closeReason ?? .idleTimeout))
+        self.events.append(.closed(reason))
     }
 
     // MARK: Keepalive

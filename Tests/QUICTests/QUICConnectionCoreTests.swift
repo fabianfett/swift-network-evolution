@@ -456,6 +456,73 @@ final class QUICConnectionCoreTests: XCTestCase {
         XCTAssertTrue(pair.serverEvents.contains(.closed(.peer(errorCode: 7, isApplication: true, reason: "bye"))))
     }
 
+    /// Runs the timers until `isServer`'s side reports `.closed`, and returns how long that took.
+    private static func timeUntilClosed(_ pair: inout LockstepPair, server isServer: Bool) -> NetworkDuration? {
+        let start = pair.now
+        for _ in 0..<20 {
+            pair.clientEvents += LockstepPair.events(&pair.client)
+            if var server = pair.server.take() {
+                pair.serverEvents += LockstepPair.events(&server)
+                pair.server = consume server
+            }
+            let events = isServer ? pair.serverEvents : pair.clientEvents
+            if events.contains(where: { if case .closed = $0 { return true } else { return false } }) {
+                return start.duration(to: pair.now)
+            }
+            pair.advanceToNextDeadline()
+        }
+        return nil
+    }
+
+    func testThePeersCloseIsReportedAtOnceAndClosedAfterDraining() throws {
+        var pair = LockstepPair()
+        pair.exchange()
+        pair.client.close(errorCode: 7, isApplication: true, reason: "bye", now: pair.now)
+        pair.clientEvents += LockstepPair.events(&pair.client)
+        XCTAssertEqual(pair.clientEvents.last, .closing(.local(errorCode: 7, isApplication: true)))
+        pair.exchange()
+        let peerClose = QUICConnectionCore.CloseReason.peer(errorCode: 7, isApplication: true, reason: "bye")
+        XCTAssertEqual(pair.serverEvents.last, .closing(peerClose), "\(pair.serverEvents)")
+        let pto = try XCTUnwrap(pair.server?.recovery.probeTimeout(includingMaxAckDelay: true))
+        // The draining period still runs before the connection can be released.
+        let draining = try XCTUnwrap(Self.timeUntilClosed(&pair, server: true))
+        XCTAssertGreaterThanOrEqual(draining, pto * 3)
+        XCTAssertEqual(pair.serverEvents.suffix(2), [.closing(peerClose), .closed(peerClose)])
+    }
+
+    func testATransportErrorIsReportedAtOnceAndClosedAfterClosing() throws {
+        var pair = LockstepPair()
+        pair.exchange()
+        pair.client.closeWithError(CoreTransportError.protocolViolation, reason: "test", now: pair.now)
+        let reason = QUICConnectionCore.CloseReason.transportError(
+            errorCode: CoreTransportError.protocolViolation,
+            reason: "test"
+        )
+        pair.clientEvents += LockstepPair.events(&pair.client)
+        XCTAssertEqual(pair.clientEvents.last, .closing(reason))
+        let pto = pair.client.recovery.probeTimeout(includingMaxAckDelay: true)
+        pair.exchange()
+        let closing = try XCTUnwrap(Self.timeUntilClosed(&pair, server: false))
+        XCTAssertGreaterThanOrEqual(closing, pto * 3)
+        XCTAssertEqual(pair.clientEvents.suffix(2), [.closing(reason), .closed(reason)])
+        XCTAssertTrue(
+            pair.serverEvents.contains(
+                .closing(.peer(errorCode: CoreTransportError.protocolViolation, isApplication: false, reason: "test"))
+            )
+        )
+    }
+
+    func testAnIdleTimeoutIsReportedAsClosingThenClosed() {
+        var pair = LockstepPair()
+        pair.exchange()
+        for _ in 0..<10 {
+            pair.advanceToNextDeadline()
+            pair.exchange()
+        }
+        pair.clientEvents += LockstepPair.events(&pair.client)
+        XCTAssertEqual(pair.clientEvents.suffix(2), [.closing(.idleTimeout), .closed(.idleTimeout)])
+    }
+
     func testIdleTimeout() {
         var pair = LockstepPair()
         pair.exchange()
