@@ -1216,7 +1216,13 @@ extension QUICConnectionCore {
         self.sendMaxData = UInt64(parameters.intValue(.initialMaxData))
         self.streams.peerMaxStreamsBidirectional = UInt64(parameters.intValue(.initialMaxStreamsBidirectional))
         self.streams.peerMaxStreamsUnidirectional = UInt64(parameters.intValue(.initialMaxStreamsUnidirectional))
-        let peerIdle = NetworkDuration.milliseconds(parameters.intValue(.maxIdleTimeout))
+        // RFC 9000 Section 10.1: the smaller of the two nonzero max_idle_timeouts. The peer's is
+        // capped before it becomes a duration, so neither it nor a deadline overflows.
+        let peerIdleMilliseconds = min(
+            UInt64(clamping: parameters.intValue(.maxIdleTimeout)),
+            Self.maximumPeerIdleTimeoutMilliseconds
+        )
+        let peerIdle = NetworkDuration.milliseconds(peerIdleMilliseconds)
         if peerIdle > .zero, self.idleTimeout.map({ peerIdle < $0 }) ?? true {
             self.idleTimeout = peerIdle
             let deadline = now.advanced(by: peerIdle)

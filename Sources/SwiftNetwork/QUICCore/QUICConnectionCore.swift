@@ -292,6 +292,10 @@ public struct QUICConnectionCore: ~Copyable {
     /// The effective idle timeout, the smaller of the two endpoints' nonzero values; `nil` when
     /// both disabled it.
     var idleTimeout: NetworkDuration?
+    /// The longest idle timeout the peer's max_idle_timeout can set, about 35 years, in
+    /// milliseconds. The parameter goes up to 2^62 - 1 ms, more than a `NetworkDuration` or a
+    /// deadline holds.
+    static let maximumPeerIdleTimeoutMilliseconds: UInt64 = 1 << 40
     var idleDeadline: NetworkClock.Instant?
     /// Whether an ack-eliciting packet went out since the last packet arrived.
     var sentAckElicitingSinceReceive = false

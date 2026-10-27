@@ -184,7 +184,9 @@ struct LockstepPair: ~Copyable {
             let path = machine.pathWithProbeToSend ?? machine.activePathID
             var span = buffer.mutableSpan
             guard let length = machine.send(into: &span, on: path, now: now) else { break }
-            datagrams.append(NetworkDatagram(path: path, ecn: machine.lastDatagramECN, bytes: Array(buffer[0..<length])))
+            datagrams.append(
+                NetworkDatagram(path: path, ecn: machine.lastDatagramECN, bytes: Array(buffer[0..<length]))
+            )
         }
         return datagrams
     }
@@ -494,6 +496,34 @@ final class QUICConnectionCoreTests: XCTestCase {
         XCTAssertNil(pair.server?.closeReason)
         XCTAssertNil(pair.client.nextDeadline, "an idle connection without idle timeout needs no timer")
     }
+
+    #if DEBUG
+    /// The peer's max_idle_timeout goes up to 2^62 - 1 ms, more than a duration holds: a smaller
+    /// local one wins, and without a local one it is capped (RFC 9000 Section 10.1).
+    func testAHugePeerIdleTimeoutIsCapped() {
+        let capped = NetworkDuration.milliseconds(QUICConnectionCore.maximumPeerIdleTimeoutMilliseconds)
+        for (local, expected) in [(NetworkDuration.seconds(30), NetworkDuration.seconds(30)), (.zero, capped)] {
+            var serverConfiguration = Self.configuration(idleTimeout: .seconds(30))
+            serverConfiguration.transportParametersForTesting = { parameters in
+                parameters.remove(.maxIdleTimeout)
+                parameters.append(.maxIdleTimeout(value: (1 << 62) - 1))
+            }
+            var pair = LockstepPair(
+                clientConfiguration: Self.configuration(idleTimeout: local),
+                serverConfiguration: serverConfiguration
+            )
+            pair.exchange()
+            XCTAssertTrue(pair.client.isHandshakeConfirmed, "local \(local)")
+            XCTAssertEqual(pair.client.idleTimeout, expected, "local \(local)")
+            // Packets keep moving the deadline.
+            pair.client.injectedFrames.append([0x01])  // PING
+            pair.exchange()
+            XCTAssertNil(pair.client.closeReason, "local \(local)")
+            XCTAssertNil(pair.server?.closeReason, "local \(local)")
+            XCTAssertEqual(pair.client.idleDeadline, pair.now.advanced(by: expected), "local \(local)")
+        }
+    }
+    #endif
 
     /// The effective idle timeout is the smaller of the two, and a disabled one doesn't count.
     func testTheIdleTimeoutIsTheSmallerNonzeroOne() {
