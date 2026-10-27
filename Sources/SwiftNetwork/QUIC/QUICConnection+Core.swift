@@ -1130,6 +1130,14 @@ extension QUICConnection {
 
     /// Gives pending streams their IDs while the peer's stream limits allow it, oldest first.
     private func coreOpenPendingStreams(in eventContext: inout NetworkContext.EventContext) {
+        // Runs after every update, and there's rarely a stream waiting: checking that first spares
+        // the accesses below.
+        guard
+            !self.bidirectionalStreams.pendingStartStreams.isEmpty
+                || !self.unidirectionalStreams.pendingStartStreams.isEmpty
+        else {
+            return
+        }
         guard let box = self.coreBox, self.coreCanOpenStreams(box), !box.core.isTerminating else { return }
         for unidirectional in [false, true] {
             while let stream = self.pendingStreams(unidirectional: unidirectional).first {
