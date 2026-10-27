@@ -669,11 +669,10 @@ public struct QUICConnectionCore: ~Copyable {
         self.closeFrameSentInState = false
         let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
         self.state = .closing(until: now.advanced(by: pto * 3))
-    }
-
-    private mutating func enterDraining(now: NetworkClock.Instant) {
-        let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
-        self.state = .draining(until: now.advanced(by: pto * 3))
+        // The handshake is over: CONNECTION_CLOSE only needs the keys, which the protector has.
+        // Releasing the handshaker drops the driver's continuation handler, and whatever it
+        // captured, now rather than after three PTOs.
+        self.handshake.release()
     }
 
     mutating func enterClosed() {

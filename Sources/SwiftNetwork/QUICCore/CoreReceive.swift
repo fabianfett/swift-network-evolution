@@ -638,6 +638,8 @@ extension QUICConnectionCore {
     private mutating func enterDrainingFromPeer(now: NetworkClock.Instant) {
         let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
         self.state = .draining(until: now.advanced(by: pto * 3))
+        // A draining connection sends nothing, so it needs no handshaker.
+        self.handshake.release()
     }
 
     // MARK: ACK

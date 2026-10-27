@@ -116,11 +116,72 @@ final class QUICConnectionCoreAsyncVerificationTests: XCTestCase {
         let handover = Handover()
         var pair = Self.pair(verifier: handover)
         pair.exchange()
-        pair.client.close(errorCode: 0, isApplication: true, now: pair.now)
+        // The result was on its way to the driver when the connection closed.
         let result = try XCTUnwrap(Self.verify(.valid, handover))
+        pair.client.close(errorCode: 0, isApplication: true, now: pair.now)
         pair.client.resumeHandshake(with: result, now: pair.now)
         XCTAssertFalse(pair.client.isHandshakeComplete)
         XCTAssertEqual(pair.client.closeReason, .local(errorCode: 0, isApplication: true))
+    }
+
+    /// Records that the continuation handler, and what it captured, went away.
+    private final class Witness: Sendable {
+        let flag: Flag
+
+        init(_ flag: Flag) {
+            self.flag = flag
+        }
+
+        deinit {
+            self.flag.released.withLock { $0 = true }
+        }
+    }
+
+    private final class Flag: Sendable {
+        let released = Mutex(false)
+    }
+
+    /// Installs a continuation handler that captures an object, and returns what learns when the
+    /// object is released.
+    private static func installCapturingHandler(on pair: inout LockstepPair, _ handover: Handover) -> Flag {
+        let flag = Flag()
+        let witness = Witness(flag)
+        pair.client.setAsyncContinuationHandler { result in
+            _ = witness
+            handover.result.withLock { $0 = result }
+        }
+        return flag
+    }
+
+    func testClosingDuringVerificationReleasesTheContinuationHandlerRightAway() {
+        // A local close, the peer's CONNECTION_CLOSE, and a transport error.
+        for closing in 0..<3 {
+            let handover = Handover()
+            var pair = Self.pair(verifier: handover)
+            let flag = Self.installCapturingHandler(on: &pair, handover)
+            pair.exchange()
+            XCTAssertEqual(handover.verifications.withLock { $0 }, 1)
+            // The verifier never answers, and keeps nothing that leads to the handler: only the
+            // handshake does.
+            handover.deliverResult.withLock { $0 = nil }
+            XCTAssertFalse(flag.released.withLock { $0 }, "the handshake still waits for the verifier")
+            switch closing {
+            case 0:
+                pair.client.close(errorCode: 0, isApplication: true, now: pair.now)
+            case 1:
+                if var server = pair.server.take() {
+                    server.close(errorCode: 3, isApplication: true, now: pair.now)
+                    pair.server = consume server
+                }
+                pair.exchange()
+            default:
+                pair.client.closeWithError(CoreTransportError.protocolViolation, reason: "test", now: pair.now)
+            }
+            XCTAssertTrue(pair.client.isTerminating, "case \(closing)")
+            XCTAssertNotNil(pair.client.nextDeadline, "case \(closing): the connection waits out its timer")
+            // Long before the connection is closed, the handler and what it holds are gone.
+            XCTAssertTrue(flag.released.withLock { $0 }, "case \(closing)")
+        }
     }
 }
 
