@@ -217,9 +217,14 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             // that indexing happens, rather than relying on `Constants
             // .minimumPacketSize`, which doesn't scale with the connection's
             // configured local CID length.
-            guard payloadAndTagSize >= 4 + Int(tagSize) else {
+            //
+            // A long header packet ends where its Length field says, and the sample has to lie
+            // inside the packet (RFC 9001 Section 5.4.2), not in the packets coalesced after it.
+            let sampleBound =
+                packet.longHeader ? min(Int(packet.payloadLength), payloadAndTagSize) : payloadAndTagSize
+            guard sampleBound >= 4 + Int(tagSize) else {
                 log.error(
-                    "Dropping packet: not enough bytes for packet number + sample (have \(payloadAndTagSize), need \(4 + Int(tagSize)))"
+                    "Dropping packet: not enough bytes for packet number + sample (have \(sampleBound), need \(4 + Int(tagSize)))"
                 )
                 return .drop
             }
@@ -236,6 +241,14 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
 
             let extraLength: Int
             if packet.longHeader {
+                // The Length covers the packet number and the tag; a shorter one would make the
+                // payload and tag ranges negative (RFC 9000 Section 17.2).
+                guard Int(packet.payloadLength) >= Int(packet.packetNumberLength) + Int(packet.tagLength) else {
+                    log.error(
+                        "Dropping LH packet: Length \(packet.payloadLength) is shorter than packet number and tag"
+                    )
+                    return .drop
+                }
                 // At this point, the packet number is already claimed, so subtract it from the remaining payload length
                 let remainingPayloadLength = Int(packet.payloadLength) - Int(packet.packetNumberLength)
                 guard bytes.unclaimedLength >= remainingPayloadLength else {
