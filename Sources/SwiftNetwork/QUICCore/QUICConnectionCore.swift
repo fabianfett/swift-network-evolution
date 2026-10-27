@@ -982,7 +982,14 @@ struct CoreAckTracker {
     ) {
         let outOfOrder = self.largestReceived.map { packetNumber < $0 || packetNumber > $0 &+ 1 } ?? false
         self.received.insert(packetNumber)
-        self.received.trim(toCount: Self.maximumRanges)
+        if self.received.count > Self.maximumRanges {
+            self.received.trim(toCount: Self.maximumRanges)
+            // The packets of the dropped ranges would look new again; everything below the
+            // lowest range left counts as received (RFC 9000 Section 13.2.3).
+            if let lowest = self.received.lowerBound, lowest > self.floor {
+                self.floor = lowest
+            }
+        }
         if self.largestReceived == nil || packetNumber > self.largestReceived! {
             self.largestReceived = packetNumber
             self.largestReceivedTime = now

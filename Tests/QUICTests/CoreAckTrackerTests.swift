@@ -214,6 +214,29 @@ final class CoreAckTrackerTests: XCTestCase {
         let oldest = packetNumbers[packetNumbers.count - CoreAckTracker.maximumRanges]
         XCTAssertEqual(ack.ranges.last, oldest...oldest)
     }
+
+    /// A receiver keeps a range unless it won't accept its packets again: the dropped ranges
+    /// stay duplicates, and the gaps between them too (RFC 9000 Section 13.2.3).
+    func testPacketsOfDroppedRangesStayDuplicates() {
+        var tracker = CoreAckTracker()
+        let packetNumbers = (0...UInt64(CoreAckTracker.maximumRanges + 10)).map { $0 * 2 }
+        self.receive(&tracker, packetNumbers)
+        XCTAssertTrue(tracker.isDuplicate(0))
+        XCTAssertTrue(tracker.isDuplicate(1))
+        let oldest = packetNumbers[packetNumbers.count - CoreAckTracker.maximumRanges]
+        XCTAssertTrue(tracker.isDuplicate(oldest - 2))
+        XCTAssertTrue(tracker.isDuplicate(oldest))
+        // A gap above the lowest range left is still open.
+        XCTAssertFalse(tracker.isDuplicate(oldest + 1))
+    }
+
+    /// Without dropped ranges a late packet below the lowest range is new.
+    func testALatePacketBelowTheRangesIsNew() {
+        var tracker = CoreAckTracker()
+        self.receive(&tracker, [3, 4, 6])
+        XCTAssertFalse(tracker.isDuplicate(0))
+        XCTAssertFalse(tracker.isDuplicate(5))
+    }
 }
 
 #endif
