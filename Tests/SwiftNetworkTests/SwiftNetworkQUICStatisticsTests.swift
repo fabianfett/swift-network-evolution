@@ -58,6 +58,39 @@ internal import os
 
 @available(Network 0.1.0, *)
 final class SwiftNetworkQUICStatisticsTests: NetTestCase {
+    /// The core's statistics stay readable once the connection let go of the core.
+    func testQUICStatisticsOutliveTheCore() throws {
+        var client: QUICConnection?
+        QUICTestHarness().runQUICTest(
+            blockSize: 1024,
+            blockCount: 4,
+            afterData: { harness in
+                client = harness.state?.clientInstance
+            }
+        )
+        guard let client else { return XCTFail("No client") }
+        // The core stays for the closing period (RFC 9000 Section 10.2), three PTOs.
+        var coreGone = false
+        for _ in 0..<60 where !coreGone {
+            let expectation = XCTestExpectation(description: "Check the core")
+            client.context.async {
+                defer { expectation.fulfill() }
+                coreGone = client.coreBox == nil
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+            if !coreGone {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        XCTAssertTrue(coreGone, "the connection let go of the core")
+        let expectation = XCTestExpectation(description: "Read the statistics")
+        client.context.async {
+            defer { expectation.fulfill() }
+            XCTAssertGreaterThanOrEqual(client.stats[.txStreamBytes], 1024 * 4)
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 2.0), .completed)
+    }
+
     func testQUICStatisticsForOneStream() throws {
         QUICTestHarness().runQUICTest(
             blockSize: 10240,

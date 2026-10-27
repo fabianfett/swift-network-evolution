@@ -378,7 +378,7 @@ extension QUICConnection {
                 totalRxBytes: receivedBytes,
                 totalPackets: receivedPackets,
                 pathStatistics: &path.pathStatistics,
-                connectionStatistics: &self.stats
+                connectionStatistics: &self.adapterStats
             )
             if let box = self.coreBox, !self.isServer, !box.core.initialToken.isEmpty {
                 self.initialToken = box.core.initialToken
@@ -413,7 +413,7 @@ extension QUICConnection {
             }
         } while self.coreUpdatePending
         self.coreLogPackets()
-        self.coreSynchronizeStatistics(in: &eventContext)
+        self.coreSynchronizeActivePath(in: &eventContext)
         self.coreRescheduleTimer(in: &eventContext)
         self.checkConnectionIdle(in: &eventContext)
     }
@@ -582,7 +582,7 @@ extension QUICConnection {
                 // Kernel pacing: the datagram leaves at its time, which the core never delays.
                 let absolute = departureTime.advanced(by: absoluteOffset)
                 datagram.departureTime = UInt64(clamping: absolute.time.nanoseconds)
-                self.stats.increment(.txDepartureTimestamp)
+                self.adapterStats.increment(.txDepartureTimestamp)
             }
             datagram.ecnFlag = box.core.lastDatagramECN
             QUICSignpost.outbound(id: self.signpostID, length: written)
@@ -595,7 +595,7 @@ extension QUICConnection {
             totalTxBytes: totalBytes,
             totalPackets: totalPackets,
             pathStatistics: &path.pathStatistics,
-            connectionStatistics: &self.stats
+            connectionStatistics: &self.adapterStats
         )
         path.serviceLowerSendQueue(in: &eventContext)
     }
@@ -635,7 +635,7 @@ extension QUICConnection {
             totalTxBytes: written,
             totalPackets: 1,
             pathStatistics: &path.pathStatistics,
-            connectionStatistics: &self.stats
+            connectionStatistics: &self.adapterStats
         )
         path.serviceLowerSendQueue(in: &eventContext)
         return true
@@ -770,13 +770,16 @@ extension QUICConnection {
         }
     }
 
-    /// Copies the core's statistics, spin bit and destination connection ID to where the
-    /// framework reads them.
-    private func coreSynchronizeStatistics(in eventContext: inout NetworkContext.EventContext) {
+    /// Copies the core's statistics into ``adapterStats``, from ``stats`` and before the core goes.
+    func coreCopyStatistics() {
         guard let box = self.coreBox else { return }
         // One access to each side, rather than two per statistic.
-        self.stats.copy(Self.coreStatistics, from: box.core.statistics)
-        guard let path = self.currentPath else { return }
+        self.adapterStats.copy(Self.coreStatistics, from: box.core.statistics)
+    }
+
+    /// Copies the core's spin bit and destination connection ID to the path.
+    private func coreSynchronizeActivePath(in eventContext: inout NetworkContext.EventContext) {
+        guard let box = self.coreBox, let path = self.currentPath else { return }
         path.spinValue = box.core.spinValue
         if box.core.peerConnectionID != path.dcid {
             // The server picked its connection ID, a Retry did, or one was retired.
@@ -856,7 +859,7 @@ extension QUICConnection {
         // Streams opened before the handshake completed get their IDs now.
         self.coreOpenPendingStreams(in: &eventContext)
         self.deliverConnectedEvent(flow: .allFlows, in: &eventContext)
-        self.stats.increment(.connectionAttempts)
+        self.adapterStats.increment(.connectionAttempts)
     }
 
     // MARK: Closing
@@ -920,7 +923,7 @@ extension QUICConnection {
             self.closeError = QUICTransportError(.noError, "keepalive limit reached")
             self.errorToReport = NetworkError.posix(ETIMEDOUT)
         case .statelessReset:
-            self.stats.increment(.statelessResetReceived)
+            self.adapterStats.increment(.statelessResetReceived)
             self.log.info("Received valid stateless reset token")
             self.errorToReport = NetworkError.posix(ECONNRESET)
         case .transportError(let errorCode, let reason):
@@ -962,6 +965,8 @@ extension QUICConnection {
             box.asyncResult = nil
         }
         #endif
+        // `stats` can't reach the core's statistics once it's gone.
+        self.coreCopyStatistics()
         if let box = self.coreBox {
             self.coreLastHandshakeRTT = box.core.handshakeRTT
             self.coreLastL4SEnabled = box.core.l4sEnabled
@@ -1085,9 +1090,9 @@ extension QUICConnection {
         stream.setup(streamID: nil, logPrefixer: self.logPrefixer)
         stream.unidirectional = isUnidirectional
         if isUnidirectional {
-            self.stats.increment(.outboundUnidirectionalStreams)
+            self.adapterStats.increment(.outboundUnidirectionalStreams)
         } else {
-            self.stats.increment(.outboundBidirectionalStreams)
+            self.adapterStats.increment(.outboundBidirectionalStreams)
         }
         // A stream opened while connected, or while the client sends 0-RTT, is ready right away,
         // and `connect(flow:)` reports it. Otherwise it waits for the handshake, or for the peer to
@@ -1167,9 +1172,9 @@ extension QUICConnection {
         self.deliverNewInboundFlowEvent(newStream.identifier, flowMetadata: abstractMetadata, in: &eventContext)
         newStream.inboundStreamReady()
         if streamID.isBidirectional {
-            self.stats.increment(.inboundBidirectionalStreams)
+            self.adapterStats.increment(.inboundBidirectionalStreams)
         } else {
-            self.stats.increment(.inboundUnidirectionalStreams)
+            self.adapterStats.increment(.inboundUnidirectionalStreams)
         }
         self.log.info("Creating inbound stream \(streamID)")
     }

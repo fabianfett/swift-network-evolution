@@ -290,7 +290,16 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
     public var qlogConfiguration: QLogConfiguration?
     private(set) var qLog: QLog?
 
-    var stats: Statistics
+    /// The statistics the connection counts itself. ``stats`` adds the core's.
+    var adapterStats: Statistics
+    /// The connection's statistics, the core's included: they are copied in when they are read,
+    /// rather than after every update.
+    var stats: Statistics {
+        _read {
+            self.coreCopyStatistics()
+            yield self.adapterStats
+        }
+    }
 
     var logIDString: String { self.log.logPrefix }
     var initialInterface: Interface? = nil
@@ -369,7 +378,7 @@ public final class QUICConnection: ManyToManyApplicationStreamProtocol,
 
         let defaultServerCIDLength = 8
         self.originalDCID = QUICConnectionID(defaultServerCIDLength)
-        self.stats = Statistics()
+        self.adapterStats = Statistics()
         self.identifier = InstanceIdentifier(
             eventManager: &self.eventManager,
             in: &eventContext
