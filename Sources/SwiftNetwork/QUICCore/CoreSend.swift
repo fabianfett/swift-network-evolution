@@ -45,7 +45,7 @@ extension QUICConnectionCore {
             return length
         }
         guard let length = self.sendOnActivePath(into: &buffer, now: now) else { return nil }
-        self.paths[path]?.bytesSent &+= length
+        self.paths.active.bytesSent &+= length
         if self.recovery.pacer != nil {
             self.departureTime = self.pacedDepartureTime(ofDatagram: length, now: now)
         }
@@ -65,7 +65,7 @@ extension QUICConnectionCore {
         on path: CorePathID,
         now: NetworkClock.Instant
     ) -> Int? {
-        guard case .established = self.state, self.paths[path]?.hasProbingFramesToSend == true,
+        guard case .established = self.state, self.hasProbingFramesToSend(on: path),
             self.assignPeerConnectionID(to: path), self.peerConnectionID(on: path) != nil
         else {
             return nil
@@ -86,7 +86,9 @@ extension QUICConnectionCore {
         else {
             return nil
         }
-        self.paths[path]?.bytesSent &+= length
+        if let index = self.paths.index(of: path) {
+            self.paths[index].bytesSent &+= length
+        }
         return length
     }
 
@@ -196,7 +198,7 @@ extension QUICConnectionCore {
         else {
             return nil
         }
-        self.paths[self.activePath]?.pmtud?.probeSent()
+        self.paths.active.pmtud?.probeSent()
         self.log.debug("PMTUD probe of \(length) bytes sent")
         self.bytesSent &+= length
         self.lastDatagramECN =
@@ -248,7 +250,7 @@ extension QUICConnectionCore {
         return self.handshakeDonePending || self.keepAlivePending || self.maxDataPending
             || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || self.pingPending
-            || self.paths[self.activePath]?.hasProbingFramesToSend == true
+            || self.paths.active.hasProbingFramesToSend
             || !self.datagramsToSend.isEmpty || self.hasConnectionIDFramesToSend || self.hasSendableStreams
             || self.hasInjectedFrames
     }

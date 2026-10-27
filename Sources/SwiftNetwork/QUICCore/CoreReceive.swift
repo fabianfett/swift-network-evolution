@@ -71,10 +71,8 @@ extension QUICConnectionCore {
         now: NetworkClock.Instant
     ) {
         self.receivingECN = ecn
-        if self.paths[path] == nil {
-            self.paths[path] = CorePath(id: path, isValidated: false)
-        }
-        self.paths[path]!.bytesReceived &+= datagram.count
+        let pathIndex = self.paths.indexAdding(path)
+        self.paths[pathIndex].bytesReceived &+= datagram.count
         self.receivingPath = path
         switch self.state {
         case .closed, .draining:
@@ -547,14 +545,15 @@ extension QUICConnectionCore {
             // Answered on the path it arrived on (RFC 9000 Section 8.2.2), which this endpoint
             // validates in turn.
             let path = self.receivingPath
-            self.paths[path]?.pendingResponses.append(data)
-            if let count = self.paths[path]?.pendingResponses.count, count > CorePath.maximumPendingResponses {
-                self.paths[path]?.pendingResponses.removeFirst()
+            guard let index = self.paths.index(of: path) else { return true }
+            self.paths[index].pendingResponses.append(data)
+            if self.paths[index].pendingResponses.count > CorePath.maximumPendingResponses {
+                self.paths[index].pendingResponses.removeFirst()
             }
             if path != self.activePath {
                 _ = self.assignPeerConnectionID(to: path)
             }
-            if self.paths[path]?.isValidated == false {
+            if !self.paths[index].isValidated {
                 self.startValidation(of: path)
             }
             return true

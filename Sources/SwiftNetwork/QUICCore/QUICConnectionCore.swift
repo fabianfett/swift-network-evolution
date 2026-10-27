@@ -309,9 +309,8 @@ public struct QUICConnectionCore: ~Copyable {
     /// Why the connection is closing, draining or closed; `nil` while it is open.
     public internal(set) var closeReason: CloseReason?
     var events = Deque<Event>()
-    /// The network paths, by the driver's ID.
-    var paths: [CorePathID: CorePath] = [.initial: CorePath(id: .initial, isValidated: true)]
-    var activePath = CorePathID.initial
+    /// The network paths, by the driver's ID, and the active one.
+    var paths = CorePathTable()
     /// The path of the datagram being processed.
     var receivingPath = CorePathID.initial
     var largestNonProbingPacketNumber: UInt64?
@@ -1180,6 +1179,7 @@ extension QUICConnectionCore {
 
     /// Whether the connection has PATH_CHALLENGE or PATH_RESPONSE frames to send on `path`.
     func hasProbingFramesToSend(on path: CorePathID) -> Bool {
-        self.paths[path]?.hasProbingFramesToSend == true
+        guard let index = self.paths.index(of: path) else { return false }
+        return self.paths[index].hasProbingFramesToSend
     }
 }

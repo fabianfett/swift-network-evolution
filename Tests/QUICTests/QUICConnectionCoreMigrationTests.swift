@@ -376,6 +376,42 @@ final class QUICConnectionCoreMigrationTests: XCTestCase {
         XCTAssertEqual(retiredByServer, [oldDestination])
     }
 
+    /// Forgetting a path that was added before the active one leaves the active one, and a path
+    /// added after it, as they were.
+    func testForgettingAnEarlierPathKeepsTheActiveOne() throws {
+        var pair = Self.connectedPair()
+        let laterPath = CorePathID(2)
+        XCTAssertTrue(pair.client.migrate(to: Self.newPath, now: pair.now))
+        Self.exchange(&pair)
+        XCTAssertEqual(pair.client.activePathID, Self.newPath)
+        // A path that never gets an answer.
+        XCTAssertTrue(pair.client.probePath(laterPath, now: pair.now))
+        pair.client.forgetPath(.initial)
+        XCTAssertNil(pair.client.paths[.initial])
+        XCTAssertEqual(pair.client.activePathID, Self.newPath)
+        XCTAssertTrue(pair.client.isPathValidated(Self.newPath))
+        XCTAssertFalse(pair.client.isPathValidated(laterPath))
+        XCTAssertEqual(pair.client.pathWithProbeToSend, laterPath)
+
+        // Data still flows on the active path.
+        let payload = [UInt8](repeating: 9, count: 3000)
+        let streamID = try XCTUnwrap(pair.client.openStream(bidirectional: true))
+        pair.client.write(payload.span.bytes, to: streamID, fin: true)
+        Self.exchange(&pair, route: { _, path in path == laterPath ? nil : path })
+        XCTAssertEqual(pair.client.activePathID, Self.newPath)
+        guard var server = pair.server.take() else { return XCTFail("No server") }
+        var received = 0
+        while let progress: Int = server.read(
+            from: streamID,
+            { bytes, _ in
+                received += bytes.byteCount
+                return (bytes.byteCount, bytes.byteCount)
+            }
+        ), progress > 0 {}
+        pair.server = consume server
+        XCTAssertEqual(received, payload.count)
+    }
+
     /// RFC 9000 Section 5.1.2: Retire Prior To takes the connection ID of a path, too, which gets
     /// another one.
     func testRetirePriorToReplacesTheConnectionIDOfAPath() throws {

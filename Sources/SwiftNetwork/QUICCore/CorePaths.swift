@@ -78,6 +78,87 @@ struct CorePath {
     }
 }
 
+/// The paths of a connection, one to a few and nearly always one, and which of them is active.
+///
+/// A dictionary's getter copies the whole path on every read, and each lookup hashes; at this size
+/// a linear search is cheaper, and `self[index]` reads and changes a path in place. An index stays
+/// valid until a path is added or removed, which only `receive(_:on:ecn:now:)`, `probePath(_:now:)`,
+/// `setInterfaceMTU(_:on:)` and `forgetPath(_:)` do. The paths keep the order they were added in.
+@available(Network 0.1.0, *)
+struct CorePathTable {
+    private var storage: [CorePath]
+    /// The position of the active path, which is always in the table.
+    private(set) var activeIndex: Int
+
+    /// The handshake's path, validated and active.
+    init() {
+        self.storage = [CorePath(id: .initial, isValidated: true)]
+        self.activeIndex = 0
+    }
+
+    var indices: Range<Int> {
+        self.storage.indices
+    }
+
+    /// The path at `index`, read and changed in place.
+    subscript(index: Int) -> CorePath {
+        _read { yield self.storage[index] }
+        _modify { yield &self.storage[index] }
+    }
+
+    /// The active path, read and changed in place.
+    var active: CorePath {
+        _read { yield self.storage[self.activeIndex] }
+        _modify { yield &self.storage[self.activeIndex] }
+    }
+
+    var activeID: CorePathID {
+        self.storage[self.activeIndex].id
+    }
+
+    /// A copy of path `id`, for tests; the core reads in place through ``index(of:)``.
+    subscript(id: CorePathID) -> CorePath? {
+        self.index(of: id).map { self.storage[$0] }
+    }
+
+    /// The position of path `id`; the active path is looked at first.
+    func index(of id: CorePathID) -> Int? {
+        if self.storage[self.activeIndex].id == id { return self.activeIndex }
+        return self.firstIndex { $0.id == id }
+    }
+
+    /// The position of the first path, in the order they were added, that `predicate` accepts.
+    func firstIndex(where predicate: (CorePath) -> Bool) -> Int? {
+        for index in self.storage.indices where predicate(self.storage[index]) {
+            return index
+        }
+        return nil
+    }
+
+    /// The position of path `id`, which is added, not validated, if it is new.
+    mutating func indexAdding(_ id: CorePathID) -> Int {
+        if let index = self.index(of: id) { return index }
+        self.storage.append(CorePath(id: id, isValidated: false))
+        return self.storage.endIndex &- 1
+    }
+
+    /// Removes the path at `index`, which must not be the active one.
+    mutating func remove(at index: Int) -> CorePath {
+        precondition(index != self.activeIndex, "The active path can't be removed")
+        let removed = self.storage.remove(at: index)
+        if index < self.activeIndex {
+            self.activeIndex &-= 1
+        }
+        return removed
+    }
+
+    /// Makes the path at `index` the active one.
+    mutating func makeActive(at index: Int) {
+        precondition(self.storage.indices.contains(index), "No path at \(index)")
+        self.activeIndex = index
+    }
+}
+
 @available(Network 0.1.0, *)
 extension QUICConnectionCore {
     /// The path packets go out on and the peer sends to.
@@ -85,23 +166,35 @@ extension QUICConnectionCore {
         self.activePath
     }
 
+    /// The path packets go out on and the peer sends to.
+    var activePath: CorePathID {
+        self.paths.activeID
+    }
+
     /// Whether the path was validated.
     public func isPathValidated(_ path: CorePathID) -> Bool {
-        self.paths[path]?.isValidated ?? false
+        guard let index = self.paths.index(of: path) else { return false }
+        return self.paths[index].isValidated
     }
 
     /// The peer's connection ID packets on `path` are sent to.
     public func peerConnectionID(on path: CorePathID) -> QUICConnectionID? {
         if path == self.activePath { return self.peerConnectionID }
-        guard let sequenceNumber = self.paths[path]?.peerConnectionIDSequenceNumber else { return nil }
+        guard let index = self.paths.index(of: path),
+            let sequenceNumber = self.paths[index].peerConnectionIDSequenceNumber
+        else {
+            return nil
+        }
         return self.connectionIDs.peer.first { $0.sequenceNumber == sequenceNumber }?.connectionID
     }
 
     /// A path other than the active one that has a probe to send, which ``send(into:on:now:)``
-    /// takes next.
+    /// takes next. The paths are looked at in the order they were added.
     public var pathWithProbeToSend: CorePathID? {
         guard !self.isClosingOrDraining, self.handshake.isComplete else { return nil }
-        for (id, path) in self.paths where id != self.activePath && path.hasProbingFramesToSend {
+        for index in self.paths.indices
+        where index != self.paths.activeIndex && self.paths[index].hasProbingFramesToSend {
+            let id = self.paths[index].id
             // A path that lost its connection ID to Retire Prior To gets another one.
             if self.peerConnectionID(on: id) != nil || self.hasUnusedPeerConnectionID,
                 self.amplificationBudget(on: id) > 0
@@ -120,12 +213,10 @@ extension QUICConnectionCore {
         guard !self.isServer, self.isHandshakeConfirmed, !self.isClosingOrDraining, !self.peerDisabledMigration else {
             return false
         }
-        if self.paths[path] == nil {
-            self.paths[path] = CorePath(id: path, isValidated: false)
-        }
-        guard path != self.activePath else { return true }
+        let index = self.paths.indexAdding(path)
+        guard index != self.paths.activeIndex else { return true }
         guard self.assignPeerConnectionID(to: path) else { return false }
-        if !self.paths[path]!.isValidated {
+        if !self.paths[index].isValidated {
             self.startValidation(of: path)
         }
         return true
@@ -136,18 +227,19 @@ extension QUICConnectionCore {
     @discardableResult
     public mutating func migrate(to path: CorePathID, now: NetworkClock.Instant) -> Bool {
         guard path != self.activePath else { return true }
-        guard self.probePath(path, now: now) else { return false }
-        if self.paths[path]!.isValidated {
+        guard self.probePath(path, now: now), let index = self.paths.index(of: path) else { return false }
+        if self.paths[index].isValidated {
             self.makeActive(path, now: now)
         } else {
-            self.paths[path]!.migrateWhenValidated = true
+            self.paths[index].migrateWhenValidated = true
         }
         return true
     }
 
     /// Forgets a path the driver no longer uses, retiring the peer's connection ID on it.
     public mutating func forgetPath(_ path: CorePathID) {
-        guard path != self.activePath, let removed = self.paths.removeValue(forKey: path) else { return }
+        guard let index = self.paths.index(of: path), index != self.paths.activeIndex else { return }
+        let removed = self.paths.remove(at: index)
         self.retirePathConnectionID(removed)
     }
 
@@ -158,46 +250,52 @@ extension QUICConnectionCore {
     // MARK: Validation
 
     mutating func startValidation(of path: CorePathID) {
-        guard var state = self.paths[path], !state.isValidating else { return }
-        state.challengesSent = 0
-        state.challengePending = true
-        state.failed = false
-        self.paths[path] = state
+        guard let index = self.paths.index(of: path), !self.paths[index].isValidating else { return }
+        self.paths[index].challengesSent = 0
+        self.paths[index].challengePending = true
+        self.paths[index].failed = false
     }
 
     /// The bytes that may still go out on `path` before it is validated: three times what
     /// arrived on it (RFC 9000 Section 8). A client limits nothing.
     func amplificationBudget(on path: CorePathID) -> Int {
-        guard self.isServer, let state = self.paths[path], !state.isValidated else { return .max }
-        return max(0, 3 &* state.bytesReceived &- state.bytesSent)
+        guard self.isServer, let index = self.paths.index(of: path), !self.paths[index].isValidated else {
+            return .max
+        }
+        return max(0, 3 &* self.paths[index].bytesReceived &- self.paths[index].bytesSent)
+    }
+
+    /// The sequence numbers of the peer's connection IDs that a path or the active one uses.
+    var peerConnectionIDsInUse: Set<UInt64> {
+        var inUse: Set<UInt64> = [self.connectionIDs.currentPeerSequenceNumber]
+        for index in self.paths.indices {
+            if let sequenceNumber = self.paths[index].peerConnectionIDSequenceNumber { inUse.insert(sequenceNumber) }
+        }
+        return inUse
     }
 
     /// Gives `path` a connection ID of the peer that no other path uses. A zero-length one is
     /// shared.
     mutating func assignPeerConnectionID(to path: CorePathID) -> Bool {
         guard path != self.activePath else { return true }
-        if self.paths[path]?.peerConnectionIDSequenceNumber != nil { return true }
+        // Every caller knows the path already.
+        guard let index = self.paths.index(of: path) else { return false }
+        if self.paths[index].peerConnectionIDSequenceNumber != nil { return true }
         if self.peerConnectionID.length == 0 {
-            self.paths[path]?.peerConnectionIDSequenceNumber = self.connectionIDs.currentPeerSequenceNumber
+            self.paths[index].peerConnectionIDSequenceNumber = self.connectionIDs.currentPeerSequenceNumber
             return true
         }
-        var inUse: Set<UInt64> = [self.connectionIDs.currentPeerSequenceNumber]
-        for state in self.paths.values {
-            if let sequenceNumber = state.peerConnectionIDSequenceNumber { inUse.insert(sequenceNumber) }
-        }
+        let inUse = self.peerConnectionIDsInUse
         guard let unused = self.connectionIDs.peer.first(where: { !inUse.contains($0.sequenceNumber) }) else {
             self.log.error("No unused connection ID of the peer for \(path)")
             return false
         }
-        self.paths[path]?.peerConnectionIDSequenceNumber = unused.sequenceNumber
+        self.paths[index].peerConnectionIDSequenceNumber = unused.sequenceNumber
         return true
     }
 
     var hasUnusedPeerConnectionID: Bool {
-        var inUse: Set<UInt64> = [self.connectionIDs.currentPeerSequenceNumber]
-        for state in self.paths.values {
-            if let sequenceNumber = state.peerConnectionIDSequenceNumber { inUse.insert(sequenceNumber) }
-        }
+        let inUse = self.peerConnectionIDsInUse
         return self.connectionIDs.peer.contains { !inUse.contains($0.sequenceNumber) }
     }
 
@@ -215,19 +313,18 @@ extension QUICConnectionCore {
     /// A PATH_RESPONSE validates the path its PATH_CHALLENGE went out on, wherever it arrived
     /// (RFC 9000 Section 8.2.3).
     mutating func pathResponseReceived(_ data: UInt64, now: NetworkClock.Instant) {
-        guard let (id, _) = self.paths.first(where: { $0.value.challenge == data }) else {
+        guard let index = self.paths.firstIndex(where: { $0.challenge == data }) else {
             self.log.debug("PATH_RESPONSE for no PATH_CHALLENGE")
             return
         }
-        var state = self.paths[id]!
-        state.challenge = nil
-        state.challengeDeadline = nil
-        state.challengePending = false
-        let wasValidated = state.isValidated
-        state.isValidated = true
-        let migrates = state.migrateWhenValidated
-        state.migrateWhenValidated = false
-        self.paths[id] = state
+        let id = self.paths[index].id
+        self.paths[index].challenge = nil
+        self.paths[index].challengeDeadline = nil
+        self.paths[index].challengePending = false
+        let wasValidated = self.paths[index].isValidated
+        self.paths[index].isValidated = true
+        let migrates = self.paths[index].migrateWhenValidated
+        self.paths[index].migrateWhenValidated = false
         if !wasValidated {
             self.events.append(.pathValidated(id))
         }
@@ -238,30 +335,38 @@ extension QUICConnectionCore {
 
     /// Resends PATH_CHALLENGE, or gives the path up, when the last one went unanswered.
     mutating func handlePathTimeouts(now: NetworkClock.Instant) {
-        for (id, state) in self.paths {
-            guard let deadline = state.challengeDeadline, now >= deadline else { continue }
-            var state = state
-            state.challenge = nil
-            state.challengeDeadline = nil
-            if state.challengesSent < CorePath.maximumChallenges {
-                state.challengePending = true
-                self.paths[id] = state
+        // `makeActive` adds and removes no path, so the indices hold.
+        for index in self.paths.indices {
+            guard let deadline = self.paths[index].challengeDeadline, now >= deadline else { continue }
+            self.paths[index].challenge = nil
+            self.paths[index].challengeDeadline = nil
+            if self.paths[index].challengesSent < CorePath.maximumChallenges {
+                self.paths[index].challengePending = true
                 continue
             }
-            state.failed = true
-            state.migrateWhenValidated = false
-            self.paths[id] = state
+            self.paths[index].failed = true
+            self.paths[index].migrateWhenValidated = false
+            let id = self.paths[index].id
             self.log.error("Validating \(id) failed")
             self.events.append(.pathFailed(id))
-            if id == self.activePath, let fallback = self.paths.first(where: { $0.key != id && $0.value.isValidated }) {
-                // RFC 9000 Section 9.3.2: back to the last validated path.
-                self.makeActive(fallback.key, now: now)
+            if index == self.paths.activeIndex,
+                let fallback = self.paths.firstIndex(where: { $0.id != id && $0.isValidated })
+            {
+                // RFC 9000 Section 9.3.2: back to the last validated path; of several, the one
+                // added first.
+                self.makeActive(self.paths[fallback].id, now: now)
             }
         }
     }
 
     var nextPathDeadline: NetworkClock.Instant? {
-        self.paths.values.compactMap(\.challengeDeadline).min()
+        var earliest: NetworkClock.Instant?
+        for index in self.paths.indices {
+            guard let deadline = self.paths[index].challengeDeadline else { continue }
+            if let current = earliest, current <= deadline { continue }
+            earliest = deadline
+        }
+        return earliest
     }
 
     /// How long a PATH_CHALLENGE waits for its response (RFC 9000 Section 8.2.4).
@@ -276,35 +381,39 @@ extension QUICConnectionCore {
     mutating func nonProbingPacketArrived(on path: CorePathID, packetNumber: UInt64, now: NetworkClock.Instant) {
         if let largest = self.largestNonProbingPacketNumber, packetNumber <= largest { return }
         self.largestNonProbingPacketNumber = packetNumber
-        guard self.isServer, path != self.activePath, self.isHandshakeConfirmed else { return }
-        if self.paths[path]?.peerConnectionIDSequenceNumber == nil && self.hasUnusedPeerConnectionID {
+        guard self.isServer, path != self.activePath, self.isHandshakeConfirmed,
+            let index = self.paths.index(of: path)
+        else {
+            return
+        }
+        if self.paths[index].peerConnectionIDSequenceNumber == nil && self.hasUnusedPeerConnectionID {
             _ = self.assignPeerConnectionID(to: path)
         }
         // Without a spare one, a NAT rebinding keeps the current connection ID (RFC 9000
         // Section 9.5).
         self.log.info("The client moved to \(path)")
         self.makeActive(path, now: now)
-        if !self.paths[path]!.isValidated {
+        if !self.paths[index].isValidated {
             self.startValidation(of: path)
         }
     }
 
     /// Sends on `path` from now on.
     mutating func makeActive(_ path: CorePathID, now: NetworkClock.Instant) {
-        guard path != self.activePath, let state = self.paths[path] else { return }
-        let previous = self.activePath
-        if let sequenceNumber = state.peerConnectionIDSequenceNumber,
+        guard let index = self.paths.index(of: path), index != self.paths.activeIndex else { return }
+        let previous = self.paths.activeIndex
+        if let sequenceNumber = self.paths[index].peerConnectionIDSequenceNumber,
             let entry = self.connectionIDs.peer.first(where: { $0.sequenceNumber == sequenceNumber })
         {
             // The previous path keeps the connection ID it used until it is forgotten.
-            self.paths[previous]?.peerConnectionIDSequenceNumber = self.connectionIDs.currentPeerSequenceNumber
+            self.paths[previous].peerConnectionIDSequenceNumber = self.connectionIDs.currentPeerSequenceNumber
             self.switchPeerConnectionID(to: entry)
-            self.paths[path]?.peerConnectionIDSequenceNumber = nil
+            self.paths[index].peerConnectionIDSequenceNumber = nil
         }
-        self.activePath = path
+        self.paths.makeActive(at: index)
         // The new path carries what its PMTUD found, the base size before; its search starts
         // over (RFC 9000 Section 14.2).
-        self.setMaxDatagramSize(state.pmtud?.maxDatagramSize ?? self.configuration.maxDatagramSize)
+        self.setMaxDatagramSize(self.paths[index].pmtud?.maxDatagramSize ?? self.configuration.maxDatagramSize)
         self.pmtudLargePacketsLost = 0
         // RFC 9000 Section 9.4: the new path's congestion controller starts over.
         self.recovery.resetCongestionControl()
@@ -330,33 +439,33 @@ extension QUICConnectionCore {
         isAckEliciting: inout Bool,
         now: NetworkClock.Instant
     ) -> Bool {
-        guard var state = self.paths[path] else { return false }
+        guard let index = self.paths.index(of: path) else { return false }
         var wrote = false
-        while let data = state.pendingResponses.first, writer.offset &+ 9 <= limit {
+        while let data = self.paths[index].pendingResponses.first, writer.offset &+ 9 <= limit {
             guard writer.uint8(0x1b), writer.uint64(data) else { break }
-            state.pendingResponses.removeFirst()
+            self.paths[index].pendingResponses.removeFirst()
             frames.append(.pathResponse)
             isAckEliciting = true
             wrote = true
         }
-        if state.challengePending, writer.offset &+ 9 <= limit {
+        if self.paths[index].challengePending, writer.offset &+ 9 <= limit {
             var generator = SystemRandomNumberGenerator()
             let data = UInt64.random(in: 0...UInt64.max, using: &generator)
             if writer.uint8(0x1a), writer.uint64(data) {
-                state.challengePending = false
-                state.challenge = data
-                state.challengesSent &+= 1
-                state.challengeSentTime = now
+                let timeout = self.pathValidationTimeout
+                self.paths[index].challengePending = false
+                self.paths[index].challenge = data
+                self.paths[index].challengesSent &+= 1
+                self.paths[index].challengeSentTime = now
                 // Each retry waits twice as long.
-                state.challengeDeadline = now.advanced(
-                    by: self.pathValidationTimeout * (1 << (state.challengesSent &- 1))
+                self.paths[index].challengeDeadline = now.advanced(
+                    by: timeout * (1 << (self.paths[index].challengesSent &- 1))
                 )
                 frames.append(.pathChallenge)
                 isAckEliciting = true
                 wrote = true
             }
         }
-        self.paths[path] = state
         return wrote
     }
 }

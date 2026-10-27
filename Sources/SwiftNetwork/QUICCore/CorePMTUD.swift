@@ -187,7 +187,7 @@ extension QUICConnectionCore {
     /// The largest datagram ``send(into:on:now:)`` may write on the active path right now: its
     /// path MTU, or a PMTUD probe that is due. The driver hands buffers at least this large.
     public var datagramCapacity: Int {
-        guard let pmtud = self.paths[self.activePath]?.pmtud, pmtud.probePending else {
+        guard let pmtud = self.paths.active.pmtud, pmtud.probePending else {
             return self.maxDatagramSize
         }
         return max(self.maxDatagramSize, pmtud.probeDatagramSize)
@@ -195,43 +195,38 @@ extension QUICConnectionCore {
 
     /// Tells the core the MTU of a path's interface, which caps its PMTUD; zero if unknown.
     public mutating func setInterfaceMTU(_ mtu: Int, on path: CorePathID) {
-        if self.paths[path] == nil {
-            // As a datagram arriving on it would.
-            self.paths[path] = CorePath(id: path, isValidated: false)
-        }
-        self.paths[path]!.interfaceMTU = mtu
+        // A new path is added, as a datagram arriving on it would.
+        let index = self.paths.indexAdding(path)
+        self.paths[index].interfaceMTU = mtu
     }
 
     /// Starts PMTUD on the active path, once the handshake is confirmed.
     mutating func startPMTUD() {
-        guard self.configuration.pmtudEnabled, self.isHandshakeConfirmed, var path = self.paths[self.activePath] else {
-            return
-        }
+        guard self.configuration.pmtudEnabled, self.isHandshakeConfirmed else { return }
         let peerLimit =
             self.peerTransportParameters?.intValue(.maxUDPPayloadSize) ?? Int(TransportParameters.maxUDPPayloadSize)
         var pmtud =
-            path.pmtud
+            self.paths.active.pmtud
             ?? CorePMTUD(
                 baseDatagramSize: self.configuration.maxDatagramSize,
                 ipUDPHeaderSize: self.configuration.ipUDPHeaderSize
             )
         pmtud.start(
-            interfaceMTU: path.interfaceMTU ?? self.configuration.interfaceMTU,
+            interfaceMTU: self.paths.active.interfaceMTU ?? self.configuration.interfaceMTU,
             peerMaxUDPPayloadSize: peerLimit,
             firstPacketNumber: UInt64(self.protector.getPacketNumber(for: .applicationData).value)
         )
-        path.pmtud = pmtud
-        self.paths[self.activePath] = path
+        self.paths.active.pmtud = pmtud
         self.log.debug("PMTUD up to \(pmtud.maximumMTU), from \(pmtud.currentMTU)")
     }
 
     var pmtudDeadline: NetworkClock.Instant? {
-        self.paths[self.activePath]?.pmtud?.raiseDeadline
+        self.paths.active.pmtud?.raiseDeadline
     }
 
     mutating func handlePMTUDTimeout(now: NetworkClock.Instant) {
         guard let deadline = self.pmtudDeadline, now >= deadline else { return }
-        self.paths[self.activePath]?.pmtud?.raiseTimerFired(
+        self.paths.active.pmtud?.raiseTimerFired(
             firstPacketNumber: UInt64(self.protector.getPacketNumber(for: .applicationData).value)
         )
     }
@@ -245,7 +240,7 @@ extension QUICConnectionCore {
 
     mutating func pmtudProbeAcknowledged(datagramSize: Int, packetNumber: UInt64, now: NetworkClock.Instant) {
         guard
-            let raised = self.paths[self.activePath]?.pmtud?.probeAcknowledged(
+            let raised = self.paths.active.pmtud?.probeAcknowledged(
                 datagramSize: datagramSize,
                 packetNumber: packetNumber,
                 interval: self.configuration.pmtudInterval,
@@ -260,7 +255,7 @@ extension QUICConnectionCore {
 
     mutating func pmtudProbeLost(datagramSize: Int, packetNumber: UInt64, now: NetworkClock.Instant) {
         self.log.debug("PMTUD probe of \(datagramSize) bytes lost")
-        self.paths[self.activePath]?.pmtud?.probeLost(
+        self.paths.active.pmtud?.probeLost(
             datagramSize: datagramSize,
             packetNumber: packetNumber,
             interval: self.configuration.pmtudInterval,
@@ -291,10 +286,10 @@ extension QUICConnectionCore {
     private mutating func enterPMTUDBlackholeDetection() {
         self.pmtudLargePacketsLost = 0
         guard self.configuration.pmtudEnabled,
-            self.paths[self.activePath]?.pmtud?.enterBlackholeDetection(
+            self.paths.active.pmtud?.enterBlackholeDetection(
                 firstPacketNumber: UInt64(self.protector.getPacketNumber(for: .applicationData).value)
             ) == true,
-            let size = self.paths[self.activePath]?.pmtud?.maxDatagramSize
+            let size = self.paths.active.pmtud?.maxDatagramSize
         else {
             return
         }
@@ -307,7 +302,7 @@ extension QUICConnectionCore {
     /// data queued is enough to make up for the probe.
     func pmtudProbeSize(limit: Int) -> Int? {
         guard self.configuration.pmtudEnabled, self.isHandshakeConfirmed, case .established = self.state,
-            let pmtud = self.paths[self.activePath]?.pmtud, pmtud.probePending
+            let pmtud = self.paths.active.pmtud, pmtud.probePending
         else {
             return nil
         }
@@ -332,7 +327,7 @@ extension QUICConnectionCore {
         self.acks[.applicationData].ackNeeded || self.handshakeDonePending || self.keepAlivePending
             || self.maxDataPending || self.streams.maxStreamsBidirectionalPending
             || self.streams.maxStreamsUnidirectionalPending || self.pingPending
-            || self.paths[self.activePath]?.hasProbingFramesToSend == true || !self.datagramsToSend.isEmpty
+            || self.paths.active.hasProbingFramesToSend || !self.datagramsToSend.isEmpty
             || self.hasConnectionIDFramesToSend || self.probesPending[Int(PacketNumberSpace.applicationData.rawValue)] > 0
     }
 }
