@@ -754,6 +754,55 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         XCTAssertTrue(finished)
     }
 
+    func testStopSendingAfterTheWholeStreamArrivedClosesItAndReturnsTheCredit() throws {
+        // A server that answers before reading the request, as HTTP/3 may, then stops the rest.
+        var serverConfiguration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
+        serverConfiguration.initialMaxStreamsBidirectional = 2
+        serverConfiguration.initialMaxStreamsUnidirectional = 2
+        serverConfiguration.initialMaxData = 1000
+        var pair = LockstepPair(serverConfiguration: serverConfiguration)
+        pair.exchange()
+        XCTAssertTrue(pair.client.isHandshakeConfirmed)
+        let request = [UInt8](repeating: 7, count: 400)
+        // More streams and bytes than the initial limits allow, so each must give its credit back.
+        for round in 0..<12 {
+            let bidirectional = round % 2 == 0
+            let id = try XCTUnwrap(pair.client.openStream(bidirectional: bidirectional), "round \(round)")
+            XCTAssertEqual(pair.client.write(request.span.bytes, to: id, fin: true), request.count)
+            pair.exchange()
+            let closed: Bool =
+                pair.withServer { server in
+                    XCTAssertTrue(server.hasStream(id), "round \(round)")
+                    if bidirectional {
+                        server.write([UInt8]("OK".utf8).span.bytes, to: id, fin: true)
+                    }
+                    server.stopSending(id, errorCode: 9)
+                    return !server.hasStream(id)
+                } ?? false
+            // Without a send side, nothing keeps the stream.
+            XCTAssertEqual(closed, !bidirectional, "round \(round)")
+            pair.exchange()
+            // The client's delayed ACK of the response's FIN.
+            if let deadline = pair.client.nextDeadline, deadline < pair.now.advanced(by: .seconds(1)) {
+                pair.advanceToNextDeadline()
+                pair.exchange()
+            }
+            if var server = pair.server.take() {
+                pair.serverEvents += LockstepPair.events(&server)
+                pair.server = consume server
+            }
+            XCTAssertTrue(pair.serverEvents.contains(.streamClosed(id)), "round \(round): \(pair.serverEvents)")
+            XCTAssertFalse(pair.server?.hasStream(id) ?? true, "round \(round)")
+            // Everything had arrived, so no STOP_SENDING went out.
+            XCTAssertFalse(pair.clientEvents.contains(.stopSending(id, errorCode: 9)), "round \(round)")
+            if bidirectional {
+                _ = pair.client.read(from: id) { bytes, _ in (bytes.byteCount, ()) }
+            }
+        }
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
+    }
+
     func testAClosingEndpointAnswersWithConnectionCloseAgain() {
         var pair = self.connectedPair()
         pair.client.close(errorCode: 3, isApplication: true, reason: "done", now: pair.now)
@@ -894,6 +943,8 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
         var received: [UInt8] = []
         var responded = false
         var stopped = false
+        /// Whether the whole request had arrived when the server stopped the stream.
+        var completeWhenStopped = false
         var resetSeen = false
     }
 
@@ -995,6 +1046,7 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
                         var stream = serverStreams[id, default: ServerStream()]
                         if client.plan == .serverStopsSending && !stream.stopped {
                             stream.stopped = true
+                            stream.completeWhenStopped = server.streams.streams[id]?.receive.isComplete ?? false
                             server.stopSending(id, errorCode: 0x55)
                         }
                         let finished = Self.readAll(&server, id, into: &stream.received)
@@ -1094,10 +1146,15 @@ final class QUICConnectionCoreImpairedNetworkTests: XCTestCase {
                     "stream \(id) received bytes the client never sent, \(context)"
                 )
             case .serverStopsSending:
-                // STOP_SENDING is moot, and not sent, once the whole request has arrived.
+                // STOP_SENDING is moot, and not sent, once the whole request has arrived; the
+                // request is dropped unread either way.
                 XCTAssertTrue(
-                    pair.clientEvents.contains(.stopSending(id, errorCode: 0x55)) || server.received == stream.request,
+                    pair.clientEvents.contains(.stopSending(id, errorCode: 0x55)) || server.completeWhenStopped,
                     "stream \(id) STOP_SENDING not seen by the client, \(context)"
+                )
+                XCTAssertFalse(
+                    pair.clientEvents.contains(.stopSending(id, errorCode: 0x55)) && server.completeWhenStopped,
+                    "stream \(id) STOP_SENDING sent after the whole request arrived, \(context)"
                 )
                 XCTAssertTrue(stream.finished, "stream \(id) response FIN, \(context)")
                 XCTAssertEqual(stream.response, [], "stream \(id), \(context)")

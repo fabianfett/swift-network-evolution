@@ -834,19 +834,28 @@ public struct QUICConnectionCore: ~Copyable {
         self.streams.enqueueForSending(streamID)
     }
 
-    /// Asks the peer to stop sending on a stream with STOP_SENDING.
+    /// Asks the peer to stop sending on a stream with STOP_SENDING, and drops what arrived unread.
+    ///
+    /// Once the peer reset the stream or every byte up to the final size arrived, a STOP_SENDING
+    /// would be pointless (RFC 9000 Section 3.5), and only the unread bytes are dropped.
     public mutating func stopSending(_ streamID: UInt64, errorCode: UInt64) {
-        let discarded = self.streams.withStream(streamID) { stream -> UInt64? in
+        guard let index = self.streams.index(of: streamID) else { return }
+        let stopped = self.streams.withStream(at: index) { stream -> (discarded: UInt64, sendsFrame: Bool)? in
             guard stream.canReceive, stream.stopSendingCode == nil else { return nil }
-            guard stream.peerResetCode == nil, !stream.receive.isComplete else { return nil }
             stream.stopSendingCode = errorCode
-            stream.stopSendingPending = true
-            return stream.receive.discard()
+            let sendsFrame = stream.peerResetCode == nil && !stream.receive.isComplete
+            stream.stopSendingPending = sendsFrame
+            return (stream.receive.discard(), sendsFrame)
         }
-        guard let discarded = discarded ?? nil else { return }
-        self.consumedData &+= discarded
+        guard let stopped else { return }
+        // The dropped bytes count as read for connection flow control.
+        self.consumedData &+= stopped.discarded
         self.updateConnectionReceiveLimit()
-        self.streams.enqueueForSending(streamID)
+        if stopped.sendsFrame {
+            self.streams.enqueueForSending(streamID)
+        }
+        // The receive side may be done now, and with it the stream.
+        self.finishStreamOperation(at: index)
     }
 
     /// The limit on the streams of one kind the peer may open, as last raised.
