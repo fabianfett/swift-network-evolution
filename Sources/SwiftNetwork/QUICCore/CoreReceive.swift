@@ -54,6 +54,7 @@ enum CoreTransportError {
     static let protocolViolation: UInt64 = 0xa
     static let applicationError: UInt64 = 0xc
     static let cryptoBufferExceeded: UInt64 = 0xd
+    static let aeadLimitReached: UInt64 = 0xf
     static let cryptoError: UInt64 = 0x100
 }
 
@@ -177,6 +178,9 @@ extension QUICConnectionCore {
             // A packet we can't decrypt (yet).
             if packet.failedDecryption {
                 self.log.debug("Dropping undecryptable packet in \(packet.numberSpace)")
+                if !packet.longHeader, packet.keyState == .phase0 || packet.keyState == .phase1 {
+                    self.onAuthenticationFailure(now: now)
+                }
             }
         case .payload(let packet, let extraLength, let reservedBits):
             let packetLength = (count &- offset) &- extraLength
@@ -346,6 +350,8 @@ extension QUICConnectionCore {
         } else if let first = self.keyPhaseFirstReceived, packetNumber >= first {
             self.keyPhase = phase
             self.keyPhaseFirstReceived = packetNumber
+            // Following the peer's update moved the write keys to the next generation too.
+            self.packetsSealedInKeyPhase = 0
         }
     }
 

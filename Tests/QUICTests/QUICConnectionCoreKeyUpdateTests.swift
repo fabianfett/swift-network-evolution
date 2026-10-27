@@ -213,6 +213,72 @@ final class QUICConnectionCoreKeyUpdateTests: XCTestCase {
         XCTAssertNil(pair.client.closeReason)
         XCTAssertNil(pair.server?.closeReason)
     }
+
+    #if DEBUG
+    private static func configuration(
+        confidentialityLimit: UInt64 = .max,
+        integrityLimit: UInt64 = .max
+    ) -> QUICConnectionCore.Configuration {
+        var configuration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
+        configuration.aeadLimitsForTesting = (confidentialityLimit, integrityLimit)
+        return configuration
+    }
+
+    /// RFC 9001 Section 6.6: an endpoint updates its keys before it seals more packets with them
+    /// than the confidentiality limit allows.
+    func testKeysUpdateBeforeTheConfidentialityLimit() {
+        let limit: UInt64 = 32
+        var pair = LockstepPair(
+            clientConfiguration: Self.configuration(confidentialityLimit: limit),
+            serverConfiguration: Self.configuration(confidentialityLimit: limit)
+        )
+        pair.exchange()
+        var phases: [PacketKeyState] = [pair.client.keyPhase]
+        for size in [20_000, 50_000, 3000, 80_000, 100] {
+            Self.roundTrip(&pair, size: size)
+            if phases.last != pair.client.keyPhase { phases.append(pair.client.keyPhase) }
+            XCTAssertLessThan(pair.client.packetsSealedInKeyPhase, limit)
+            XCTAssertLessThan(pair.server?.packetsSealedInKeyPhase ?? limit, limit)
+        }
+        // The requests and responses took several times the limit in packets, each set of keys
+        // sealed fewer than the limit, and the connection is still open: the keys updated.
+        XCTAssertGreaterThan(phases.count, 1, "the keys didn't update")
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
+    }
+
+    /// RFC 9001 Section 6.6: once more 1-RTT packets failed to open than the integrity limit
+    /// allows, the connection closes with AEAD_LIMIT_REACHED.
+    func testForgedPacketsPastTheIntegrityLimitCloseTheConnection() throws {
+        let limit: UInt64 = 3
+        var pair = LockstepPair(clientConfiguration: Self.configuration(integrityLimit: limit))
+        pair.exchange()
+        Self.roundTrip(&pair, size: 10)
+        let now = pair.now
+        let datagrams: [[UInt8]] =
+            pair.withServer { server in
+                server.injectedFrames.append([0x01])  // PING
+                return LockstepPair.drain(&server, now: now)
+            } ?? []
+        var forged = try XCTUnwrap(datagrams.first)
+        forged[forged.count - 1] ^= 0xff
+        for attempt in 0...limit {
+            XCTAssertNil(pair.client.closeReason, "attempt \(attempt)")
+            var datagram = forged
+            var span = datagram.mutableSpan
+            pair.client.receive(&span, now: now)
+        }
+        XCTAssertEqual(
+            pair.client.closeReason,
+            .transportError(errorCode: 0x0f, reason: "AEAD integrity limit reached")
+        )
+        pair.exchange()
+        XCTAssertEqual(
+            pair.server?.closeReason,
+            .peer(errorCode: 0x0f, isApplication: false, reason: "AEAD integrity limit reached")
+        )
+    }
+    #endif
 }
 
 #endif

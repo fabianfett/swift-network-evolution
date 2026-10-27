@@ -1448,6 +1448,11 @@ struct Protector: ~Copyable, PrefixedLoggable {
             && !keysReadyInner(keys: writeFramer[keyState.rawValue])
     }
 
+    /// Whether the keys of `keyState` are ChaCha20-Poly1305 rather than AES-GCM.
+    func usesChaChaPoly(for keyState: PacketKeyState) -> Bool {
+        keyType(keys: writeFramer[keyState.rawValue]) == .chaChaPoly
+    }
+
     @inline(always)
     func getTagSize(for keyState: PacketKeyState?) -> UInt8 {
         #if Fuzzing
@@ -1553,6 +1558,10 @@ struct Protector: ~Copyable, PrefixedLoggable {
         buffer: inout MutableSpan<UInt8>,
         currentKeyState: PacketKeyState
     ) throws(QUICError) {
+    }
+
+    func usesChaChaPoly(for keyState: PacketKeyState) -> Bool {
+        false
     }
 
     func commitKeyUpdate(currentKeyState: PacketKeyState) {

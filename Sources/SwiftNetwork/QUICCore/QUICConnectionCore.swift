@@ -118,6 +118,9 @@ public struct QUICConnectionCore: ~Copyable {
         /// Changes the transport parameters this endpoint sends, so tests can send what a broken
         /// peer would.
         var transportParametersForTesting: ((inout TransportParameters) -> Void)?
+        /// Replaces the AEAD limits of RFC 9001 Section 6.6: the packets sealed with one set of
+        /// 1-RTT keys, and the 1-RTT packets that may fail to open, so tests can reach them.
+        var aeadLimitsForTesting: (confidentiality: UInt64, integrity: UInt64)?
         /// Ignores the peer's quic_transport_parameters extension, as if the peer had left it
         /// out. SwiftTLS can't leave it out: a client doesn't start without it, and a server
         /// without it rejects the client's.
@@ -278,6 +281,10 @@ public struct QUICConnectionCore: ~Copyable {
     /// `nil` after our own update until the peer follows it; zero before any 1-RTT packet, so
     /// that a peer updating right away is followed.
     var keyPhaseFirstReceived: UInt64? = 0
+    /// The 1-RTT packets sealed with the keys of the current key phase.
+    var packetsSealedInKeyPhase: UInt64 = 0
+    /// The 1-RTT packets that failed to open, with any keys.
+    var authenticationFailures: UInt64 = 0
     var handshake: CoreHandshake
     var acks: [CoreAckTracker] = [CoreAckTracker(), CoreAckTracker(), CoreAckTracker()]
     var recovery: CoreRecovery
@@ -969,7 +976,57 @@ public struct QUICConnectionCore: ~Copyable {
         self.protector.trafficUpdate(previousKeyState: self.keyPhase)
         self.keyPhase = self.keyPhase == .phase0 ? .phase1 : .phase0
         self.keyPhaseFirstReceived = nil
+        self.packetsSealedInKeyPhase = 0
         return true
+    }
+
+    // MARK: AEAD limits
+
+    /// How many packets one set of 1-RTT keys may seal (RFC 9001 Section 6.6): 2^23 for
+    /// AES-GCM; ChaCha20-Poly1305's limit, beyond 2^62, can't be reached.
+    var confidentialityLimit: UInt64 {
+        #if DEBUG
+        if let limits = self.configuration.aeadLimitsForTesting { return limits.confidentiality }
+        #endif
+        return self.protector.usesChaChaPoly(for: self.keyPhase) ? .max : 1 << 23
+    }
+
+    /// How many 1-RTT packets may fail to open over the connection (RFC 9001 Section 6.6): 2^52
+    /// for AES-GCM, 2^36 for ChaCha20-Poly1305.
+    var integrityLimit: UInt64 {
+        #if DEBUG
+        if let limits = self.configuration.aeadLimitsForTesting { return limits.integrity }
+        #endif
+        return self.protector.usesChaChaPoly(for: self.keyPhase) ? 1 << 36 : 1 << 52
+    }
+
+    /// Counts a 1-RTT packet sealed with the current keys, and moves to new keys well before
+    /// they reach the confidentiality limit. A connection whose peer doesn't follow its last
+    /// update can't update again; it closes with AEAD_LIMIT_REACHED at the limit (RFC 9001
+    /// Section 6.6).
+    mutating func onPacketSealedInKeyPhase(now: NetworkClock.Instant) {
+        self.packetsSealedInKeyPhase &+= 1
+        let limit = self.confidentialityLimit
+        guard self.packetsSealedInKeyPhase >= limit &- limit / 4 else { return }
+        if !self.updateKeys() && self.packetsSealedInKeyPhase >= limit {
+            self.closeWithError(
+                CoreTransportError.aeadLimitReached,
+                reason: "AEAD confidentiality limit reached",
+                now: now
+            )
+        }
+    }
+
+    /// Counts a 1-RTT packet that failed to open, and closes with AEAD_LIMIT_REACHED once more
+    /// than the integrity limit did (RFC 9001 Section 6.6).
+    mutating func onAuthenticationFailure(now: NetworkClock.Instant) {
+        self.authenticationFailures &+= 1
+        guard self.authenticationFailures > self.integrityLimit else { return }
+        self.closeWithError(
+            CoreTransportError.aeadLimitReached,
+            reason: "AEAD integrity limit reached",
+            now: now
+        )
     }
 
     mutating func updateConnectionReceiveLimit() {

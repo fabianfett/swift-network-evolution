@@ -583,6 +583,9 @@ extension QUICConnectionCore {
             self.log.error("Failed to seal packet: \(error)")
             return nil
         }
+        if keyState == .phase0 || keyState == .phase1 {
+            self.onPacketSealedInKeyPhase(now: now)
+        }
 
         let isInFlight = isAckEliciting || hasPadding
         if self.configuration.recordsPacketEvents {
