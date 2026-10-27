@@ -610,8 +610,8 @@ extension QUICConnectionCore {
         // (RFC 9000 Section 10.1).
         if isAckEliciting && !self.sentAckElicitingSinceReceive {
             self.sentAckElicitingSinceReceive = true
-            if let idleTimeout = self.idleTimeout {
-                self.idleDeadline = now.advanced(by: idleTimeout)
+            if let deadline = self.restartedIdleDeadline(now: now) {
+                self.idleDeadline = deadline
             }
         }
         return totalLength

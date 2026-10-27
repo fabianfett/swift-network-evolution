@@ -550,6 +550,86 @@ final class QUICConnectionCoreTests: XCTestCase {
         }
     }
 
+    /// Exchanges datagrams with `oneWay` of delay in each direction, running the timers as they
+    /// come due, until nothing is in flight.
+    private static func exchange(_ pair: inout LockstepPair, oneWay: NetworkDuration) {
+        func fireTimers(_ pair: inout LockstepPair) {
+            let now = pair.now
+            if let deadline = pair.client.nextDeadline, deadline <= now {
+                pair.client.handleTimeout(now: now)
+            }
+            if var server = pair.server.take() {
+                if let deadline = server.nextDeadline, deadline <= now {
+                    server.handleTimeout(now: now)
+                }
+                pair.server = consume server
+            }
+        }
+        for _ in 0..<30 {
+            fireTimers(&pair)
+            let toServer = LockstepPair.drain(&pair.client, now: pair.now)
+            pair.now = pair.now.advanced(by: oneWay)
+            if pair.server == nil, let first = toServer.first {
+                let ids = LockstepPair.connectionIDs(ofInitial: first)
+                pair.server = QUICConnectionCore(
+                    serverWith: pair.serverConfiguration,
+                    localConnectionID: QUICConnectionID(8),
+                    originalDestinationConnectionID: ids.destination,
+                    peerConnectionID: ids.source,
+                    now: pair.now
+                )
+            }
+            fireTimers(&pair)
+            guard var server = pair.server.take() else { return }
+            let now = pair.now
+            for var datagram in toServer {
+                var span = datagram.mutableSpan
+                server.receive(&span, now: now)
+            }
+            pair.serverEvents += LockstepPair.events(&server)
+            let toClient = LockstepPair.drain(&server, now: now)
+            pair.server = consume server
+            pair.now = pair.now.advanced(by: oneWay)
+            fireTimers(&pair)
+            for var datagram in toClient {
+                var span = datagram.mutableSpan
+                pair.client.receive(&span, now: pair.now)
+            }
+            pair.clientEvents += LockstepPair.events(&pair.client)
+            if toServer.isEmpty && toClient.isEmpty { return }
+        }
+    }
+
+    /// RFC 9000 Section 10.1: the idle timeout is at least three PTOs, so a connection with a
+    /// long RTT and a short idle timeout survives its own round trips.
+    func testTheIdleTimeoutIsAtLeastThreeProbeTimeouts() throws {
+        let idleTimeout = NetworkDuration.milliseconds(50)
+        var pair = LockstepPair(
+            clientConfiguration: Self.configuration(idleTimeout: idleTimeout),
+            serverConfiguration: Self.configuration(idleTimeout: idleTimeout)
+        )
+        // A round trip of 400 ms, eight idle timeouts.
+        let oneWay = NetworkDuration.milliseconds(200)
+        Self.exchange(&pair, oneWay: oneWay)
+        XCTAssertTrue(pair.client.isHandshakeConfirmed, "\(String(describing: pair.client.closeReason))")
+        for request in 0..<3 {
+            let id = try XCTUnwrap(pair.client.openStream(bidirectional: true), "request \(request)")
+            pair.client.write([UInt8]("GET".utf8).span.bytes, to: id, fin: true)
+            Self.exchange(&pair, oneWay: oneWay)
+            XCTAssertTrue(pair.serverEvents.contains(.streamOpened(id)), "request \(request)")
+        }
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
+        // Quiet, the connection still idles out, three PTOs after the last packet.
+        let pto = pair.client.recovery.probeTimeout(includingMaxAckDelay: true)
+        XCTAssertGreaterThan(pto * 3, idleTimeout)
+        // The last datagram arrived a round trip before the exchange ended.
+        let quietSince = pair.now
+        Self.idle(&pair, for: .seconds(60))
+        XCTAssertEqual(pair.client.closeReason, .idleTimeout)
+        XCTAssertGreaterThanOrEqual(quietSince.duration(to: pair.now) + oneWay * 2, pto * 3)
+    }
+
     /// RFC 9000 Section 10.1: a zero max_idle_timeout disables the idle timeout.
     func testNoIdleTimeoutWhenBothSidesDisableIt() {
         var pair = LockstepPair(

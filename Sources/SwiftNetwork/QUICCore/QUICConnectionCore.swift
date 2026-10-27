@@ -477,7 +477,7 @@ public struct QUICConnectionCore: ~Copyable {
         self.idleTimeout = configuration.maxIdleTimeout > .zero ? configuration.maxIdleTimeout : nil
         self.keepAliveInterval = configuration.keepAliveInterval
         self.spinValue = configuration.spinValue
-        self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
+        self.idleDeadline = self.restartedIdleDeadline(now: now)
 
         var tlsOptions = configuration.tlsOptions
         tlsOptions.quicTransportParameters = (try? self.localTransportParameters.serialize()) ?? []
@@ -703,6 +703,17 @@ public struct QUICConnectionCore: ~Copyable {
         self.state = .closed
         self.handshake.release()
         self.events.append(.closed(reason))
+    }
+
+    // MARK: Idle timeout
+
+    /// The idle deadline when the idle timer restarts at `now`, or `nil` without an idle
+    /// timeout. It is at least three PTOs away, so that a short idle timeout doesn't close a
+    /// connection whose packets are merely slow (RFC 9000 Section 10.1).
+    func restartedIdleDeadline(now: NetworkClock.Instant) -> NetworkClock.Instant? {
+        guard let idleTimeout = self.idleTimeout else { return nil }
+        let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
+        return now.advanced(by: max(idleTimeout, pto * 3))
     }
 
     // MARK: Keepalive

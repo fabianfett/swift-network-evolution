@@ -251,7 +251,7 @@ extension QUICConnectionCore {
             if space == .handshake && self.isServer {
                 self.discardSpace(.initial)
             }
-            self.idleDeadline = self.idleTimeout.map { now.advanced(by: $0) }
+            self.idleDeadline = self.restartedIdleDeadline(now: now)
             self.sentAckElicitingSinceReceive = false
             if self.keepAliveDeadline != nil {
                 self.rearmKeepAlive(now: now)
@@ -1265,8 +1265,7 @@ extension QUICConnectionCore {
         let peerIdle = NetworkDuration.milliseconds(peerIdleMilliseconds)
         if peerIdle > .zero, self.idleTimeout.map({ peerIdle < $0 }) ?? true {
             self.idleTimeout = peerIdle
-            let deadline = now.advanced(by: peerIdle)
-            if self.idleDeadline.map({ deadline < $0 }) ?? true {
+            if let deadline = self.restartedIdleDeadline(now: now), self.idleDeadline.map({ deadline < $0 }) ?? true {
                 self.idleDeadline = deadline
             }
         }
