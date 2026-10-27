@@ -102,9 +102,13 @@ struct CoreStream {
     }
 
     /// Whether both directions are done and the stream can be forgotten.
+    ///
+    /// A reset send side is done once the peer acknowledged the RESET_STREAM, which is sent again
+    /// until then (RFC 9000 Section 3.1): the data acknowledged before the reset, even the FIN,
+    /// doesn't count.
     var isClosed: Bool {
         let sendDone =
-            !self.canSend || self.send.isFullyAcknowledged || (self.resetCode != nil && self.resetAcknowledged)
+            !self.canSend || (self.resetCode != nil ? self.resetAcknowledged : self.send.isFullyAcknowledged)
         let receiveDone = !self.canReceive || self.receive.isFinishedReading || self.peerResetCode != nil
         return sendDone && receiveDone
     }

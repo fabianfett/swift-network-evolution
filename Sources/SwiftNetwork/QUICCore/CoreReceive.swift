@@ -737,6 +737,8 @@ extension QUICConnectionCore {
             case .stream(let id, let offset, let length, let fin):
                 guard let index = self.streams.index(of: id) else { continue }
                 let finishedSending = self.streams.withStream(at: index) { stream in
+                    // After a reset, only the RESET_STREAM's acknowledgement counts.
+                    guard stream.resetCode == nil else { return false }
                     let wasFullyAcknowledged = stream.send.isFullyAcknowledged
                     stream.send.onAcked(offset: offset, length: length, fin: fin)
                     return !wasFullyAcknowledged && stream.send.isFullyAcknowledged

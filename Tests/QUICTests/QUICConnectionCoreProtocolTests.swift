@@ -803,6 +803,79 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         XCTAssertNil(pair.server?.closeReason)
     }
 
+    private func deliver(_ datagrams: [[UInt8]], to machine: inout QUICConnectionCore, now: NetworkClock.Instant) {
+        for var datagram in datagrams {
+            var span = datagram.mutableSpan
+            machine.receive(&span, now: now)
+        }
+    }
+
+    /// Delivers `datagrams` to the server and returns its delayed acknowledgement, which the
+    /// client doesn't get yet.
+    private func serverAcknowledgement(of datagrams: [[UInt8]], _ pair: inout LockstepPair) -> [[UInt8]] {
+        let sent = pair.now
+        pair.now = pair.now.advanced(by: .milliseconds(30))
+        let now = pair.now
+        return pair.withServer { server in
+            self.deliver(datagrams, to: &server, now: sent)
+            server.handleTimeout(now: now)
+            return LockstepPair.drain(&server, now: now)
+        } ?? []
+    }
+
+    /// Runs the timers until the server saw the reset, then lets the two settle.
+    private func runUntilTheServerSeesTheReset(_ id: UInt64, errorCode: UInt64, _ pair: inout LockstepPair) {
+        for _ in 0..<10 where !pair.serverEvents.contains(.streamReset(id, errorCode: errorCode)) {
+            pair.advanceToNextDeadline()
+            pair.exchange()
+        }
+        XCTAssertTrue(pair.serverEvents.contains(.streamReset(id, errorCode: errorCode)), "\(pair.serverEvents)")
+        for _ in 0..<3 where pair.client.hasStream(id) {
+            pair.advanceToNextDeadline()
+            pair.exchange()
+        }
+        pair.clientEvents += LockstepPair.events(&pair.client)
+        XCTAssertTrue(pair.clientEvents.contains(.streamClosed(id)), "\(pair.clientEvents)")
+        XCTAssertFalse(pair.clientEvents.contains(.streamFinishedSending(id)), "\(pair.clientEvents)")
+        XCTAssertNil(pair.client.closeReason)
+    }
+
+    func testALostResetStreamIsSentAgainAfterTheFinWasAcknowledged() throws {
+        var pair = self.connectedPair()
+        let id = try XCTUnwrap(pair.client.openStream(bidirectional: false))
+        // The data is lost, the FIN after it arrives and is acknowledged.
+        pair.client.write([UInt8](repeating: 1, count: 100).span.bytes, to: id)
+        XCTAssertFalse(LockstepPair.drain(&pair.client, now: pair.now).isEmpty)
+        pair.client.finish(id)
+        let fin = LockstepPair.drain(&pair.client, now: pair.now)
+        let ack = self.serverAcknowledgement(of: fin, &pair)
+        XCTAssertFalse(ack.isEmpty)
+        self.deliver(ack, to: &pair.client, now: pair.now)
+        // The reset can't count on the acknowledged FIN: its RESET_STREAM is lost.
+        pair.client.resetStream(id, errorCode: 0x33)
+        XCTAssertFalse(LockstepPair.drain(&pair.client, now: pair.now).isEmpty)
+        XCTAssertTrue(pair.client.hasStream(id), "the stream went away before the peer acknowledged the reset")
+        self.runUntilTheServerSeesTheReset(id, errorCode: 0x33, &pair)
+    }
+
+    func testALateAcknowledgementOfTheFinDoesNotFinishAResetStream() throws {
+        var pair = self.connectedPair()
+        let id = try XCTUnwrap(pair.client.openStream(bidirectional: false))
+        pair.client.write([UInt8](repeating: 1, count: 100).span.bytes, to: id, fin: true)
+        let data = LockstepPair.drain(&pair.client, now: pair.now)
+        let ack = self.serverAcknowledgement(of: data, &pair)
+        XCTAssertFalse(ack.isEmpty)
+        // The client resets before the acknowledgement of everything arrives, and the
+        // RESET_STREAM is lost.
+        pair.client.resetStream(id, errorCode: 0x44)
+        XCTAssertFalse(LockstepPair.drain(&pair.client, now: pair.now).isEmpty)
+        self.deliver(ack, to: &pair.client, now: pair.now)
+        pair.clientEvents += LockstepPair.events(&pair.client)
+        XCTAssertFalse(pair.clientEvents.contains(.streamFinishedSending(id)), "\(pair.clientEvents)")
+        XCTAssertTrue(pair.client.hasStream(id), "the stream went away before the peer acknowledged the reset")
+        self.runUntilTheServerSeesTheReset(id, errorCode: 0x44, &pair)
+    }
+
     func testAClosingEndpointAnswersWithConnectionCloseAgain() {
         var pair = self.connectedPair()
         pair.client.close(errorCode: 3, isApplication: true, reason: "done", now: pair.now)
