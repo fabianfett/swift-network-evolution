@@ -106,7 +106,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         clientOptions.modifyTLSOptions { $0 = tlsOptions }
 
         QUICTestHarness().runQUICTest(
-            expectHandshakeError: .init(quicTransportError: QUICTransportError(Int64(0x0100), "TLS error")!),
+            expectHandshakeError: .init(quicTransportError: QUICTransportError(Int64(0x0100 + 40), "TLS error")!),
             timeout: 10.0,
             clientOptions: clientOptions
         )
@@ -262,7 +262,7 @@ final class SwiftNetworkQUICHarnessTests: NetTestCase {
         serverOptions.modifyTLSOptions { $0 = serverTLSOptions }
 
         QUICTestHarness().runQUICTest(
-            expectHandshakeError: .init(quicTransportError: QUICTransportError(Int64(0x0100), "TLS error")!),
+            expectHandshakeError: .init(quicTransportError: QUICTransportError(Int64(0x0100 + 40), "TLS error")!),
             clientOptions: clientOptions,
             serverOptions: serverOptions
         )

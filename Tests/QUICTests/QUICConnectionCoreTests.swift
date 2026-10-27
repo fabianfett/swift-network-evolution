@@ -260,6 +260,23 @@ final class QUICConnectionCoreTests: XCTestCase {
         XCTAssertTrue(pair.server?.isHandshakeConfirmed ?? false)
     }
 
+    /// RFC 9001 Section 4.8: a TLS alert closes the connection with CRYPTO_ERROR plus the alert.
+    func testAClientRejectingTheServersCertificateClosesWithBadCertificate() {
+        var clientTLS = SwiftTLSProtocol.Options()
+        clientTLS.applicationProtocols = ["qsm-test"]
+        clientTLS.serverName = "quic-test.local"
+        // A key other than the server's.
+        clientTLS.trustedRawPublicKeyCertificates = [[UInt8](P256.Signing.PrivateKey().publicKey.derRepresentation)]
+        var pair = LockstepPair(clientTLSOptions: clientTLS)
+        pair.exchange()
+        let badCertificate: UInt64 = 0x100 + 42
+        XCTAssertEqual(pair.client.closeReason, .transportError(errorCode: badCertificate, reason: "TLS error"))
+        XCTAssertEqual(
+            pair.server?.closeReason,
+            .peer(errorCode: badCertificate, isApplication: false, reason: "TLS error")
+        )
+    }
+
     func testRequestResponse() throws {
         var pair = LockstepPair()
         pair.exchange()

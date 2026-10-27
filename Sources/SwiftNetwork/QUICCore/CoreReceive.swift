@@ -36,7 +36,25 @@ internal import CryptoKit
 /// alert (RFC 9001 Section 4.8).
 @available(Network 0.1.0, *)
 enum TLSAlert {
+    static let unexpectedMessage: UInt64 = 10
+    static let handshakeFailure: UInt64 = 40
+    static let badCertificate: UInt64 = 42
+    static let illegalParameter: UInt64 = 47
+    static let internalError: UInt64 = 80
     static let missingExtension: UInt64 = 109
+
+    /// The alert for the error code a failed SwiftTLS handshake reports. SwiftTLS doesn't
+    /// expose its alerts, only the SecureTransport status codes it maps its errors to; anything
+    /// else, such as the POSIX codes of a handshake that couldn't start, is an internal error.
+    static func alert(forHandshakeError code: Int32) -> UInt64 {
+        switch code {
+        case -9808: return Self.badCertificate  // errSSLBadCert
+        case -9858: return Self.handshakeFailure  // errSSLHandshakeFail
+        case -9856: return Self.unexpectedMessage  // errSSLUnexpectedMessage
+        case -9830: return Self.illegalParameter  // errSSLIllegalParam
+        default: return Self.internalError
+        }
+    }
 }
 
 /// Transport error codes (RFC 9000 Section 20.1).
@@ -1219,9 +1237,11 @@ extension QUICConnectionCore {
                     self.confirmHandshake()
                 }
             case .failed(let code):
-                // The reason the classes give, which applications match on.
-                self.log.error("TLS handshake failed (\(code))")
-                self.closeWithError(CoreTransportError.cryptoError, reason: "TLS error", now: now)
+                // A TLS alert is CRYPTO_ERROR plus the alert (RFC 9001 Section 4.8). The reason is
+                // the one the classes give, which applications match on.
+                let alert = TLSAlert.alert(forHandshakeError: code)
+                self.log.error("TLS handshake failed (\(code)), alert \(alert)")
+                self.closeWithError(CoreTransportError.cryptoError &+ alert, reason: "TLS error", now: now)
             }
         }
     }
