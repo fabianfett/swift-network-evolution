@@ -256,6 +256,25 @@ final class CoreRecoveryTests: XCTestCase {
         XCTAssertEqual(uncapped.smoothedRTT, (.milliseconds(100) * 7) / 8 + .milliseconds(125) / 8)
     }
 
+    /// Before the handshake is confirmed the ACK delay isn't capped (RFC 9002 Section 5.3);
+    /// even the largest one leaves the sample as it is rather than overflowing.
+    func testTheLargestAckDelayBeforeConfirmationLeavesTheSample() {
+        var recovery = CoreRecovery()
+        var now = NetworkClock.Instant(milliseconds: 1_000)
+        _ = Self.sample(&recovery, 0, rtt: .milliseconds(100), sent: now)
+        now = now.advanced(by: .milliseconds(200))
+        _ = Self.sample(
+            &recovery,
+            1,
+            rtt: .milliseconds(100),
+            ackDelay: .nanoseconds(Int64.max),
+            handshakeConfirmed: false,
+            sent: now
+        )
+        XCTAssertEqual(recovery.smoothedRTT, .milliseconds(100))
+        XCTAssertEqual(recovery.minRTT, .milliseconds(100))
+    }
+
     /// RFC 9002 Section 5.1: an ACK frame is an RTT sample if it newly acknowledges the largest
     /// packet number, and at least one of the packets it newly acknowledges is ack-eliciting.
     func testOnlyAnAckOfANewLargestWithAnAckElicitingPacketIsASample() {

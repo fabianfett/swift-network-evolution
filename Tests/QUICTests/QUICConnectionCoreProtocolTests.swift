@@ -61,7 +61,11 @@ private enum Frame {
     }
 
     static func ack(largest: UInt64) -> [UInt8] {
-        vle(0x02) + vle(largest) + vle(0) + vle(0) + vle(0)
+        self.ack(largest: largest, delay: 0)
+    }
+
+    static func ack(largest: UInt64, delay: UInt64) -> [UInt8] {
+        vle(0x02) + vle(largest) + vle(delay) + vle(0) + vle(0)
     }
 
     static let handshakeDone: [UInt8] = [0x1e]
@@ -494,6 +498,56 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         var pair = self.connectedPair()
         pair.sendFromServer(Frame.ack(largest: 1_000_000))
         self.assertClientCloses(with: TransportErrorCode.protocolViolation, &pair)
+    }
+
+    /// The peer controls the ACK Delay field up to 2^62 - 1; scaled by the ack_delay_exponent it
+    /// saturates rather than overflowing, and the RTT estimate caps it at max_ack_delay
+    /// (RFC 9002 Section 5.3).
+    func testAHugeAckDelayDoesNotDisturbTheRTT() {
+        for delay: UInt64 in [(1 << 62) - 1, 1 << 50] {
+            var pair = self.connectedPair()
+            pair.client.injectedFrames.append([0x01])  // PING
+            let datagrams = LockstepPair.drain(&pair.client, now: pair.now)
+            pair.now = pair.now.advanced(by: .milliseconds(30))
+            let now = pair.now
+            pair.withServer { server in
+                for var datagram in datagrams {
+                    var span = datagram.mutableSpan
+                    server.receive(&span, now: now)
+                }
+                let largest = server.acks[.applicationData].largestReceived ?? 0
+                server.injectedFrames.append(Frame.ack(largest: largest, delay: delay))
+            }
+            pair.exchange()
+            XCTAssertNil(pair.client.closeReason, "delay \(delay)")
+            XCTAssertNil(pair.server?.closeReason, "delay \(delay)")
+            XCTAssertLessThan(pair.client.smoothedRTT, .seconds(1), "delay \(delay)")
+        }
+    }
+
+    /// Acknowledgments in Initial packets aren't delayed, so their ACK Delay is ignored
+    /// (RFC 9002 Section 5.3), however large.
+    func testAHugeAckDelayInAnInitialPacketIsIgnored() {
+        for delay: UInt64 in [(1 << 62) - 1, 1 << 50] {
+            var pair = LockstepPair()
+            let initials = LockstepPair.drain(&pair.client, now: pair.now)
+            let ids = LockstepPair.connectionIDs(ofInitial: initials[0])
+            var server = QUICConnectionCore(
+                serverWith: pair.serverConfiguration,
+                localConnectionID: QUICConnectionID(8),
+                originalDestinationConnectionID: ids.destination,
+                peerConnectionID: ids.source,
+                now: pair.now
+            )
+            // Acknowledges the client's first Initial, packet 0.
+            server.injectFrame(Frame.ack(largest: 0, delay: delay), in: .initial)
+            pair.server = consume server
+            pair.toServer = initials
+            pair.exchange()
+            XCTAssertTrue(pair.client.isHandshakeConfirmed, "delay \(delay)")
+            XCTAssertNil(pair.client.closeReason, "delay \(delay)")
+            XCTAssertLessThan(pair.client.smoothedRTT, .seconds(1), "delay \(delay)")
+        }
     }
 
     func testAnUnknownFrameTypeIsAFrameEncodingError() {

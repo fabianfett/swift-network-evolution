@@ -642,6 +642,18 @@ extension QUICConnectionCore {
 
     // MARK: ACK
 
+    /// The ACK Delay field of an ACK frame in `space` as a duration. Acknowledgments in Initial
+    /// and Handshake packets aren't delayed (RFC 9000 Section 13.2.1), so their delay is ignored
+    /// (RFC 9002 Section 5.3). Any other is scaled by the peer's ack_delay_exponent and saturates
+    /// at the largest valid max_ack_delay, as the peer controls it up to 2^62 - 1.
+    private func decodeAckDelay(_ ackDelay: UInt64, in space: PacketNumberSpace) -> NetworkDuration {
+        guard space == .applicationData else { return .zero }
+        let exponent = UInt64(self.peerTransportParameters?.intValue(.ackDelayExponent) ?? 3)
+        let maximum = UInt64(AckDefaults.maxDelay.microseconds)
+        guard ackDelay <= maximum >> exponent else { return AckDefaults.maxDelay }
+        return .microseconds(min(ackDelay << exponent, maximum))
+    }
+
     private mutating func processAckFrame(
         reader: inout CoreReader,
         hasECN: Bool,
@@ -676,8 +688,7 @@ extension QUICConnectionCore {
             self.closeWithError(CoreTransportError.protocolViolation, reason: "ACK of unsent packet", now: now)
             return true
         }
-        let exponent = self.peerTransportParameters?.intValue(.ackDelayExponent) ?? 3
-        let delay = NetworkDuration.microseconds(ackDelay << UInt64(exponent))
+        let delay = self.decodeAckDelay(ackDelay, in: space)
         let previousLargestAcknowledged = self.recovery.spaces[Int(space.rawValue)].largestAcknowledged
         let result = self.recovery.onAckReceived(
             ranges: ranges,

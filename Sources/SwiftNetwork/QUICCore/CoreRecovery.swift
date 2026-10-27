@@ -318,7 +318,8 @@ struct CoreRecovery {
             ackDelay = min(ackDelay, self.maxAckDelay)
         }
         var adjusted = sample
-        if sample >= self.minRTT + ackDelay {
+        // `sample - ackDelay >= minRTT`, without an addition that could overflow.
+        if sample >= ackDelay && sample - ackDelay >= self.minRTT {
             adjusted = sample - ackDelay
         }
         let difference = self.smoothedRTT > adjusted ? self.smoothedRTT - adjusted : adjusted - self.smoothedRTT
