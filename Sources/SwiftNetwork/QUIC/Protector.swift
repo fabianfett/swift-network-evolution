@@ -704,7 +704,18 @@ struct Protector: ~Copyable, PrefixedLoggable {
     ]
 
     private(set) var writeFramer = NetworkRigidArray<SecFramerKeys>(capacity: 5)
-    private(set) var readFramer = NetworkRigidArray<SecFramerKeys>(capacity: 5)
+    /// The read keys by key state, and after them, in ``nextReadKeysSlot``, the next generation
+    /// of 1-RTT read keys while they are on trial.
+    private(set) var readFramer = NetworkRigidArray<SecFramerKeys>(capacity: 6)
+    /// Where `readFramer` keeps the read keys of the key phase after the current one, derived
+    /// for a packet that may be the peer's key update. They replace the keys of the other phase
+    /// only once a packet opened with them (RFC 9001 Section 6.3): a forged packet with the
+    /// other key phase must not overwrite the keys late packets of the previous phase still
+    /// need, nor cost a derivation every time.
+    private static let nextReadKeysSlot = 5
+    /// Whether `readFramer[nextReadKeysSlot]` holds the next generation of the current phase's
+    /// read keys.
+    private var hasNextReadKeys = false
     private(set) var isClient: Bool
     private var sequenceNumber = NetworkRigidArray<PacketNumber>(
         repeating: PacketNumber.initial,
@@ -719,6 +730,7 @@ struct Protector: ~Copyable, PrefixedLoggable {
             writeFramer.append(SecFramerKeys.empty(type: .aesGCM))
             readFramer.append(SecFramerKeys.empty(type: .aesGCM))
         }
+        readFramer.append(SecFramerKeys.empty(type: .aesGCM))
         deriveInitialSecrets(destinationCID: destinationCID)
     }
 
@@ -1221,35 +1233,21 @@ struct Protector: ~Copyable, PrefixedLoggable {
         }
     }
 
-    private mutating func trafficUpdateInner(
-        key: SymmetricKey,
-        iv: ProtectorIV,
-        savedReadSecret: SymmetricKey?,
-        savedWriteSecret: SymmetricKey?,
-        size: Int,
-        headerProtectionKey: SymmetricKey,
-        type: SecFramerKeys.KeyType,
-        nextKeyState: PacketKeyState,
-        previousKeyState: PacketKeyState,
-        isWrite: Bool
-    ) {
+    /// The next generation of `keys` (RFC 9001 Section 6.1): a secret derived from theirs, and
+    /// a key and IV from that. The header protection key stays the same.
+    private func nextGeneration(of keys: borrowing SecFramerKeys, isWrite: Bool) -> SecFramerKeys {
         var sha384 = false
-        var keySize: Int  // In bytes
-        var ivSize: Int  // In bytes
+        let keySize = keys.key.bitCount / 8  // In bytes
+        let ivSize = keys.iv.count  // In bytes
         let previousSecret: SymmetricKey
-        switch type {
+        switch keys.type {
         case .aesGCM:
-            previousSecret = isWrite ? savedWriteSecret! : savedReadSecret!
-            if size == 256 {
+            previousSecret = isWrite ? keys.savedWriteSecret! : keys.savedReadSecret!
+            if keys.size == 256 {
                 sha384 = true
             }
-            keySize = key.bitCount / 8
-            ivSize = iv.count
         case .chaChaPoly:
-            previousSecret =
-                isWrite ? savedWriteSecret! : savedReadSecret!
-            keySize = key.bitCount / 8
-            ivSize = iv.count
+            previousSecret = isWrite ? keys.savedWriteSecret! : keys.savedReadSecret!
         #if Fuzzing
         case .null:
             // Null protector keys are never phase0/phase1 traffic secrets,
@@ -1305,74 +1303,26 @@ struct Protector: ~Copyable, PrefixedLoggable {
         }
         // N.B.: we don't derive the HP when rotating keys.
         // Save the application secrets so we can rotate keys.
-        switch type {
-        case .aesGCM:
-            var nextFramer = SecFramerKeys(
-                key: key,
-                iv: iv,
-                headerProtectionKey: headerProtectionKey,
-                type: .aesGCM,
-                log: log
-            )
-            if isWrite {
-                nextFramer.savedWriteSecret = keyUpdateSecret
-                writeFramer[nextKeyState.rawValue] = nextFramer
-            } else {
-                nextFramer.savedReadSecret = keyUpdateSecret
-                readFramer[nextKeyState.rawValue] = nextFramer
-            }
-        case .chaChaPoly:
-            var nextFramer = SecFramerKeys(
-                key: key,
-                iv: iv,
-                headerProtectionKey: headerProtectionKey,
-                type: .chaChaPoly,
-                log: log
-            )
-            if isWrite {
-                nextFramer.savedWriteSecret = keyUpdateSecret
-                writeFramer[nextKeyState.rawValue] = nextFramer
-            } else {
-                nextFramer.savedReadSecret = keyUpdateSecret
-                readFramer[nextKeyState.rawValue] = nextFramer
-            }
-        #if Fuzzing
-        case .null:
-            fatalError("trafficUpdate is unreachable for a null protector")
-        #endif
-        }
+        return SecFramerKeys(
+            key: key,
+            iv: iv,
+            headerProtectionKey: keys.headerProtectionKey,
+            savedWriteSecret: isWrite ? keyUpdateSecret : nil,
+            savedReadSecret: isWrite ? nil : keyUpdateSecret,
+            type: keys.type,
+            log: log
+        )
     }
 
     private mutating func trafficUpdate(previousKeyState: PacketKeyState, isWrite: Bool) {
         precondition(previousKeyState == .phase0 || previousKeyState == .phase1)
         let nextKeyState: PacketKeyState = previousKeyState == .phase0 ? .phase1 : .phase0
-        // N.B. Passing SecFramerKeys by a borrowing reference resulted in an overlapping access issue with self
         if isWrite {
-            trafficUpdateInner(
-                key: writeFramer[previousKeyState.rawValue].key,
-                iv: writeFramer[previousKeyState.rawValue].iv,
-                savedReadSecret: writeFramer[previousKeyState.rawValue].savedReadSecret,
-                savedWriteSecret: writeFramer[previousKeyState.rawValue].savedWriteSecret,
-                size: writeFramer[previousKeyState.rawValue].size,
-                headerProtectionKey: writeFramer[previousKeyState.rawValue].headerProtectionKey,
-                type: writeFramer[previousKeyState.rawValue].type,
-                nextKeyState: nextKeyState,
-                previousKeyState: previousKeyState,
-                isWrite: isWrite
-            )
+            let next = self.nextGeneration(of: writeFramer[previousKeyState.rawValue], isWrite: true)
+            writeFramer[nextKeyState.rawValue] = next
         } else {
-            trafficUpdateInner(
-                key: readFramer[previousKeyState.rawValue].key,
-                iv: readFramer[previousKeyState.rawValue].iv,
-                savedReadSecret: readFramer[previousKeyState.rawValue].savedReadSecret,
-                savedWriteSecret: readFramer[previousKeyState.rawValue].savedWriteSecret,
-                size: readFramer[previousKeyState.rawValue].size,
-                headerProtectionKey: readFramer[previousKeyState.rawValue].headerProtectionKey,
-                type: readFramer[previousKeyState.rawValue].type,
-                nextKeyState: nextKeyState,
-                previousKeyState: previousKeyState,
-                isWrite: isWrite
-            )
+            let next = self.nextGeneration(of: readFramer[previousKeyState.rawValue], isWrite: false)
+            readFramer[nextKeyState.rawValue] = next
         }
     }
 
@@ -1387,6 +1337,51 @@ struct Protector: ~Copyable, PrefixedLoggable {
         #endif
         trafficUpdate(previousKeyState: previousKeyState, isWrite: false)
         trafficUpdate(previousKeyState: previousKeyState, isWrite: true)
+        // The read keys on trial were the next generation of the ones just replaced.
+        self.discardNextReadKeys()
+    }
+
+    /// Opens a 1-RTT packet of the key phase after `currentKeyState`, which may be the peer's
+    /// key update, with the next generation of read keys. They are derived on first use and
+    /// installed by ``commitKeyUpdate(currentKeyState:)`` only once a packet opened with them;
+    /// a packet that doesn't open changes nothing.
+    mutating func openWithNextReadKeys(
+        _ packet: inout Packet,
+        buffer: inout MutableSpan<UInt8>,
+        currentKeyState: PacketKeyState
+    ) throws(QUICError) {
+        #if Fuzzing
+        // A fuzzer flips the key phase at will; null keys stay null.
+        if keyType(keys: readFramer[currentKeyState.rawValue]) == .null {
+            let nextKeyState: PacketKeyState = currentKeyState == .phase0 ? .phase1 : .phase0
+            installNullProtector(for: nextKeyState)
+            try self.open(&packet, buffer: &buffer)
+            return
+        }
+        #endif
+        if !self.hasNextReadKeys {
+            let next = self.nextGeneration(of: readFramer[currentKeyState.rawValue], isWrite: false)
+            readFramer[Self.nextReadKeysSlot] = next
+            self.hasNextReadKeys = true
+        }
+        try Self.openInner(keys: readFramer[Self.nextReadKeysSlot], packet: &packet, buffer: &buffer)
+    }
+
+    /// Follows the peer's key update, after a packet opened with
+    /// ``openWithNextReadKeys(_:buffer:currentKeyState:)``: its read keys replace those of the
+    /// other key phase, and the write keys move to the next generation as well.
+    mutating func commitKeyUpdate(currentKeyState: PacketKeyState) {
+        guard self.hasNextReadKeys else { return }
+        let nextKeyState: PacketKeyState = currentKeyState == .phase0 ? .phase1 : .phase0
+        readFramer.swapAt(Self.nextReadKeysSlot, nextKeyState.rawValue)
+        self.discardNextReadKeys()
+        trafficUpdate(previousKeyState: currentKeyState, isWrite: true)
+    }
+
+    private mutating func discardNextReadKeys() {
+        guard self.hasNextReadKeys else { return }
+        readFramer[Self.nextReadKeysSlot] = SecFramerKeys.empty(type: .aesGCM)
+        self.hasNextReadKeys = false
     }
 
     @inline(always)
@@ -1551,6 +1546,16 @@ struct Protector: ~Copyable, PrefixedLoggable {
     }
 
     func trafficUpdate(previousKeyState: PacketKeyState) {
+    }
+
+    func openWithNextReadKeys(
+        _ packet: inout Packet,
+        buffer: inout MutableSpan<UInt8>,
+        currentKeyState: PacketKeyState
+    ) throws(QUICError) {
+    }
+
+    func commitKeyUpdate(currentKeyState: PacketKeyState) {
     }
 
     func open(_ packet: inout Packet, buffer: inout MutableSpan<UInt8>) throws(QUICError) {

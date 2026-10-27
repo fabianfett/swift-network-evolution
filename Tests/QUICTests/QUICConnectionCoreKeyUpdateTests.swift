@@ -37,8 +37,12 @@ final class QUICConnectionCoreKeyUpdateTests: XCTestCase {
     }
 
     /// Sends a request on a new stream, echoes it back, and checks that both directions arrive.
-    private static func roundTrip(_ pair: inout LockstepPair, size: Int, file: StaticString = #filePath, line: UInt = #line)
-    {
+    private static func roundTrip(
+        _ pair: inout LockstepPair,
+        size: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
         guard let streamID = pair.client.openStream(bidirectional: true) else {
             XCTFail("No stream", file: file, line: line)
             return
@@ -139,6 +143,73 @@ final class QUICConnectionCoreKeyUpdateTests: XCTestCase {
         XCTAssertEqual(received?.fin, true)
         XCTAssertEqual(pair.server?.keyPhase, .phase1)
         pair.exchange()
+        XCTAssertNil(pair.client.closeReason)
+        XCTAssertNil(pair.server?.closeReason)
+    }
+
+    /// A packet whose Key Phase bit says "update" but that doesn't open, as a forged one, keeps
+    /// the keys as they are (RFC 9001 Section 6.3): a late packet of the previous phase still
+    /// opens, and the genuine update after it still works.
+    func testAForgedKeyUpdateKeepsThePreviousKeys() throws {
+        var pair = LockstepPair()
+        pair.exchange()
+        Self.roundTrip(&pair, size: 10)
+        let streamID = try XCTUnwrap(pair.client.openStream(bidirectional: true))
+        let chunks = (0..<3).map { [UInt8](repeating: 0x61 + UInt8($0), count: 500) }
+        let (a, b, c) = (chunks[0], chunks[1], chunks[2])
+        // A goes out in phase 0 and arrives late; B, in phase 1, makes the server follow.
+        pair.client.write(a.span.bytes, to: streamID, fin: false)
+        let late = LockstepPair.drain(&pair.client, now: pair.now)
+        XCTAssertTrue(pair.client.updateKeys())
+        pair.client.write(b.span.bytes, to: streamID, fin: false)
+        let update = LockstepPair.drain(&pair.client, now: pair.now)
+        let sent = pair.now
+        pair.now = pair.now.advanced(by: .milliseconds(30))
+        let now = pair.now
+        let acknowledgement: [[UInt8]] =
+            pair.withServer { server in
+                for var datagram in update {
+                    var span = datagram.mutableSpan
+                    server.receive(&span, now: sent)
+                }
+                server.handleTimeout(now: now)
+                return LockstepPair.drain(&server, now: now)
+            } ?? []
+        XCTAssertEqual(pair.server?.keyPhase, .phase1)
+        // The server's phase 1 packet lets the client update again, to phase 0: the packet that
+        // carries the next generation of keys has a higher packet number than B.
+        for var datagram in acknowledgement {
+            var span = datagram.mutableSpan
+            pair.client.receive(&span, now: now)
+        }
+        XCTAssertTrue(pair.client.updateKeys())
+        pair.client.write(c.span.bytes, to: streamID, fin: true)
+        let nextUpdate = LockstepPair.drain(&pair.client, now: now)
+        XCTAssertEqual(nextUpdate.count, 1)
+        // A copy with a broken tag: its header says phase 0 and a new packet number, but it
+        // doesn't open.
+        var forged = try XCTUnwrap(nextUpdate.first)
+        forged[forged.count - 1] ^= 0xff
+
+        let received = pair.withServer { server in
+            for var datagram in [forged] + late {
+                var span = datagram.mutableSpan
+                server.receive(&span, now: now)
+            }
+            XCTAssertEqual(server.keyPhase, .phase1, "the forged packet started an update")
+            let beforeTheUpdate = Self.readAll(&server, streamID)
+            for var datagram in nextUpdate {
+                var span = datagram.mutableSpan
+                server.receive(&span, now: now)
+            }
+            let afterTheUpdate = Self.readAll(&server, streamID)
+            return (beforeTheUpdate.bytes, afterTheUpdate)
+        }
+        XCTAssertTrue(received?.0 == chunks[0] + chunks[1], "the late packet didn't open")
+        XCTAssertTrue(received?.1.bytes == chunks[2], "the genuine update didn't open")
+        XCTAssertEqual(received?.1.fin, true)
+        XCTAssertEqual(pair.server?.keyPhase, .phase0)
+        Self.roundTrip(&pair, size: 2000)
         XCTAssertNil(pair.client.closeReason)
         XCTAssertNil(pair.server?.closeReason)
     }

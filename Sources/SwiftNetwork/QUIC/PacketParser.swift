@@ -567,7 +567,12 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
                 && context.connectionKeyState != packet.keyState
                 && (context.keyUpdateThreshold.map { UInt64(packet.number.value) >= $0 } ?? true)
         ) {
-            protector.trafficUpdate(previousKeyState: context.connectionKeyState)
+            // The peer's key update, unless the packet is forged: the next keys are only kept
+            // once it opens (RFC 9001 Section 6.3).
+            var buffer = bytes.mutableSpan
+            try protector.openWithNextReadKeys(&packet, buffer: &buffer, currentKeyState: context.connectionKeyState)
+            protector.commitKeyUpdate(currentKeyState: context.connectionKeyState)
+            return
         }
 
         var buffer = bytes.mutableSpan
