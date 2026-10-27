@@ -239,6 +239,8 @@ enum CoreCongestionController {
 struct CoreNewReno: CoreCongestionControllerProtocol {
     static let burstShift: UInt64 = 10
 
+    var pipeAck = CorePipeAck()
+
     init(state: inout CoreCongestionState) {
         state.congestionWindow = CoreCongestionState.initialWindow(maxDatagramSize: state.maxDatagramSize)
     }
@@ -253,6 +255,18 @@ struct CoreNewReno: CoreCongestionControllerProtocol {
         // controllers; RFC 9002 Section B.5 would grow it before the losses halve it.
         let acknowledged = state.bytesAcknowledged
         guard !packetsLost, acknowledged > 0 else { return }
+        guard
+            self.pipeAck.revalidate(
+                bytesAcknowledged: acknowledged,
+                congestionWindow: state.congestionWindow,
+                inSlowStart: state.inSlowStart,
+                smoothedRTT: smoothedRTT,
+                now: now
+            )
+        else {
+            // The sender doesn't use the window: it mustn't grow (RFC 9002 Section 7.8).
+            return
+        }
         if state.inSlowStart {
             state.congestionWindow &+= acknowledged
         } else {
@@ -271,6 +285,8 @@ struct CoreNewReno: CoreCongestionControllerProtocol {
         state.recoveryStartTime = now
         state.slowStartThreshold = max(state.congestionWindow / 2, state.minimumWindow)
         state.congestionWindow = state.slowStartThreshold
+        // The samples were of the larger window.
+        self.pipeAck.reset()
         return true
     }
 
@@ -468,7 +484,11 @@ struct CoreCubic: CoreCongestionControllerProtocol {
     }
 
     /// W_cubic(t + RTT) = C · (t + RTT - K)³ + W_max (RFC 9438 Section 4.2), in bytes.
-    private mutating func target(state: CoreCongestionState, smoothedRTT: NetworkDuration, now: NetworkClock.Instant)
+    private mutating func target(
+        state: CoreCongestionState,
+        smoothedRTT: NetworkDuration,
+        now: NetworkClock.Instant
+    )
         -> Int
     {
         let epochStart: NetworkClock.Instant

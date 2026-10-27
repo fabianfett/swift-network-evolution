@@ -126,7 +126,14 @@ final class CoreCongestionControlTests: XCTestCase {
         var cubic = Driver<CoreCubic>()
         cubic.send(6)
         cubic.acknowledge(4, sentTime: self.t0)
-        cubic.ecn(newlyCE: 1, newlyAcknowledged: 4, largestAcknowledged: 3, largestSent: 5, sentTime: self.t0, now: self.t0)
+        cubic.ecn(
+            newlyCE: 1,
+            newlyAcknowledged: 4,
+            largestAcknowledged: 3,
+            largestSent: 5,
+            sentTime: self.t0,
+            now: self.t0
+        )
         cubic.endAck(now: self.t0)
         // 12000 · 0.7, and no growth for the ACK frame with the marks.
         XCTAssertEqual(cubic.state.congestionWindow, 8400)
@@ -285,7 +292,14 @@ final class CoreCongestionControlTests: XCTestCase {
         prague.smoothedRTT = .milliseconds(15)
         prague.send(6)
         prague.acknowledge(6, sentTime: self.t0)
-        prague.ecn(newlyCE: 1, newlyAcknowledged: 6, largestAcknowledged: 5, largestSent: 5, sentTime: self.t0, now: self.t0)
+        prague.ecn(
+            newlyCE: 1,
+            newlyAcknowledged: 6,
+            largestAcknowledged: 5,
+            largestSent: 5,
+            sentTime: self.t0,
+            now: self.t0
+        )
         // α = 15/16 + 1/16 · 1/6 of a window of 12000 halved is 5687: 6313. The 5 unmarked
         // packets grow it by (15 ms / 20 ms)² per RTT: 6826.
         XCTAssertEqual(prague.state.congestionWindow, 6313)
@@ -304,7 +318,14 @@ final class CoreCongestionControlTests: XCTestCase {
         prague.smoothedRTT = .milliseconds(15)
         prague.send(6)
         prague.acknowledge(4, sentTime: self.t0)
-        prague.ecn(newlyCE: 1, newlyAcknowledged: 4, largestAcknowledged: 3, largestSent: 5, sentTime: self.t0, now: self.t0)
+        prague.ecn(
+            newlyCE: 1,
+            newlyAcknowledged: 4,
+            largestAcknowledged: 3,
+            largestSent: 5,
+            sentTime: self.t0,
+            now: self.t0
+        )
         prague.endAck(now: self.t0)
         // 12000 less α/2 with α from 1 of 4 marked: 6282, grown for 3 unmarked: 6582.
         XCTAssertEqual(prague.available, 4582)
@@ -312,7 +333,14 @@ final class CoreCongestionControlTests: XCTestCase {
         let scaledAlpha = prague.controller.scaledAlpha
 
         prague.acknowledge(2, sentTime: self.t0)
-        prague.ecn(newlyCE: 1, newlyAcknowledged: 2, largestAcknowledged: 5, largestSent: 5, sentTime: self.t0, now: self.t0)
+        prague.ecn(
+            newlyCE: 1,
+            newlyAcknowledged: 2,
+            largestAcknowledged: 5,
+            largestSent: 5,
+            sentTime: self.t0,
+            now: self.t0
+        )
         prague.endAck(now: self.t0)
         // The same round: no reduction, α waits for the round to end; one unmarked packet grows.
         XCTAssertEqual(prague.available, 6664)
@@ -322,7 +350,14 @@ final class CoreCongestionControlTests: XCTestCase {
         let later = self.t0.advanced(by: .milliseconds(15))
         prague.send(1)
         prague.acknowledge(1, sentTime: later)
-        prague.ecn(newlyCE: 0, newlyAcknowledged: 1, largestAcknowledged: 6, largestSent: 6, sentTime: later, now: later)
+        prague.ecn(
+            newlyCE: 0,
+            newlyAcknowledged: 1,
+            largestAcknowledged: 6,
+            largestSent: 6,
+            sentTime: later,
+            now: later
+        )
         prague.endAck(now: later)
         XCTAssertEqual(prague.controller.alpha, (scaledAlpha - (scaledAlpha >> 4) + (1 << 20) / 3) >> 4)
     }
@@ -391,8 +426,39 @@ final class CoreCongestionControlTests: XCTestCase {
         newReno.send(1)
         newReno.lose(sentTime: self.t0, now: self.t0)
         XCTAssertEqual(newReno.state.congestionWindow, 6000)
-        newReno.ecn(newlyCE: 1, newlyAcknowledged: 1, largestAcknowledged: 1, largestSent: 1, sentTime: self.t0, now: self.t0)
+        newReno.ecn(
+            newlyCE: 1,
+            newlyAcknowledged: 1,
+            largestAcknowledged: 1,
+            largestSent: 1,
+            sentTime: self.t0,
+            now: self.t0
+        )
         XCTAssertEqual(newReno.state.congestionWindow, 6000, "the same recovery period")
+    }
+
+    func testNewRenoDoesntGrowAWindowItDoesntUse() {
+        var newReno = Driver<CoreNewReno>()
+        newReno.smoothedRTT = .milliseconds(10)
+        newReno.state.congestionWindow = 100_000
+        // A few RTTs of 2400 bytes each: far below the window (RFC 9002 Section 7.8).
+        var now = self.t0
+        for _ in 0..<5 {
+            now = now.advanced(by: .milliseconds(11))
+            newReno.send(2, bytes: 1200)
+            newReno.acknowledge(2, bytes: 1200, sentTime: now)
+            newReno.endAck(now: now)
+        }
+        XCTAssertEqual(newReno.controller.pipeAck.value, 2400)
+        XCTAssertEqual(newReno.state.congestionWindow, 100_000 + 2400, "only the first ACK grew it")
+        // A window that is used grows again.
+        for _ in 0..<3 {
+            now = now.advanced(by: .milliseconds(11))
+            newReno.send(50, bytes: 1200)
+            newReno.acknowledge(50, bytes: 1200, sentTime: now)
+            newReno.endAck(now: now)
+        }
+        XCTAssertGreaterThan(newReno.state.congestionWindow, 100_000 + 2400)
     }
 
     // MARK: Persistent congestion
@@ -433,7 +499,11 @@ final class CoreCongestionControlTests: XCTestCase {
         return recovery
     }
 
-    private func acknowledge(_ ranges: [ClosedRange<UInt64>], at time: Int64, _ recovery: inout CoreRecovery)
+    private func acknowledge(
+        _ ranges: [ClosedRange<UInt64>],
+        at time: Int64,
+        _ recovery: inout CoreRecovery
+    )
         -> CoreRecovery.AckResult
     {
         let now = self.t0.advanced(by: .milliseconds(time))
@@ -502,7 +572,9 @@ final class CoreCongestionControlTests: XCTestCase {
         XCTAssertEqual(result.lost.map(\.packetNumber), [1, 2, 3])
         XCTAssertFalse(result.congestionLoss)
         XCTAssertNil(recovery.congestionRecoveryStartTime)
-        XCTAssertEqual(recovery.congestionWindow, window + 1200, "the acknowledged probe still counts")
+        // No reduction. Nor growth: four packets in 300 ms don't use the window (RFC 9002
+        // Section 7.8).
+        XCTAssertEqual(recovery.congestionWindow, window)
     }
 
     func testThePeriodDoesntStartAtALostProbe() {
