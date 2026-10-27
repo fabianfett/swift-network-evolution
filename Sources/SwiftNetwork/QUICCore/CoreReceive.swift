@@ -78,8 +78,15 @@ extension QUICConnectionCore {
         case .closed, .draining:
             return
         case .closing:
-            // Answer with the CONNECTION_CLOSE again.
-            self.closeFrameSentInState = false
+            // What arrives counts toward the anti-amplification limit, which the CONNECTION_CLOSE
+            // respects too. The close goes out again at a decreasing rate, in answer to the 1st,
+            // 2nd, 4th, 8th... datagram, so a flood can't make us send as much (RFC 9000 Section
+            // 10.2.1).
+            self.bytesReceived &+= datagram.count
+            self.datagramsReceivedWhileClosing &+= 1
+            if self.datagramsReceivedWhileClosing & (self.datagramsReceivedWhileClosing &- 1) == 0 {
+                self.closeFrameSentInState = false
+            }
             return
         case .handshaking, .established:
             break

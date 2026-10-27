@@ -888,6 +888,58 @@ final class QUICConnectionCoreProtocolViolationTests: XCTestCase {
         XCTAssertEqual(pair.server?.closeReason, .peer(errorCode: 3, isApplication: true, reason: "done"))
     }
 
+    func testAClosingServerRespectsTheAmplificationLimitAndAnswersAFloodRarely() {
+        // The server's first datagram uses up three times the client's Initial.
+        var serverConfiguration = QUICConnectionCore.Configuration(tlsOptions: SwiftTLSProtocol.Options())
+        serverConfiguration.maxDatagramSize = 3600
+        serverConfiguration.initialDatagramSize = 3600
+        let pair = LockstepPair(serverConfiguration: serverConfiguration)
+        var client = pair.client
+        let now = pair.now
+        let initial = LockstepPair.drain(&client, now: now)
+        let ids = LockstepPair.connectionIDs(ofInitial: initial[0])
+        var server = QUICConnectionCore(
+            serverWith: pair.serverConfiguration,
+            localConnectionID: QUICConnectionID(8),
+            originalDestinationConnectionID: ids.destination,
+            peerConnectionID: ids.source,
+            now: now
+        )
+        var received = 0
+        var sent = 0
+        func deliver(_ datagram: [UInt8], to server: inout QUICConnectionCore) {
+            var datagram = datagram
+            var span = datagram.mutableSpan
+            server.receive(&span, now: now)
+            received += datagram.count
+        }
+        func drain(_ server: inout QUICConnectionCore) -> Int {
+            let datagrams = LockstepPair.drain(&server, now: now)
+            sent += datagrams.reduce(0) { $0 + $1.count }
+            return datagrams.count
+        }
+        for datagram in initial {
+            deliver(datagram, to: &server)
+        }
+        XCTAssertGreaterThan(drain(&server), 0)
+        XCTAssertEqual(sent, 3 * received, "the handshake used up the budget")
+        // The server closes before the client's address is validated.
+        server.close(errorCode: 1, isApplication: true, now: now)
+        XCTAssertEqual(drain(&server), 0, "a CONNECTION_CLOSE would exceed the limit")
+        var replies = 0
+        var exceededTheLimit = false
+        for _ in 0..<1000 {
+            deliver([0x40] + [UInt8](repeating: 0x5a, count: 20), to: &server)
+            replies += drain(&server)
+            exceededTheLimit = exceededTheLimit || sent > 3 * received
+        }
+        XCTAssertFalse(exceededTheLimit, "the server sent more than three times what it received")
+        XCTAssertGreaterThan(replies, 0, "the server never answered with CONNECTION_CLOSE")
+        // About one answer, a packet per space, for each doubling of the datagrams received.
+        XCTAssertLessThanOrEqual(replies, 2 * 11)
+        XCTAssertTrue(server.isTerminating)
+    }
+
     func testADrainingEndpointSendsNothing() {
         var pair = self.connectedPair()
         pair.client.close(errorCode: 3, isApplication: true, now: pair.now)

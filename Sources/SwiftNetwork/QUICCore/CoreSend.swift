@@ -97,26 +97,18 @@ extension QUICConnectionCore {
         case .closed, .draining:
             return nil
         case .closing:
-            guard let length = self.sendClose(into: &buffer, now: now) else { return nil }
+            guard let length = self.sendClose(into: &buffer, budget: self.amplificationLimit, now: now) else {
+                return nil
+            }
+            self.bytesSent &+= length
             self.lastDatagramECN = .nonECT
             return length
         case .handshaking, .established:
             break
         }
 
-        var capacity = buffer.count
-        if self.isServer && !self.addressValidated {
-            // Anti-amplification: at most three times what the client sent.
-            let budget = 3 &* self.bytesReceived &- self.bytesSent
-            guard budget > 0 else { return nil }
-            capacity = min(capacity, budget)
-        }
-        if self.activePath != .initial {
-            // The same holds on a path the client moved to, until it is validated.
-            let budget = self.amplificationBudget(on: self.activePath)
-            guard budget > 0 else { return nil }
-            capacity = min(capacity, budget)
-        }
+        let capacity = min(buffer.count, self.amplificationLimit)
+        guard capacity > 0 else { return nil }
         if let probeSize = self.pmtudProbeSize(limit: capacity),
             let length = self.sendPMTUDProbe(size: probeSize, into: &buffer, now: now)
         {
@@ -253,6 +245,21 @@ extension QUICConnectionCore {
             || self.paths.active.hasProbingFramesToSend
             || !self.datagramsToSend.isEmpty || self.hasConnectionIDFramesToSend || self.hasSendableStreams
             || self.hasInjectedFrames
+    }
+
+    /// The bytes the anti-amplification limit lets a server send on the active path: at most
+    /// three times what the client sent, until the client's address is validated (RFC 9000
+    /// Section 8.1). The same holds on a path the client moved to, until it is validated. That
+    /// includes CONNECTION_CLOSE (RFC 9000 Section 10.2.1).
+    var amplificationLimit: Int {
+        var limit = Int.max
+        if self.isServer && !self.addressValidated {
+            limit = max(0, 3 &* self.bytesReceived &- self.bytesSent)
+        }
+        if self.activePath != .initial {
+            limit = min(limit, self.amplificationBudget(on: self.activePath))
+        }
+        return limit
     }
 
     /// Whether 1-RTT data goes out in 0-RTT packets, as the client has no 1-RTT keys yet.
@@ -653,13 +660,13 @@ extension QUICConnectionCore {
         let wrotePathFrames =
             !earlyData
             && self.writePathFrames(
-            for: self.activePath,
-            into: &writer,
-            limit: limit,
-            frames: &frames,
-            isAckEliciting: &isAckEliciting,
-            now: now
-        )
+                for: self.activePath,
+                into: &writer,
+                limit: limit,
+                frames: &frames,
+                isAckEliciting: &isAckEliciting,
+                now: now
+            )
         if self.pingPending && !earlyData && writer.offset < limit {
             _ = writer.uint8(0x01)
             self.pingPending = false
@@ -851,7 +858,13 @@ extension QUICConnectionCore {
 
     // MARK: Closing
 
-    private mutating func sendClose(into buffer: inout MutableSpan<UInt8>, now: NetworkClock.Instant) -> Int? {
+    /// Writes the next datagram with CONNECTION_CLOSE, at most `budget` bytes long. A close
+    /// that doesn't fit the budget waits until more arrives from the peer.
+    private mutating func sendClose(
+        into buffer: inout MutableSpan<UInt8>,
+        budget: Int,
+        now: NetworkClock.Instant
+    ) -> Int? {
         guard let close = self.pendingClose else { return nil }
         if !self.closeFrameSentInState {
             self.closeFrameSentInState = true
@@ -859,10 +872,18 @@ extension QUICConnectionCore {
         }
         // One datagram per space: some receivers drop the rest of a datagram after a packet they
         // can't decrypt, which a coalesced close in a space the peer already dropped would be.
-        let limit = min(buffer.count, self.maxDatagramSize)
+        let limit = min(buffer.count, self.maxDatagramSize, budget)
+        guard limit > 64 else { return nil }
         while let space = self.closeSpacesToSend.first {
             self.closeSpacesToSend.removeFirst()
-            if let length = self.writeClosePacket(close, in: space, into: &buffer, at: 0, maximumLength: limit, now: now) {
+            if let length = self.writeClosePacket(
+                close,
+                in: space,
+                into: &buffer,
+                at: 0,
+                maximumLength: limit,
+                now: now
+            ) {
                 return length
             }
         }

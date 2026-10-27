@@ -308,6 +308,8 @@ public struct QUICConnectionCore: ~Copyable {
     var probesPending = [0, 0, 0]
     var pendingClose: PendingClose?
     var closeFrameSentInState = false
+    /// The datagrams that arrived since the connection started closing.
+    var datagramsReceivedWhileClosing = 0
     /// The spaces whose CONNECTION_CLOSE didn't go out yet, oldest first.
     var closeSpacesToSend: [PacketNumberSpace] = []
     /// Why the connection is closing, draining or closed; `nil` while it is open.
@@ -667,6 +669,7 @@ public struct QUICConnectionCore: ~Copyable {
     mutating func startClosing(_ close: PendingClose, now: NetworkClock.Instant) {
         self.pendingClose = close
         self.closeFrameSentInState = false
+        self.datagramsReceivedWhileClosing = 0
         let pto = self.recovery.probeTimeout(includingMaxAckDelay: true)
         self.state = .closing(until: now.advanced(by: pto * 3))
         // The handshake is over: CONNECTION_CLOSE only needs the keys, which the protector has.
